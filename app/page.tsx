@@ -30,10 +30,34 @@ const categories = [
   { name: "Rings", count: "24 pieces", image: "https://images.unsplash.com/photo-1605100804763-247f67b3557e?auto=format&fit=crop&w=700&q=85" },
 ];
 
-const formatINR = (value: number) => `₹${value.toLocaleString("en-IN")}`;
+const formatINR = (value: number) => `₹${(Number.isFinite(value) ? value : 0).toLocaleString("en-IN")}`;
 const defaultHeroImage = "https://images.unsplash.com/photo-1599643478518-a784e5dc4c8f?auto=format&fit=crop&w=1200&q=90";
 const siteBasePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 const siteAsset = (name: string) => `${siteBasePath}/${name}`;
+const productTones = ["#d9c4bc", "#dad7ce", "#d0c2b0", "#e5ddd1"];
+
+function normalizeStoredProduct(value: unknown, index: number): Product | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const fallback = defaultProducts[index % defaultProducts.length];
+  const name = typeof raw.name === "string" ? raw.name.trim() : "";
+  if (!name) return null;
+  const rawPrice = raw.price;
+  const price = typeof rawPrice === "number" ? rawPrice : Number(String(rawPrice ?? "").replace(/[^0-9.]/g, ""));
+  const image = typeof raw.image === "string" && raw.image ? raw.image : fallback.image;
+  const idValue = typeof raw.id === "string" ? raw.id : typeof raw.sku === "string" ? raw.sku : `${name}-${index}`;
+  return {
+    id: idValue.toLowerCase().replace(/[^a-z0-9]+/g, "-") || `product-${index}`,
+    name,
+    category: typeof raw.category === "string" && raw.category ? raw.category : "Uncategorised",
+    price: Number.isFinite(price) ? price : 0,
+    compareAt: typeof raw.compareAt === "number" ? raw.compareAt : undefined,
+    image,
+    hoverImage: typeof raw.hoverImage === "string" && raw.hoverImage ? raw.hoverImage : image,
+    tag: typeof raw.tag === "string" ? raw.tag : undefined,
+    tone: typeof raw.tone === "string" && raw.tone ? raw.tone : productTones[index % productTones.length],
+  };
+}
 
 function ProductCard({ product, wished, onWishlist, onAdd, onQuickView }: { product: Product; wished: boolean; onWishlist: () => void; onAdd: () => void; onQuickView: () => void }) {
   return (
@@ -77,8 +101,10 @@ export default function Home() {
       const stored = window.localStorage.getItem("fanzzy-products");
       if (!stored) return;
       try {
-        const parsed = JSON.parse(stored) as Product[];
-        if (Array.isArray(parsed)) setProducts(parsed);
+        const parsed: unknown = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          setProducts(parsed.map(normalizeStoredProduct).filter((product): product is Product => product !== null));
+        }
       } catch {
         window.localStorage.removeItem("fanzzy-products");
       }

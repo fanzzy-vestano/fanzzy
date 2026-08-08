@@ -197,8 +197,18 @@ function ProductLibraryWorkspace({ onNotify }: { onNotify: (message: string) => 
     const stored = window.localStorage.getItem("fanzzy-products");
     if (!stored) return;
     try {
-      const parsed = JSON.parse(stored) as Array<AdminProduct & { price: number }>;
-      if (Array.isArray(parsed) && parsed.length) setProducts(parsed.map((product) => ({ ...product, price: typeof product.price === "number" ? `₹${product.price.toLocaleString("en-IN")}` : product.price, sku: product.sku || product.id.toUpperCase(), stock: product.stock ?? 0, status: product.status ?? "Published" })));
+      const parsed = JSON.parse(stored) as Array<Partial<AdminProduct> & { id?: string; price?: number | string }>;
+      if (Array.isArray(parsed) && parsed.length) {
+        setProducts(parsed.filter((product) => typeof product.name === "string" && product.name.trim()).map((product, index) => ({
+          name: product.name!.trim(),
+          price: typeof product.price === "number" ? `₹${product.price.toLocaleString("en-IN")}` : product.price || "₹0",
+          sku: product.sku || product.id?.toUpperCase() || `FZ-IMP-${String(index + 1).padStart(2, "0")}`,
+          category: product.category || "Uncategorised",
+          stock: product.stock ?? 0,
+          status: product.status ?? "Published",
+          image: product.image || adminProducts[0].image,
+        })));
+      }
     } catch {
       window.localStorage.removeItem("fanzzy-products");
     }
