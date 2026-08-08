@@ -652,6 +652,10 @@
   padding-right: 8px;
 }
 
+.product-row-actions button:first-child {
+  display: none;
+}
+
 .product-row-actions button {
   border: 1px solid var(--admin-line);
   color: var(--wine);
