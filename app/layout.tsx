@@ -1,8 +1,9 @@
-import type { Metadata } from "next";
+﻿import type { Metadata } from "next";
 import "./globals.css";
+import "./brand-polish.css";
 
 export const metadata: Metadata = {
-  title: "Lustre — Objects of allure",
+  title: "Fanzzy",
   description: "Quietly remarkable jewellery for all your becoming.",
   icons: { icon: "/favicon.svg", shortcut: "/favicon.svg" },
 };
@@ -10,3 +11,6 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return <html lang="en"><body>{children}</body></html>;
 }
+
+
+

@@ -1,0 +1,41 @@
+.hero-copy {
+  max-width: 520px;
+}
+
+.wordmark {
+  align-items: flex-start;
+  line-height: 0.82;
+}
+
+.wordmark small {
+  margin-left: 2px;
+  margin-top: 10px;
+  white-space: nowrap;
+}
+
+.hero .button-light {
+  border-radius: 10px;
+  box-shadow: 0 12px 28px rgba(24, 7, 14, 0.16);
+  min-width: 184px;
+  padding: 16px 20px;
+}
+
+.hero .button-light span {
+  margin-left: auto;
+}
+
+.hero-arch {
+  border-radius: 48% 48% 10px 10px;
+  box-shadow: 0 24px 50px rgba(24, 7, 14, 0.18);
+}
+
+.hero-note,
+.hero-bottom {
+  z-index: 2;
+}
+
+@media (max-width: 760px) {
+  .hero .button-light {
+    min-width: 174px;
+  }
+}

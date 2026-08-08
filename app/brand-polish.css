@@ -1,0 +1,55 @@
+.wordmark .brand-logo {
+  display: block;
+  flex-shrink: 0;
+  height: 84px;
+  object-fit: contain;
+  width: 84px;
+}
+
+.site-header .brand-logo {
+  transform: scale(1.4);
+  transform-origin: center;
+}
+
+.footer-brand .brand-logo {
+  height: 132px;
+  width: 132px;
+}
+
+.overlay-top .brand-logo {
+  height: 110px;
+  transform: scale(1.2);
+  transform-origin: center;
+  width: 110px;
+}
+
+.admin-brand .wordmark {
+  gap: 3px;
+}
+
+.admin-brand .brand-logo {
+  background: #fff;
+  border-radius: 5px;
+  height: 112px;
+  object-fit: contain;
+  padding: 2px;
+  transform: scale(1.25);
+  transform-origin: center;
+  width: 112px;
+}
+
+.admin-brand .wordmark small {
+  margin-left: 4px;
+}
+
+@media (max-width: 760px) {
+  .wordmark .brand-logo {
+    height: 68px;
+    width: 68px;
+  }
+
+  .footer-brand .brand-logo {
+    height: 100px;
+    width: 100px;
+  }
+}

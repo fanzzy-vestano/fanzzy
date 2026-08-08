@@ -1,4 +1,4 @@
-# Lustre
+﻿# Fanzzy
 
 Premium jewellery storefront and control room built with Next.js, TypeScript, Tailwind CSS, and a Cloudflare-compatible Vinext starter.
 
@@ -16,3 +16,5 @@ The current implementation is a polished, interactive vertical slice with a cent
 ## Production extension points
 
 The UI is ready to connect to Prisma/Drizzle models for products, variants, inventory, carts, orders, coupons, shipping rules, reviews, banners, homepage sections, and audit logs. Keep secrets in environment variables and perform authoritative pricing, coupon, inventory, and payment verification on the server.
+
+
