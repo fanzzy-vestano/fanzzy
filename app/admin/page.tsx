@@ -3,6 +3,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Eye, Pencil, Trash2 } from "lucide-react";
+import { fetchCatalogCategories, fetchCatalogProducts, fetchStoreSetting, isSupabaseReady, removeCatalogCategory, removeCatalogProduct, renameCatalogCategory, saveCatalogCategory, saveCatalogProduct, saveStoreSetting, uploadStoreImage } from "../../lib/supabase/catalog";
 import "../globals.css";
 import "../brand-polish.css";
 import "./admin.css";
@@ -28,12 +29,56 @@ const createSku = (name: string, category: string, existing: AdminProduct[]) => 
   while (existing.some((product) => product.sku === sku)) { number += 1; sku = `FZ-${prefix}-${String(number).padStart(3, "0")}`; }
   return sku;
 };
+const makeLocalImage = (file: File) => new Promise<string>((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onerror = () => reject(reader.error ?? new Error("Could not read image"));
+  reader.onload = () => {
+    const image = new window.Image();
+    image.onerror = () => reject(new Error("Could not process image"));
+    image.onload = () => {
+      const maxSize = 1000;
+      const scale = Math.min(1, maxSize / Math.max(image.naturalWidth, image.naturalHeight));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+      canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+      canvas.getContext("2d")?.drawImage(image, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL("image/webp", 0.72));
+    };
+    image.src = String(reader.result);
+  };
+  reader.readAsDataURL(file);
+});
 const persistCatalog = (catalog: AdminProduct[]) => {
   if (typeof window === "undefined") return;
   const tones = ["#d9c4bc", "#dad7ce", "#d0c2b0", "#e5ddd1"];
   const storefrontCatalog = catalog.map((product, index) => ({ id: product.sku.toLowerCase().replace(/[^a-z0-9]+/g, "-"), name: product.name, sku: product.sku, category: product.category, stock: product.stock, status: product.status, price: Number(product.price.replace(/[^0-9]/g, "")) || 0, image: product.image, hoverImage: product.image, tag: product.status === "Draft" ? "Draft" : undefined, tone: tones[index % tones.length] }));
-  window.localStorage.setItem("fanzzy-products", JSON.stringify(storefrontCatalog));
+  try {
+    window.localStorage.setItem("fanzzy-products", JSON.stringify(storefrontCatalog));
+  } catch {
+    // A large data URL must never crash the admin page when local storage is full.
+    const compactCatalog = storefrontCatalog.map((product) => product.image.startsWith("data:") ? { ...product, image: "", hoverImage: "" } : product);
+    try {
+      window.localStorage.setItem("fanzzy-products", JSON.stringify(compactCatalog));
+    } catch {
+      try { window.localStorage.removeItem("fanzzy-products"); } catch { /* storage is unavailable */ }
+    }
+  }
   window.dispatchEvent(new Event("fanzzy-products-updated"));
+};
+const toCatalogProduct = (product: AdminProduct) => ({
+  name: product.name,
+  sku: product.sku,
+  category: product.category,
+  stock: product.stock,
+  price: Number(product.price.replace(/[^0-9.]/g, "")) || 0,
+  status: product.status,
+  image: product.image,
+  hoverImage: product.image,
+});
+const persistCategories = (categories: Array<{ name: string; pieces: number }>) => {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem("fanzzy-categories", JSON.stringify(categories));
+  window.dispatchEvent(new Event("fanzzy-categories-updated"));
 };
 const menu = [{ label: "Overview", icon: "◌" }, { label: "Products", icon: "◇", count: "24" }, { label: "Categories", icon: "▦" }, { label: "Collections", icon: "✧" }, { label: "Orders", icon: "↗", count: "12" }, { label: "Customers", icon: "♧" }, { label: "Marketing", icon: "◈" }, { label: "Homepage", icon: "⌂" }];
 
@@ -77,18 +122,30 @@ function AnnouncementPanel({ onNotify }: { onNotify: (message: string) => void }
   const [text, setText] = useState("Complimentary shipping on orders above ₹999");
 
   useEffect(() => {
-    const stored = window.localStorage.getItem("fanzzy-announcement");
-    if (stored !== null) setText(stored);
+    let active = true;
+    const loadAnnouncement = async () => {
+      const remote = await fetchStoreSetting("announcement");
+      if (active && !remote.error && remote.value !== null) {
+        setText(remote.value);
+        window.localStorage.setItem("fanzzy-announcement", remote.value);
+        return;
+      }
+      const stored = window.localStorage.getItem("fanzzy-announcement");
+      if (active && stored !== null) setText(stored);
+    };
+    void loadAnnouncement();
+    return () => { active = false; };
   }, []);
 
-  const saveAnnouncement = () => {
+  const saveAnnouncement = async () => {
     const nextText = text.trim();
+    const remoteError = await saveStoreSetting("announcement", nextText);
     window.localStorage.setItem("fanzzy-announcement", nextText);
     window.dispatchEvent(new Event("fanzzy-announcement-updated"));
-    onNotify("Announcement updated on storefront");
+    onNotify(remoteError ? "Saved locally; Supabase needs its tables" : "Announcement updated on storefront");
   };
 
-  return <section className="panel announcement-panel"><div><p className="eyebrow">STOREFRONT CONTENT</p><h2>Announcement bar</h2><p className="announcement-panel-copy">Edit the message shown above the Fanzzy header. Changes are saved for this browser and update the storefront instantly.</p></div><div className="announcement-editor"><input value={text} onChange={(event) => setText(event.target.value)} aria-label="Announcement bar text" /><button className="announcement-save" onClick={saveAnnouncement}>Save message</button></div></section>;
+  return <section className="panel announcement-panel"><div><p className="eyebrow">STOREFRONT CONTENT</p><h2>Announcement bar</h2><p className="announcement-panel-copy">Edit the message shown above the Fanzzy header. Changes are saved to the shared storefront settings.</p></div><div className="announcement-editor"><input value={text} onChange={(event) => setText(event.target.value)} aria-label="Announcement bar text" /><button className="announcement-save" onClick={saveAnnouncement}>Save message</button></div></section>;
 }
 
 const moduleContent: Record<string, { eyebrow: string; title: string; description: string; primary: string; secondary: string; rows: string[] }> = {
@@ -113,25 +170,49 @@ function ModuleWorkspace({ module, onNotify }: { module: string; onNotify: (mess
 function HomepageWorkspace({ onNotify }: { onNotify: (message: string) => void }) {
   const [heroImage, setHeroImage] = useState(defaultHeroImage);
   const [pendingImage, setPendingImage] = useState(defaultHeroImage);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
 
   useEffect(() => {
-    const stored = window.localStorage.getItem("fanzzy-hero-image");
-    if (stored) { setHeroImage(stored); setPendingImage(stored); }
+    let active = true;
+    const loadHeroImage = async () => {
+      const remote = await fetchStoreSetting("heroImage");
+      const stored = remote.value || window.localStorage.getItem("fanzzy-hero-image");
+      if (active && stored) { setHeroImage(stored); setPendingImage(stored); }
+    };
+    void loadHeroImage();
+    return () => { active = false; };
   }, []);
 
   const uploadHeroImage = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
+    setPendingFile(file);
     const reader = new FileReader();
     reader.onload = () => setPendingImage(String(reader.result));
     reader.readAsDataURL(file);
   };
 
-  const saveHeroImage = () => {
-    window.localStorage.setItem("fanzzy-hero-image", pendingImage);
+  const saveHeroImage = async () => {
+    let nextImage = pendingImage;
+    let imageSavedLocally = false;
+    if (pendingFile) {
+      try { nextImage = await makeLocalImage(pendingFile); } catch { /* keep the preview */ }
+      if (isSupabaseReady) {
+        const upload = await uploadStoreImage(pendingFile, "homepage");
+        if (upload.error || !upload.url) {
+          imageSavedLocally = true;
+        } else {
+          nextImage = upload.url;
+        }
+      }
+    }
+    const remoteError = await saveStoreSetting("heroImage", nextImage);
+    window.localStorage.setItem("fanzzy-hero-image", nextImage);
     window.dispatchEvent(new Event("fanzzy-hero-updated"));
-    setHeroImage(pendingImage);
-    onNotify("Homepage hero image updated");
+    setHeroImage(nextImage);
+    setPendingImage(nextImage);
+    setPendingFile(null);
+    onNotify(remoteError ? "Image saved locally; Supabase needs setup" : imageSavedLocally ? "Homepage image saved locally until storage is connected" : "Homepage hero image updated");
   };
 
   return <section className="panel module-workspace homepage-workspace"><div className="module-workspace-head"><div><p className="eyebrow">CONTENT</p><h2>Homepage builder</h2><p>Control the hero image and featured sections shown on the Fanzzy storefront.</p></div><div className="module-actions"><button className="module-secondary" onClick={() => window.location.assign("/")}>Preview homepage ↗</button><button className="module-primary" onClick={saveHeroImage}>Save changes</button></div></div><div className="homepage-hero-editor"><div className="homepage-hero-preview"><img src={pendingImage} alt="Homepage hero preview" /></div><div className="homepage-hero-copy"><p className="eyebrow">HERO BANNER</p><h3>Front page image</h3><p>Upload a new image to replace the main hero photo on the front page.</p><label className="hero-upload-button">Choose image<input type="file" accept="image/png,image/jpeg,image/webp" onChange={uploadHeroImage} /></label><small>{heroImage === pendingImage ? "Current image" : "Unsaved image change"}</small></div></div><div className="module-summary"><span><i className="status-light" />Live storefront sync</span><span>Hero banner · Enabled</span></div></section>;
@@ -149,13 +230,32 @@ function CategoryWorkspace({ onNotify }: { onNotify: (message: string) => void }
   const [selectedCategory, setSelectedCategory] = useState<{ name: string; pieces: number } | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState("");
-  const saveCategory = () => {
+  useEffect(() => {
+    let active = true;
+    const loadCategories = async () => {
+      const remote = await fetchCatalogCategories();
+      if (active && !remote.error && remote.data) {
+        setCategories(remote.data.map((category) => ({ name: category.name, pieces: category.pieces })));
+        persistCategories(remote.data.map((category) => ({ name: category.name, pieces: category.pieces })));
+        return;
+      }
+      const stored = window.localStorage.getItem("fanzzy-categories");
+      if (active && stored) {
+        try { setCategories(JSON.parse(stored)); } catch { window.localStorage.removeItem("fanzzy-categories"); }
+      }
+    };
+    void loadCategories();
+    return () => { active = false; };
+  }, []);
+  const saveCategory = async () => {
     if (!name.trim()) return onNotify("Category name is required");
     const category = { name: name.trim(), pieces: 0 };
+    const remoteError = await saveCatalogCategory(category);
     setCategories((current) => [...current, category]);
+    persistCategories([...categories, category]);
     setName("");
     setIsAdding(false);
-    onNotify(`${category.name} category added`);
+    onNotify(remoteError ? "Category saved locally; Supabase needs its tables" : `${category.name} category added`);
   };
   const openCategory = (category: { name: string; pieces: number }) => {
     setSelectedCategory(category);
@@ -167,19 +267,23 @@ function CategoryWorkspace({ onNotify }: { onNotify: (message: string) => void }
     setEditName(category.name);
     setIsEditing(true);
   };
-  const saveCategoryEdit = () => {
+  const saveCategoryEdit = async () => {
     if (!selectedCategory || !editName.trim()) return onNotify("Category name is required");
     const updatedCategory = { ...selectedCategory, name: editName.trim() };
+    const remoteError = await renameCatalogCategory(selectedCategory.name, updatedCategory);
     setCategories((current) => current.map((category) => category.name === selectedCategory.name ? updatedCategory : category));
+    persistCategories(categories.map((category) => category.name === selectedCategory.name ? updatedCategory : category));
     setSelectedCategory(updatedCategory);
     setIsEditing(false);
-    onNotify(`${updatedCategory.name} category updated`);
+    onNotify(remoteError ? "Category saved locally; Supabase needs its tables" : `${updatedCategory.name} category updated`);
   };
-  const deleteCategory = (category: { name: string; pieces: number }) => {
+  const deleteCategory = async (category: { name: string; pieces: number }) => {
     if (!window.confirm(`Delete ${category.name}?`)) return;
+    const remoteError = await removeCatalogCategory(category.name);
     setCategories((current) => current.filter((item) => item.name !== category.name));
+    persistCategories(categories.filter((item) => item.name !== category.name));
     if (selectedCategory?.name === category.name) setSelectedCategory(null);
-    onNotify(`${category.name} category deleted`);
+    onNotify(remoteError ? "Category deleted locally; Supabase needs its tables" : `${category.name} category deleted`);
   };
   return <section className="panel module-workspace"><div className="module-workspace-head"><div><p className="eyebrow">CATALOG</p><h2>Categories</h2><p>Keep collections easy to browse with clear category structure.</p></div><div className="module-actions"><button className="module-secondary" onClick={() => onNotify("Category reorder mode opened")}>Reorder ↗</button><button className="module-primary" onClick={() => setIsAdding(true)}>+ Add category</button></div></div>{isAdding && <div className="product-modal-backdrop" onClick={() => setIsAdding(false)}><div className="product-form-card product-modal-card category-modal-card" role="dialog" aria-modal="true" aria-labelledby="add-category-title" onClick={(event) => event.stopPropagation()}><button className="product-modal-close" aria-label="Close add category form" onClick={() => setIsAdding(false)}>×</button><p className="eyebrow">NEW CATEGORY</p><h3 id="add-category-title">Add a category</h3><div className="product-form-grid category-form-grid"><label>Category name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Anklets" /></label></div><div className="product-detail-actions"><button className="module-primary" onClick={saveCategory}>Save category</button><button className="module-secondary" onClick={() => setIsAdding(false)}>Cancel</button></div></div></div>}<div className="module-summary"><span><i className="status-light" />Live workspace</span><span>{categories.length} active categories</span></div><div className="module-list">{categories.map((category, index) => <div key={`${category.name}-${index}`} className={`category-list-row ${selectedCategory?.name === category.name ? "selected" : ""}`}><button className="category-list-main" onClick={() => openCategory(category)}><span className="module-row-number">{String(index + 1).padStart(2, "0")}</span><strong>{category.name}</strong><small>{category.pieces} pieces</small><b>↗</b></button><div className="product-row-actions"><button onClick={() => openCategory(category)} aria-label={`View ${category.name}`} title="View category"><Eye size={15} strokeWidth={1.8} aria-hidden="true" /></button><button onClick={() => startEditingCategory(category)} aria-label={`Edit ${category.name}`} title="Edit category"><Pencil size={15} strokeWidth={1.8} aria-hidden="true" /></button><button className="delete-action" onClick={() => deleteCategory(category)} aria-label={`Delete ${category.name}`} title="Delete category"><Trash2 size={15} strokeWidth={1.8} aria-hidden="true" /></button></div></div>)}</div>{selectedCategory && isEditing && <div className="product-form-card category-edit-card"><p className="eyebrow">EDIT CATEGORY</p><h3>Edit {selectedCategory.name}</h3><div className="product-form-grid category-form-grid"><label>Category name<input value={editName} onChange={(event) => setEditName(event.target.value)} /></label></div><div className="product-detail-actions"><button className="module-primary" onClick={saveCategoryEdit}>Save changes</button><button className="module-secondary" onClick={() => setIsEditing(false)}>Cancel</button></div></div>}{selectedCategory && !isEditing && <div className="product-detail-card category-detail-card"><div className="product-detail-copy"><p className="eyebrow">CATEGORY DETAILS</p><h3>{selectedCategory.name}</h3><p className="product-detail-meta">Jewellery category</p><div className="product-detail-actions"><button className="module-primary" onClick={() => startEditingCategory(selectedCategory)}>Edit category</button><button className="module-secondary" onClick={() => setSelectedCategory(null)}>Close</button></div></div></div>}</section>;
 }
@@ -191,52 +295,93 @@ function ProductLibraryWorkspace({ onNotify }: { onNotify: (message: string) => 
   const [isEditing, setIsEditing] = useState(false);
   const [editValues, setEditValues] = useState({ name: "", category: "", price: "", stock: "", sku: "" });
   const [newProductImage, setNewProductImage] = useState(adminProducts[0].image);
+  const [newProductFile, setNewProductFile] = useState<File | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [newProduct, setNewProduct] = useState({ name: "", category: "Earrings", price: "₹", stock: "", sku: "" });
   useEffect(() => {
-    const stored = window.localStorage.getItem("fanzzy-products");
-    if (!stored) return;
-    try {
-      const parsed = JSON.parse(stored) as Array<Partial<AdminProduct> & { id?: string; price?: number | string }>;
-      if (Array.isArray(parsed) && parsed.length) {
-        setProducts(parsed.filter((product) => typeof product.name === "string" && product.name.trim()).map((product, index) => ({
-          name: product.name!.trim(),
-          price: typeof product.price === "number" ? `₹${product.price.toLocaleString("en-IN")}` : product.price || "₹0",
-          sku: product.sku || product.id?.toUpperCase() || `FZ-IMP-${String(index + 1).padStart(2, "0")}`,
-          category: product.category || "Uncategorised",
-          stock: product.stock ?? 0,
-          status: product.status ?? "Published",
+    let active = true;
+    const loadProducts = async () => {
+      const remote = await fetchCatalogProducts();
+      if (active && !remote.error && remote.data && remote.data.length) {
+        const mapped = remote.data.map((product) => ({
+          name: product.name,
+          price: `₹${product.price.toLocaleString("en-IN")}`,
+          sku: product.sku,
+          category: product.category,
+          stock: product.stock,
+          status: product.status,
           image: product.image || adminProducts[0].image,
-        })));
+        }));
+        setProducts(mapped);
+        persistCatalog(mapped);
+        return;
       }
-    } catch {
-      window.localStorage.removeItem("fanzzy-products");
-    }
+      const stored = window.localStorage.getItem("fanzzy-products");
+      if (!stored) return;
+      try {
+        const parsed = JSON.parse(stored) as Array<Partial<AdminProduct> & { id?: string; price?: number | string }>;
+        if (active && Array.isArray(parsed) && parsed.length) {
+          setProducts(parsed.filter((product) => typeof product.name === "string" && product.name.trim()).map((product, index) => ({
+            name: product.name!.trim(),
+            price: typeof product.price === "number" ? `₹${product.price.toLocaleString("en-IN")}` : product.price || "₹0",
+            sku: product.sku || product.id?.toUpperCase() || `FZ-IMP-${String(index + 1).padStart(2, "0")}`,
+            category: product.category || "Uncategorised",
+            stock: product.stock ?? 0,
+            status: product.status ?? "Published",
+            image: product.image || adminProducts[0].image,
+          })));
+        }
+      } catch {
+        window.localStorage.removeItem("fanzzy-products");
+      }
+    };
+    void loadProducts();
+    return () => { active = false; };
   }, []);
   const updateField = (field: keyof typeof newProduct, value: string) => setNewProduct((current) => ({ ...current, [field]: value, ...(field === "name" ? { sku: createSku(value, current.category, products) } : {}) }));
   const openAddProduct = () => {
     setNewProduct({ name: "", category: "Earrings", price: "₹", stock: "", sku: "" });
     setNewProductImage(adminProducts[0].image);
+    setNewProductFile(null);
     setSelectedProduct(null);
     setIsEditing(false);
     setIsAdding(true);
   };
-  const saveProduct = () => {
+  const saveProduct = async () => {
     if (!newProduct.name.trim()) return onNotify("Add a product name");
     const productSku = newProduct.sku.trim() || createSku(newProduct.name, newProduct.category, products);
-    const product: AdminProduct = { name: newProduct.name.trim(), sku: productSku, category: newProduct.category, stock: Number(newProduct.stock) || 0, price: newProduct.price.trim() || "₹0", status: Number(newProduct.stock) > 0 ? "Published" : "Draft", image: newProductImage };
+    let productImage = newProductImage;
+    let imageSavedLocally = false;
+    if (newProductFile) {
+      try { productImage = await makeLocalImage(newProductFile); } catch { /* keep the preview */ }
+      if (isSupabaseReady) {
+        const upload = await uploadStoreImage(newProductFile, "products");
+        if (upload.error || !upload.url) {
+          // Keep the compact preview and finish saving locally when storage is unavailable.
+          imageSavedLocally = true;
+        } else {
+          productImage = upload.url;
+        }
+      }
+    }
+    const product: AdminProduct = { name: newProduct.name.trim(), sku: productSku, category: newProduct.category, stock: Number(newProduct.stock) || 0, price: newProduct.price.trim() || "₹0", status: Number(newProduct.stock) > 0 ? "Published" : "Draft", image: productImage };
+    const remoteError = await saveCatalogProduct(toCatalogProduct(product));
     setProducts((current) => { const next = [...current, product]; persistCatalog(next); return next; });
     setNewProduct({ name: "", category: "Earrings", price: "₹", stock: "", sku: "" });
     setNewProductImage(adminProducts[0].image);
+    setNewProductFile(null);
     setIsAdding(false);
-    onNotify(`${product.name} added to the catalog`);
+    onNotify(remoteError ? imageSavedLocally ? "Product and image saved locally; Supabase needs setup" : "Product saved locally; Supabase needs its tables" : imageSavedLocally ? "Product added; image saved locally until storage is connected" : `${product.name} added to the catalog`);
   };
   const uploadProductImage = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => setNewProductImage(String(reader.result));
-    reader.readAsDataURL(file);
+    setNewProductFile(file);
+    void makeLocalImage(file).then(setNewProductImage).catch(() => {
+      const reader = new FileReader();
+      reader.onload = () => setNewProductImage(String(reader.result));
+      reader.readAsDataURL(file);
+    });
   };
   const startEditing = (product: AdminProduct) => {
     setSelectedProduct(product);
@@ -244,20 +389,23 @@ function ProductLibraryWorkspace({ onNotify }: { onNotify: (message: string) => 
     setIsEditing(true);
     setEditValues({ name: product.name, category: product.category, price: product.price, stock: String(product.stock), sku: product.sku });
   };
-  const saveEdit = () => {
+  const saveEdit = async () => {
     if (!selectedProduct || !editValues.name.trim()) return onNotify("Product name is required");
     const updated: AdminProduct = { ...selectedProduct, name: editValues.name.trim(), category: editValues.category, price: editValues.price.trim() || "₹0", stock: Number(editValues.stock) || 0, sku: editValues.sku.trim() || selectedProduct.sku, status: Number(editValues.stock) > 0 ? "Published" : "Draft" };
+    const remoteError = await saveCatalogProduct(toCatalogProduct(updated));
+    if (!remoteError && updated.sku !== selectedProduct.sku) await removeCatalogProduct(selectedProduct.sku);
     setProducts((current) => { const next = current.map((product) => product.sku === selectedProduct.sku ? updated : product); persistCatalog(next); return next; });
     setSelectedProduct(updated);
     setIsEditing(false);
-    onNotify(`${updated.name} updated`);
+    onNotify(remoteError ? "Product saved locally; Supabase needs its tables" : `${updated.name} updated`);
   };
-  const deleteProduct = (product: AdminProduct) => {
+  const deleteProduct = async (product: AdminProduct) => {
     if (!window.confirm(`Delete ${product.name}?`)) return;
+    const remoteError = await removeCatalogProduct(product.sku);
     setProducts((current) => { const next = current.filter((item) => item.sku !== product.sku); persistCatalog(next); return next; });
     if (selectedProduct?.sku === product.sku) setSelectedProduct(null);
     setIsEditing(false);
-    onNotify(`${product.name} deleted`);
+    onNotify(remoteError ? "Product deleted locally; Supabase needs its tables" : `${product.name} deleted`);
   };
   const importCsv = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -277,7 +425,11 @@ function ProductLibraryWorkspace({ onNotify }: { onNotify: (message: string) => 
       return { name, sku: skuColumn >= 0 && row[skuColumn]?.trim() ? row[skuColumn].trim() : `FZ-IMP-${String(index + 1).padStart(2, "0")}`, category: categoryColumn >= 0 && row[categoryColumn]?.trim() ? row[categoryColumn].trim() : "Uncategorised", price: priceColumn >= 0 && row[priceColumn]?.trim() ? row[priceColumn].trim() : "₹0", stock, status: stock > 0 ? "Published" : "Draft", image: adminProducts[0].image };
     }).filter((product): product is AdminProduct => product !== null);
     if (!imported.length) onNotify("No valid product rows found in CSV");
-    else { setProducts((current) => { const next = [...current, ...imported]; persistCatalog(next); return next; }); onNotify(`${imported.length} product${imported.length === 1 ? "" : "s"} imported`); }
+    else {
+      const remoteErrors = await Promise.all(imported.map((product) => saveCatalogProduct(toCatalogProduct(product))));
+      setProducts((current) => { const next = [...current, ...imported]; persistCatalog(next); return next; });
+      onNotify(remoteErrors.some(Boolean) ? "Imported locally; Supabase needs its tables" : `${imported.length} product${imported.length === 1 ? "" : "s"} imported`);
+    }
     event.target.value = "";
   };
   return <section className="panel module-workspace"><div className="module-workspace-head"><div><p className="eyebrow">CATALOG</p><h2>Product library</h2><p>Create, edit, price, and organise every piece in your storefront.</p></div><div className="module-actions"><input ref={fileInputRef} className="csv-file-input" type="file" accept=".csv,text/csv" onChange={importCsv} /><button className="module-secondary" onClick={() => fileInputRef.current?.click()}>Import CSV ↗</button><button className="module-primary" onClick={openAddProduct}>+ Add product</button></div></div>{isAdding && <div className="product-modal-backdrop" onClick={() => setIsAdding(false)}><div className="product-form-card product-modal-card" role="dialog" aria-modal="true" aria-labelledby="add-product-title" onClick={(event) => event.stopPropagation()}><button className="product-modal-close" aria-label="Close add product form" onClick={() => setIsAdding(false)}>×</button><p className="eyebrow">NEW PRODUCT</p><h3 id="add-product-title">Add a product</h3><div className="product-image-upload"><img src={newProductImage} alt="Product preview" /><label><strong>Upload product image</strong><small>JPG, PNG or WEBP · click to choose</small><input type="file" accept="image/png,image/jpeg,image/webp" onChange={uploadProductImage} /></label></div><div className="product-form-grid"><label>Product name<input value={newProduct.name} onChange={(event) => updateField("name", event.target.value)} placeholder="e.g. Celeste Hoops" /></label><label>SKU<input value={newProduct.sku} onChange={(event) => updateField("sku", event.target.value)} placeholder="FZ-CEL-05" /></label><label>Category<select value={newProduct.category} onChange={(event) => updateField("category", event.target.value)}><option>Earrings</option><option>Necklaces</option><option>Bracelets</option><option>Rings</option></select></label><label>Price<input value={newProduct.price} onChange={(event) => updateField("price", event.target.value)} /></label><label>Stock<input type="number" min="0" value={newProduct.stock} onChange={(event) => updateField("stock", event.target.value)} placeholder="0" /></label></div><div className="product-detail-actions"><button className="module-primary" onClick={saveProduct}>Save product</button><button className="module-secondary" onClick={() => setIsAdding(false)}>Cancel</button></div></div></div>}<div className="module-summary"><span><i className="status-light" />Live workspace</span><span>{products.length} active records</span></div><div className="module-list">{products.map((product, index) => <div key={product.sku} className={`product-list-row ${selectedProduct?.sku === product.sku ? "selected" : ""}`}><button className="product-list-main" onClick={() => { setSelectedProduct(product); setIsAdding(false); setIsEditing(false); onNotify(`${product.name} opened`); }}><span className="module-row-number">{String(index + 1).padStart(2, "0")}</span><strong>{product.name}</strong><small>{product.stock === 0 ? "Draft" : `${product.stock} in stock`} · {product.category}</small></button><div className="product-row-actions"><button onClick={() => { setSelectedProduct(product); setIsAdding(false); setIsEditing(false); onNotify(`${product.name} opened`); }} aria-label={`View ${product.name}`} title="View product"><Eye size={15} strokeWidth={1.8} aria-hidden="true" /></button><button onClick={() => startEditing(product)} aria-label={`Edit ${product.name}`} title="Edit product"><Pencil size={15} strokeWidth={1.8} aria-hidden="true" /></button><button className="delete-action" onClick={() => deleteProduct(product)} aria-label={`Delete ${product.name}`} title="Delete product"><Trash2 size={15} strokeWidth={1.8} aria-hidden="true" /></button></div></div>)}</div>{selectedProduct && isEditing && <div className="product-form-card"><p className="eyebrow">EDIT PRODUCT</p><h3>Edit {selectedProduct.name}</h3><div className="product-form-grid"><label>Product name<input value={editValues.name} onChange={(event) => setEditValues((current) => ({ ...current, name: event.target.value }))} /></label><label>SKU<input value={editValues.sku} onChange={(event) => setEditValues((current) => ({ ...current, sku: event.target.value }))} /></label><label>Category<select value={editValues.category} onChange={(event) => setEditValues((current) => ({ ...current, category: event.target.value }))}><option>Earrings</option><option>Necklaces</option><option>Bracelets</option><option>Rings</option></select></label><label>Price<input value={editValues.price} onChange={(event) => setEditValues((current) => ({ ...current, price: event.target.value }))} /></label><label>Stock<input type="number" min="0" value={editValues.stock} onChange={(event) => setEditValues((current) => ({ ...current, stock: event.target.value }))} /></label></div><div className="product-detail-actions"><button className="module-primary" onClick={saveEdit}>Save changes</button><button className="module-secondary" onClick={() => setIsEditing(false)}>Cancel</button></div></div>}{selectedProduct && !isEditing && <div className="product-detail-card"><div className="product-detail-image"><img src={selectedProduct.image} alt="" /></div><div className="product-detail-copy"><p className="eyebrow">PRODUCT DETAILS</p><h3>{selectedProduct.name}</h3><p className="product-detail-meta">{selectedProduct.category} · {selectedProduct.sku}</p><div className="product-detail-stats"><span><small>Price</small><strong>{selectedProduct.price}</strong></span><span><small>Inventory</small><strong>{selectedProduct.stock === 0 ? "Draft" : `${selectedProduct.stock} units`}</strong></span><span><small>Status</small><strong>{selectedProduct.status}</strong></span></div><div className="product-detail-actions"><button className="module-primary" onClick={() => startEditing(selectedProduct)}>Edit product</button><button className="module-secondary" onClick={() => setSelectedProduct(null)}>Close</button></div></div></div>}</section>;

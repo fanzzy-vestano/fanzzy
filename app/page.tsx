@@ -1,6 +1,7 @@
 ﻿"use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { fetchCatalogCategories, fetchCatalogProducts, fetchStoreSetting } from "../lib/supabase/catalog";
 
 type Product = {
   id: string;
@@ -23,7 +24,7 @@ const defaultProducts: Product[] = [
   { id: "halo", name: "Halo Pavé Hoops", category: "Earrings", price: 1120, compareAt: 1390, image: "https://images.unsplash.com/photo-1535632787350-4e68ef0ac584?auto=format&fit=crop&w=900&q=85", hoverImage: "https://images.unsplash.com/photo-1627293509201-cd7f7a7f8b7f?auto=format&fit=crop&w=900&q=85", tag: "Sale", tone: "#d9d3c7" },
 ];
 
-const categories = [
+const defaultCategories = [
   { name: "Earrings", count: "42 pieces", image: "https://images.unsplash.com/photo-1635767798638-3e25273a8236?auto=format&fit=crop&w=700&q=85" },
   { name: "Necklaces", count: "28 pieces", image: "https://images.unsplash.com/photo-1617038220319-276d3cfab638?auto=format&fit=crop&w=700&q=85" },
   { name: "Bracelets", count: "18 pieces", image: "https://images.unsplash.com/photo-1611652022419-a9419f74343d?auto=format&fit=crop&w=700&q=85" },
@@ -83,6 +84,7 @@ function ProductCard({ product, wished, onWishlist, onAdd, onQuickView }: { prod
 
 export default function Home() {
   const [products, setProducts] = useState<Product[]>(defaultProducts);
+  const [categories, setCategories] = useState(defaultCategories);
   const [activeCategory, setActiveCategory] = useState("All pieces");
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -97,7 +99,22 @@ export default function Home() {
   const [heroImage, setHeroImage] = useState(defaultHeroImage);
 
   useEffect(() => {
-    const syncProducts = () => {
+    const syncProducts = async () => {
+      const remote = await fetchCatalogProducts();
+      if (!remote.error && remote.data && remote.data.length) {
+        setProducts(remote.data.map((product, index) => normalizeStoredProduct({
+          id: product.sku,
+          name: product.name,
+          category: product.category,
+          price: product.price,
+          image: product.image,
+          hoverImage: product.hoverImage || product.image,
+          tag: product.tag,
+          tone: product.tone,
+          compareAt: product.compareAt,
+        }, index)).filter((product): product is Product => product !== null));
+        return;
+      }
       const stored = window.localStorage.getItem("fanzzy-products");
       if (!stored) return;
       try {
@@ -109,12 +126,47 @@ export default function Home() {
         window.localStorage.removeItem("fanzzy-products");
       }
     };
-    syncProducts();
+    void syncProducts();
     window.addEventListener("storage", syncProducts);
     window.addEventListener("fanzzy-products-updated", syncProducts);
     return () => {
       window.removeEventListener("storage", syncProducts);
       window.removeEventListener("fanzzy-products-updated", syncProducts);
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const syncCategories = async () => {
+      const remote = await fetchCatalogCategories();
+      if (active && !remote.error && remote.data && remote.data.length) {
+        setCategories(remote.data.map((category, index) => ({
+          name: category.name,
+          count: `${category.pieces} pieces`,
+          image: category.image || defaultCategories[index % defaultCategories.length].image,
+        })));
+        return;
+      }
+      const stored = window.localStorage.getItem("fanzzy-categories");
+      if (!active || !stored) return;
+      try {
+        const parsed = JSON.parse(stored) as Array<{ name?: string; pieces?: number }>;
+        setCategories(parsed.filter((category) => category.name).map((category, index) => ({
+          name: category.name!,
+          count: `${category.pieces ?? 0} pieces`,
+          image: defaultCategories[index % defaultCategories.length].image,
+        })));
+      } catch {
+        window.localStorage.removeItem("fanzzy-categories");
+      }
+    };
+    void syncCategories();
+    window.addEventListener("storage", syncCategories);
+    window.addEventListener("fanzzy-categories-updated", syncCategories);
+    return () => {
+      active = false;
+      window.removeEventListener("storage", syncCategories);
+      window.removeEventListener("fanzzy-categories-updated", syncCategories);
     };
   }, []);
 
@@ -138,11 +190,17 @@ export default function Home() {
   }, [toast]);
 
   useEffect(() => {
-    const syncAnnouncement = () => {
+    const syncAnnouncement = async () => {
+      const remote = await fetchStoreSetting("announcement");
+      if (!remote.error && remote.value !== null) {
+        setAnnouncementText(remote.value);
+        window.localStorage.setItem("fanzzy-announcement", remote.value);
+        return;
+      }
       const stored = window.localStorage.getItem("fanzzy-announcement");
       if (stored !== null) setAnnouncementText(stored);
     };
-    syncAnnouncement();
+    void syncAnnouncement();
     window.addEventListener("storage", syncAnnouncement);
     window.addEventListener("fanzzy-announcement-updated", syncAnnouncement);
     return () => {
@@ -152,11 +210,17 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    const syncHeroImage = () => {
+    const syncHeroImage = async () => {
+      const remote = await fetchStoreSetting("heroImage");
+      if (!remote.error && remote.value) {
+        setHeroImage(remote.value);
+        window.localStorage.setItem("fanzzy-hero-image", remote.value);
+        return;
+      }
       const stored = window.localStorage.getItem("fanzzy-hero-image");
       if (stored) setHeroImage(stored);
     };
-    syncHeroImage();
+    void syncHeroImage();
     window.addEventListener("storage", syncHeroImage);
     window.addEventListener("fanzzy-hero-updated", syncHeroImage);
     return () => {
