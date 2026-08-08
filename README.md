@@ -1,0 +1,18 @@
+# Lustre
+
+Premium jewellery storefront and control room built with Next.js, TypeScript, Tailwind CSS, and a Cloudflare-compatible Vinext starter.
+
+## Getting started
+
+1. Copy `.env.example` to `.env.local` and add service credentials when connecting a database, image storage, analytics, or Razorpay.
+2. Install dependencies with `pnpm install`.
+3. Run `pnpm dev` and open the local URL.
+4. Visit `/` for the storefront and `/admin` for the merchant control room.
+
+## Product direction
+
+The current implementation is a polished, interactive vertical slice with a centralized visual system. Storefront interactions include category filtering, search, wishlist, quick view, cart drawer, quantity changes, promo-code copy, newsletter signup, and responsive mobile layout. The admin surface includes catalog search, inventory health, revenue visualization, order status, tasks, campaign status, and navigation scaffolding for catalog, orders, customers, marketing, homepage, and settings.
+
+## Production extension points
+
+The UI is ready to connect to Prisma/Drizzle models for products, variants, inventory, carts, orders, coupons, shipping rules, reviews, banners, homepage sections, and audit logs. Keep secrets in environment variables and perform authoritative pricing, coupon, inventory, and payment verification on the server.
