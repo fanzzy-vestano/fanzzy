@@ -152,6 +152,17 @@
     min-height: calc(100svh - 104px);
   }
 
+  .hero-slide-layer,
+  .hero-slide-layer img {
+    height: calc(100svh - 104px);
+    min-height: 500px;
+  }
+
+  .hero-slide-layer img {
+    object-fit: cover;
+    object-position: center;
+  }
+
   .hero .button-light {
     min-width: 174px;
   }

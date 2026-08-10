@@ -97,6 +97,7 @@ export default function Home() {
   const [activeCategory, setActiveCategory] = useState("All pieces");
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState("");
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [wishlist, setWishlist] = useState<string[]>([]);
   const [cart, setCart] = useState<Record<string, number>>({});
   const [cartOpen, setCartOpen] = useState(false);
@@ -384,8 +385,22 @@ export default function Home() {
           <button onClick={() => announce(`${wishlist.length} saved piece${wishlist.length === 1 ? "" : "s"}`)} aria-label="View wishlist">♡ <span className="action-label">Saved</span>{wishlist.length > 0 && <b>{wishlist.length}</b>}</button>
           <button onClick={() => setCartOpen(true)} aria-label="Open shopping cart">Cart <span className="bag-count">({cartCount.toString().padStart(2, "0")})</span></button>
         </div>
-        <button className="mobile-menu" onClick={() => announce("Menu is ready for the next step")}>☰</button>
+        <button className="mobile-menu" onClick={() => setMobileNavOpen((current) => !current)} aria-label={mobileNavOpen ? "Close menu" : "Open menu"} aria-expanded={mobileNavOpen}>{mobileNavOpen ? "×" : "☰"}</button>
       </header>
+
+      {mobileNavOpen && <div className="mobile-nav-panel" role="dialog" aria-label="Mobile navigation">
+        <nav aria-label="Mobile navigation links">
+          <a href="#shop" onClick={() => setMobileNavOpen(false)}>Shop <span>↗</span></a>
+          <a href="#categories" onClick={() => setMobileNavOpen(false)}>Collections <span>↗</span></a>
+          <a href="#story" onClick={() => setMobileNavOpen(false)}>The journal <span>↗</span></a>
+          <a href="#footer" onClick={() => setMobileNavOpen(false)}>About <span>↗</span></a>
+        </nav>
+        <div className="mobile-nav-actions">
+          <button onClick={() => { setMobileNavOpen(false); setSearchOpen(true); }}>Search the collection <span>⌕</span></button>
+          <button onClick={() => { setMobileNavOpen(false); announce(`${wishlist.length} saved piece${wishlist.length === 1 ? "" : "s"}`); }}>Saved pieces <span>♡</span></button>
+          <button onClick={() => { setMobileNavOpen(false); setCartOpen(true); }}>Your cart <span>({cartCount.toString().padStart(2, "0")})</span></button>
+        </div>
+      </div>}
 
       <section className="hero hero-background" id="top">
         <div className="hero-slide-layer" key={heroSlides[heroSlideIndex]}><img src={heroSlides[heroSlideIndex]} alt="Fanzzy collection highlight" /></div>
