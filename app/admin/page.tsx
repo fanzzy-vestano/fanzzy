@@ -790,16 +790,19 @@ function ProductLibraryWorkspace({ onNotify }: { onNotify: (message: string) => 
       try {
         const parsed = JSON.parse(stored) as Array<Partial<AdminProduct> & { id?: string; price?: number | string }>;
         if (active && Array.isArray(parsed) && parsed.length) {
-          setProducts(parsed.filter((product) => typeof product.name === "string" && product.name.trim()).map((product, index) => ({
-            name: product.name!.trim(),
-            price: typeof product.price === "number" ? `₹${product.price.toLocaleString("en-IN")}` : product.price || "₹0",
-            sku: product.sku || product.id?.toUpperCase() || `FZ-IMP-${String(index + 1).padStart(2, "0")}`,
-            category: product.category || "Uncategorised",
-            stock: product.stock ?? 0,
-            status: product.status ?? "Published",
-            image: product.image || adminProducts[0].image,
-            hoverImage: product.hoverImage || product.image || adminProducts[0].image,
-          })));
+          setProducts(parsed.filter((product) => typeof product.name === "string" && product.name.trim()).map((product, index) => {
+            const rawPrice = product.price as number | string | undefined;
+            return {
+              name: product.name!.trim(),
+              price: typeof rawPrice === "number" ? `₹${rawPrice.toLocaleString("en-IN")}` : rawPrice || "₹0",
+              sku: product.sku || product.id?.toUpperCase() || `FZ-IMP-${String(index + 1).padStart(2, "0")}`,
+              category: product.category || "Uncategorised",
+              stock: product.stock ?? 0,
+              status: product.status ?? "Published",
+              image: product.image || adminProducts[0].image,
+              hoverImage: product.hoverImage || product.image || adminProducts[0].image,
+            };
+          }));
         }
       } catch {
         window.localStorage.removeItem("fanzzy-products");
