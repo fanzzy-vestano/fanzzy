@@ -149,18 +149,20 @@
 
 @media (max-width: 760px) {
   .hero.hero-background {
-    min-height: calc(100svh - 104px);
+    min-height: 0;
   }
 
-  .hero-slide-layer,
-  .hero-slide-layer img {
-    height: calc(100svh - 104px);
-    min-height: 500px;
+  .hero-slide-layer {
+    height: auto;
+    min-height: 0;
   }
 
   .hero-slide-layer img {
+    height: auto;
+    min-height: 0;
     object-fit: contain;
     object-position: center;
+    width: 100%;
   }
 
   .hero .button-light {
