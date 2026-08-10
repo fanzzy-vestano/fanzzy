@@ -14,6 +14,7 @@ type Product = {
   tag?: string;
   tone: string;
 };
+type MarketingRecord = { kind: "Campaign" | "Coupon" | "Newsletter"; name: string; detail: string; status: "Active" | "Scheduled" | "Draft"; code?: string; discount?: string };
 
 const defaultProducts: Product[] = [
   { id: "aurora", name: "Aurora Drop Earrings", category: "Earrings", price: 1290, compareAt: 1690, image: "https://images.unsplash.com/photo-1635767798638-3e25273a8236?auto=format&fit=crop&w=900&q=85", hoverImage: "https://images.unsplash.com/photo-1535632066927-ab7c9ab60908?auto=format&fit=crop&w=900&q=85", tag: "Bestseller", tone: "#d9c4bc" },
@@ -33,6 +34,14 @@ const defaultCategories = [
 
 const formatINR = (value: number) => `₹${(Number.isFinite(value) ? value : 0).toLocaleString("en-IN")}`;
 const defaultHeroImage = "https://images.unsplash.com/photo-1599643478518-a784e5dc4c8f?auto=format&fit=crop&w=1200&q=90";
+const defaultHeroSlides = [
+  "https://images.unsplash.com/photo-1515562141207-7a88fb7ce338?auto=format&fit=crop&w=1800&q=90",
+  "https://images.unsplash.com/photo-1617038220319-276d3cfab638?auto=format&fit=crop&w=1800&q=90",
+  "https://images.unsplash.com/photo-1635767798638-3e25273a8236?auto=format&fit=crop&w=1800&q=90",
+];
+const initialHeroSlides = [defaultHeroImage, ...defaultHeroSlides];
+const defaultHeroSlideDuration = 5.2;
+const defaultDeliveryCharge = { enabled: false, amount: 99 };
 const siteBasePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 const siteAsset = (name: string) => `${siteBasePath}/${name}`;
 const productTones = ["#d9c4bc", "#dad7ce", "#d0c2b0", "#e5ddd1"];
@@ -91,12 +100,18 @@ export default function Home() {
   const [wishlist, setWishlist] = useState<string[]>([]);
   const [cart, setCart] = useState<Record<string, number>>({});
   const [cartOpen, setCartOpen] = useState(false);
+  const [checkoutOpen, setCheckoutOpen] = useState(false);
+  const [checkoutForm, setCheckoutForm] = useState({ name: "", phone: "", email: "", address: "" });
   const [quickProduct, setQuickProduct] = useState<Product | null>(null);
   const [toast, setToast] = useState("");
   const [email, setEmail] = useState("");
   const [subscribed, setSubscribed] = useState(false);
   const [announcementText, setAnnouncementText] = useState("Complimentary shipping on orders above ₹999");
-  const [heroImage, setHeroImage] = useState(defaultHeroImage);
+  const [activeCampaign, setActiveCampaign] = useState<MarketingRecord | null>(null);
+  const [heroSlides, setHeroSlides] = useState(initialHeroSlides);
+  const [heroSlideIndex, setHeroSlideIndex] = useState(0);
+  const [heroSlideDuration, setHeroSlideDuration] = useState(defaultHeroSlideDuration);
+  const [deliveryCharge, setDeliveryCharge] = useState(defaultDeliveryCharge);
 
   useEffect(() => {
     const syncProducts = async () => {
@@ -150,11 +165,11 @@ export default function Home() {
       const stored = window.localStorage.getItem("fanzzy-categories");
       if (!active || !stored) return;
       try {
-        const parsed = JSON.parse(stored) as Array<{ name?: string; pieces?: number }>;
+        const parsed = JSON.parse(stored) as Array<{ name?: string; pieces?: number; image?: string }>;
         setCategories(parsed.filter((category) => category.name).map((category, index) => ({
           name: category.name!,
           count: `${category.pieces ?? 0} pieces`,
-          image: defaultCategories[index % defaultCategories.length].image,
+          image: category.image || defaultCategories[index % defaultCategories.length].image,
         })));
       } catch {
         window.localStorage.removeItem("fanzzy-categories");
@@ -182,6 +197,7 @@ export default function Home() {
   const cartItems = products.filter((product) => cart[product.id]);
   const cartCount = Object.values(cart).reduce((sum, count) => sum + count, 0);
   const subtotal = cartItems.reduce((sum, product) => sum + product.price * (cart[product.id] ?? 0), 0);
+  const deliveryTotal = deliveryCharge.enabled ? deliveryCharge.amount : 0;
 
   useEffect(() => {
     if (!toast) return;
@@ -210,22 +226,102 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    const syncHeroImage = async () => {
-      const remote = await fetchStoreSetting("heroImage");
-      if (!remote.error && remote.value) {
-        setHeroImage(remote.value);
-        window.localStorage.setItem("fanzzy-hero-image", remote.value);
+    const syncMarketing = async () => {
+      const remote = await fetchStoreSetting("marketingRecords");
+      const stored = remote.value || window.localStorage.getItem("fanzzy-marketing-records");
+      if (!stored) {
+        setActiveCampaign(null);
         return;
       }
-      const stored = window.localStorage.getItem("fanzzy-hero-image");
-      if (stored) setHeroImage(stored);
+      try {
+        const parsed = JSON.parse(stored) as MarketingRecord[];
+        const active = Array.isArray(parsed) ? parsed.find((record) => record?.status === "Active" && record?.name) : null;
+        setActiveCampaign(active ?? null);
+      } catch {
+        setActiveCampaign(null);
+      }
     };
-    void syncHeroImage();
-    window.addEventListener("storage", syncHeroImage);
-    window.addEventListener("fanzzy-hero-updated", syncHeroImage);
+    void syncMarketing();
+    window.addEventListener("storage", syncMarketing);
+    window.addEventListener("fanzzy-marketing-updated", syncMarketing);
     return () => {
-      window.removeEventListener("storage", syncHeroImage);
-      window.removeEventListener("fanzzy-hero-updated", syncHeroImage);
+      window.removeEventListener("storage", syncMarketing);
+      window.removeEventListener("fanzzy-marketing-updated", syncMarketing);
+    };
+  }, []);
+
+  useEffect(() => {
+    const syncHeroSlides = async () => {
+      const remoteSlides = await fetchStoreSetting("heroSlides");
+      const storedSlides = remoteSlides.value || window.localStorage.getItem("fanzzy-hero-slides");
+      if (storedSlides) {
+        try {
+          const parsed = JSON.parse(storedSlides);
+          if (Array.isArray(parsed) && parsed.filter((value): value is string => typeof value === "string" && value.trim()).length) {
+            setHeroSlides(parsed.filter((value): value is string => typeof value === "string" && value.trim()).slice(0, 4));
+            return;
+          }
+        } catch {
+          window.localStorage.removeItem("fanzzy-hero-slides");
+        }
+      }
+      const legacy = await fetchStoreSetting("heroImage");
+      const storedLegacy = legacy.value || window.localStorage.getItem("fanzzy-hero-image");
+      if (storedLegacy) setHeroSlides([storedLegacy, ...defaultHeroSlides]);
+    };
+    void syncHeroSlides();
+    window.addEventListener("storage", syncHeroSlides);
+    window.addEventListener("fanzzy-hero-updated", syncHeroSlides);
+    window.addEventListener("fanzzy-hero-slides-updated", syncHeroSlides);
+    return () => {
+      window.removeEventListener("storage", syncHeroSlides);
+      window.removeEventListener("fanzzy-hero-updated", syncHeroSlides);
+      window.removeEventListener("fanzzy-hero-slides-updated", syncHeroSlides);
+    };
+  }, []);
+
+  useEffect(() => {
+    setHeroSlideIndex(0);
+    const timer = window.setInterval(() => {
+      setHeroSlideIndex((current) => (current + 1) % heroSlides.length);
+    }, heroSlideDuration * 1000);
+    return () => window.clearInterval(timer);
+  }, [heroSlides, heroSlideDuration]);
+
+  useEffect(() => {
+    const syncHeroSlideDuration = async () => {
+      const remote = await fetchStoreSetting("heroSlideDuration");
+      const stored = remote.value || window.localStorage.getItem("fanzzy-hero-slide-duration");
+      const parsed = Number(stored);
+      if (Number.isFinite(parsed)) setHeroSlideDuration(Math.min(30, Math.max(2, parsed)));
+    };
+    void syncHeroSlideDuration();
+    window.addEventListener("storage", syncHeroSlideDuration);
+    window.addEventListener("fanzzy-hero-slides-updated", syncHeroSlideDuration);
+    return () => {
+      window.removeEventListener("storage", syncHeroSlideDuration);
+      window.removeEventListener("fanzzy-hero-slides-updated", syncHeroSlideDuration);
+    };
+  }, []);
+
+  useEffect(() => {
+    const syncDeliveryCharge = async () => {
+      const remote = await fetchStoreSetting("deliveryCharge");
+      const stored = remote.value || window.localStorage.getItem("fanzzy-delivery-charge");
+      if (!stored) return;
+      try {
+        const parsed = JSON.parse(stored) as { enabled?: boolean; amount?: number };
+        setDeliveryCharge({ enabled: parsed.enabled === true, amount: Number.isFinite(parsed.amount) ? Math.max(0, parsed.amount as number) : defaultDeliveryCharge.amount });
+      } catch {
+        window.localStorage.removeItem("fanzzy-delivery-charge");
+      }
+    };
+    void syncDeliveryCharge();
+    window.addEventListener("storage", syncDeliveryCharge);
+    window.addEventListener("fanzzy-delivery-charge-updated", syncDeliveryCharge);
+    return () => {
+      window.removeEventListener("storage", syncDeliveryCharge);
+      window.removeEventListener("fanzzy-delivery-charge-updated", syncDeliveryCharge);
     };
   }, []);
 
@@ -237,7 +333,7 @@ export default function Home() {
   const addToCart = (product: Product) => {
     setCart((current) => ({ ...current, [product.id]: (current[product.id] ?? 0) + 1 }));
     setCartOpen(true);
-    announce(`${product.name} added to bag`);
+    announce(`${product.name} added to cart`);
   };
   const updateQuantity = (id: string, delta: number) => {
     setCart((current) => {
@@ -247,38 +343,63 @@ export default function Home() {
       return updated;
     });
   };
+  const openCheckout = () => {
+    if (!cartItems.length) return announce("Add a piece to your cart first");
+    setCartOpen(false);
+    setCheckoutOpen(true);
+  };
+  const submitCheckout = () => {
+    const name = checkoutForm.name.trim();
+    const digits = checkoutForm.phone.replace(/\D/g, "");
+    if (!name) return announce("Customer name is required");
+    if (digits.length < 10) return announce("A valid WhatsApp number is mandatory");
+    if (!checkoutForm.address.trim()) return announce("Delivery address is required");
+    const orderId = `#FZ-${String(Date.now()).slice(-6)}`;
+    const newOrder = { id: orderId, date: new Date().toISOString().slice(0, 10), status: "Processing", total: formatINR(subtotal + deliveryTotal), customerName: name, phone: checkoutForm.phone.trim() };
+    let previousOrders: unknown[] = [];
+    try {
+      const stored = window.localStorage.getItem("fanzzy-orders");
+      const parsed = stored ? JSON.parse(stored) : [];
+      if (Array.isArray(parsed)) previousOrders = parsed;
+    } catch {
+      previousOrders = [];
+    }
+    window.localStorage.setItem("fanzzy-orders", JSON.stringify([newOrder, ...previousOrders]));
+    window.dispatchEvent(new Event("fanzzy-orders-updated"));
+    setCart({});
+    setCheckoutOpen(false);
+    setCheckoutForm({ name: "", phone: "", email: "", address: "" });
+    announce(`${orderId} placed successfully`);
+  };
 
   return (
     <main className="site-shell">
       <div className="announcement"><strong>{announcementText}</strong><button onClick={() => announce("Announcement link selected")}>Explore now&nbsp; ↗</button></div>
 
       <header className="site-header">
-        <a href="#top" className="wordmark" aria-label="Fanzzy home"><img src={siteAsset("fanzzy-mark.png")} alt="Fanzzy" className="brand-logo" /></a>
+        <a href="#top" className="wordmark" aria-label="fanZZy home"><img src={siteAsset("fanzzy-mark.png")} alt="fanZZy" className="brand-logo" /><span className="navbar-brand-name">fanZZy</span></a>
         <nav className="desktop-nav" aria-label="Main navigation"><a href="#shop">Shop</a><a href="#categories">Collections</a><a href="#story">The journal</a><a href="#footer">About</a></nav>
         <div className="header-actions">
-          <button onClick={() => setSearchOpen(true)} aria-label="Open search">Search</button>
-          <a href={`${siteBasePath}/admin/`} className="admin-link">Admin</a>
+          <label className="navbar-search"><span aria-hidden="true">⌕</span><input readOnly placeholder="Search jewellery" onFocus={() => setSearchOpen(true)} aria-label="Open search" /></label>
           <button onClick={() => announce(`${wishlist.length} saved piece${wishlist.length === 1 ? "" : "s"}`)} aria-label="View wishlist">♡ <span className="action-label">Saved</span>{wishlist.length > 0 && <b>{wishlist.length}</b>}</button>
-          <button onClick={() => setCartOpen(true)} aria-label="Open shopping bag">Bag <span className="bag-count">({cartCount.toString().padStart(2, "0")})</span></button>
+          <button onClick={() => setCartOpen(true)} aria-label="Open shopping cart">Cart <span className="bag-count">({cartCount.toString().padStart(2, "0")})</span></button>
         </div>
         <button className="mobile-menu" onClick={() => announce("Menu is ready for the next step")}>☰</button>
       </header>
 
-      <section className="hero" id="top">
-        <div className="hero-copy"><p className="eyebrow light">A QUIET KIND OF RADIANCE</p><h1>Make room<br /><em>for wonder.</em></h1><p className="hero-description">Hand-finished pieces designed to catch the light — and keep it.</p><a className="button button-light" href="#shop">Shop the edit <span>↗</span></a></div>
-        <div className="hero-art"><div className="hero-orbit orbit-one" /><div className="hero-orbit orbit-two" /><div className="hero-arch"><img src={heroImage} alt="Gold necklace arranged on a warm stone surface" /></div><span className="hero-note">01 / 03<br /><i>new collection</i></span></div>
-        <div className="hero-bottom"><span>Scroll to discover</span><span className="scroll-line" /></div>
+      <section className="hero hero-background" id="top">
+        <div className="hero-slide-layer" key={heroSlides[heroSlideIndex]}><img src={heroSlides[heroSlideIndex]} alt="Fanzzy collection highlight" /></div>
       </section>
 
-      <section className="manifesto"><p className="eyebrow">THE FANZZY STANDARD</p><h2>Jewellery with a point of view.<br /><em>Made for your everyday extraordinary.</em></h2><p className="manifesto-copy">Fanzzy is a study in contrast — soft and sculptural, familiar and unexpected. Every piece is made in small batches with considered materials and a little bit of magic.</p></section>
+      <section className="section-block" id="categories"><div className="category-showcase"><div className="category-intro"><h2>Find your <em>signature.</em></h2><a className="text-link" href={`${siteBasePath}/collections`}>View all categories <span>↗</span></a></div><div className="category-grid">{categories.map((category, index) => <button className={`category-card category-${index + 1}`} key={category.name} onClick={() => { setActiveCategory(category.name); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}><img src={category.image} alt="" /><span className="category-overlay" /><span className="category-info"><strong>{category.name}</strong></span></button>)}</div></div></section>
 
-      <section className="section-block" id="categories"><div className="section-heading"><div><p className="eyebrow">SHOP BY MOOD</p><h2>Find your <em>signature.</em></h2></div><a className="text-link" href="#shop">View all categories <span>↗</span></a></div><div className="category-grid">{categories.map((category, index) => <button className={`category-card category-${index + 1}`} key={category.name} onClick={() => { setActiveCategory(category.name); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}><img src={category.image} alt="" /><span className="category-overlay" /><span className="category-info"><strong>{category.name}</strong></span></button>)}</div></section>
+      <section className="manifesto"><p className="eyebrow">THE FANZZY STANDARD</p><h2>Jewellery with a point of view.<br /><em>Made for your everyday extraordinary.</em></h2><p className="manifesto-copy">Fanzzy is a study in contrast — soft and sculptural, familiar and unexpected. Every piece is made in small batches with considered materials and a little bit of magic.</p></section>
 
       <section className="section-block product-section" id="shop"><div className="section-heading"><div><p className="eyebrow">CURATED FOR YOU</p><h2>Pieces worth <em>keeping.</em></h2></div><a className="text-link" href="#footer">Shop all <span>↗</span></a></div><div className="filter-row"><div className="filter-pills"><button className={activeCategory === "All pieces" ? "active" : ""} onClick={() => setActiveCategory("All pieces")}>All pieces</button>{categories.map((category) => <button className={activeCategory === category.name ? "active" : ""} key={category.name} onClick={() => setActiveCategory(category.name)}>{category.name}</button>)}</div><span className="result-count">{filteredProducts.length} pieces</span></div><div className="product-grid">{filteredProducts.map((product) => <ProductCard key={product.id} product={product} wished={wishlist.includes(product.id)} onWishlist={() => toggleWishlist(product.id)} onAdd={() => addToCart(product)} onQuickView={() => setQuickProduct(product)} />)}</div></section>
 
       <section className="editorial" id="story"><div className="editorial-image"><img src="https://images.unsplash.com/photo-1515562141207-7a88fb7ce338?auto=format&fit=crop&w=1100&q=85" alt="Close-up of sculptural gold jewelry" /><span>THE ART OF<br /><em>ADORNMENT</em></span></div><div className="editorial-copy"><p className="eyebrow">A NOTE FROM THE STUDIO</p><h2>Less noise.<br /><em>More meaning.</em></h2><p>There is beauty in the in-between. The way a quiet chain layers with your favourite shirt. A ring that becomes part of your hand. Fanzzy is made for these small rituals — the ones that make a day feel like yours.</p><a className="button button-dark" href="#footer">Read our story <span>↗</span></a><div className="editorial-sign">F / 19<br /></div></div></section>
 
-      <section className="offer-banner"><div><p className="eyebrow light">A LITTLE EXTRA</p><h2>Your first piece<br /><em>is on us.</em></h2></div><div><p>Take 10% off your first order with code <strong>HELLOFANZZY</strong>.</p><button className="button button-light" onClick={() => { navigator.clipboard?.writeText("HELLOFANZZY"); announce("Code copied: HELLOFANZZY"); }}>Copy code <span>↗</span></button></div></section>
+      <section className="offer-banner"><div><p className="eyebrow light">{activeCampaign ? activeCampaign.kind === "Coupon" ? "EXCLUSIVE OFFER" : "SEASONAL EDIT" : "A LITTLE EXTRA"}</p><h2>{activeCampaign ? activeCampaign.name : "Your first piece"}<br /><em>{activeCampaign ? "is here." : "is on us."}</em></h2></div><div><p>{activeCampaign ? <>{activeCampaign.detail}{activeCampaign.discount && <> · <strong>{activeCampaign.discount}</strong></>}{activeCampaign.code && <> with code <strong>{activeCampaign.code}</strong></>}</> : <>Take 10% off your first order with code <strong>HELLOFANZZY</strong>.</>}</p>{activeCampaign?.code ? <button className="button button-light" onClick={() => { navigator.clipboard?.writeText(activeCampaign.code); announce(`Code copied: ${activeCampaign.code}`); }}>Copy code <span>↗</span></button> : <button className="button button-light" onClick={() => { document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); announce("Seasonal edit opened"); }}>Explore the edit <span>↗</span></button>}</div></section>
 
       <section className="newsletter"><div><p className="eyebrow">THE FANZZY LETTER</p><h2>A little light<br /><em>in your inbox.</em></h2></div><form onSubmit={(event) => { event.preventDefault(); if (email) setSubscribed(true); }}><p>New drops, studio notes, and 10% off your first order — no noise, promise.</p><div className="email-line"><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Your email address" aria-label="Your email address" required /><button aria-label="Subscribe to newsletter">↗</button></div>{subscribed && <span className="success-message">You’re on the list. Welcome to Fanzzy.</span>}</form></section>
 
@@ -288,9 +409,11 @@ export default function Home() {
 
       {searchOpen && <div className="overlay search-overlay" role="dialog" aria-modal="true" aria-label="Search"><div className="overlay-top"><span className="wordmark"><img src={siteAsset("fanzzy-mark.png")} alt="Fanzzy" className="brand-logo" /></span><button onClick={() => setSearchOpen(false)}>Close&nbsp; ×</button></div><div className="search-content"><p className="eyebrow">SEARCH THE COLLECTION</p><div className="large-search"><input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Try “gold hoops”" /><span>⌕</span></div>{search && <div className="search-results">{filteredProducts.length ? filteredProducts.map((product) => <button key={product.id} onClick={() => { setQuickProduct(product); setSearchOpen(false); }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(product.price)}</small></span><b>↗</b></button>) : <p className="muted">No pieces found. Try another search.</p>}</div>}{!search && <div className="search-suggestions"><span>Trending now</span><button onClick={() => setSearch("hoops")}>Hoops</button><button onClick={() => setSearch("pearl")}>Pearls</button><button onClick={() => setSearch("chain")}>Chains</button></div>}</div></div>}
 
-      {cartOpen && <div className="drawer-backdrop" onClick={() => setCartOpen(false)}><aside className="cart-drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR BAG</p><h2>{cartCount ? `${cartCount} piece${cartCount > 1 ? "s" : ""}` : "A little empty"}</h2></div><button onClick={() => setCartOpen(false)}>×</button></div>{cartItems.length ? <><div className="drawer-items">{cartItems.map((product) => <div className="drawer-item" key={product.id}><img src={product.image} alt="" /><div><strong>{product.name}</strong><small>{formatINR(product.price)}</small><div className="quantity"><button onClick={() => updateQuantity(product.id, -1)}>−</button><span>{cart[product.id]}</span><button onClick={() => updateQuantity(product.id, 1)}>+</button></div></div><b>{formatINR(product.price * (cart[product.id] ?? 0))}</b></div>)}</div><div className="drawer-footer"><div><span>Subtotal</span><strong>{formatINR(subtotal)}</strong></div><p>Shipping calculated at checkout. Complimentary shipping above ₹999.</p><button className="button button-dark full-width" onClick={() => announce("Checkout is ready to connect")}>Begin checkout <span>↗</span></button></div></> : <div className="empty-bag"><div>✦</div><p>Your future favourites<br />belong here.</p><button className="text-link" onClick={() => setCartOpen(false)}>Continue shopping <span>↗</span></button></div>}</aside></div>}
+      {cartOpen && <div className="drawer-backdrop" onClick={() => setCartOpen(false)}><aside className="cart-drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR CART</p><h2>{cartCount ? `${cartCount} piece${cartCount > 1 ? "s" : ""}` : "A little empty"}</h2></div><button onClick={() => setCartOpen(false)}>×</button></div>{cartItems.length ? <><div className="drawer-items">{cartItems.map((product) => <div className="drawer-item" key={product.id}><img src={product.image} alt="" /><div><strong>{product.name}</strong><small>{formatINR(product.price)}</small><div className="quantity"><button onClick={() => updateQuantity(product.id, -1)}>−</button><span>{cart[product.id]}</span><button onClick={() => updateQuantity(product.id, 1)}>+</button></div></div><b>{formatINR(product.price * (cart[product.id] ?? 0))}</b></div>)}</div><div className="drawer-footer"><div><span>Subtotal</span><strong>{formatINR(subtotal)}</strong></div><div><span>Delivery</span><strong>{deliveryCharge.enabled ? formatINR(deliveryTotal) : "Free"}</strong></div><div className="drawer-total"><span>Total</span><strong>{formatINR(subtotal + deliveryTotal)}</strong></div><p>{deliveryCharge.enabled ? "Delivery charge applied to this order." : "Complimentary shipping above ₹999."}</p><button className="button button-dark full-width" onClick={openCheckout}>Proceed to buy <span>↗</span></button></div></> : <div className="empty-bag"><div>✦</div><p>Your future favourites<br />belong here.</p><button className="text-link" onClick={() => setCartOpen(false)}>Continue shopping <span>↗</span></button></div>}</aside></div>}
 
-      {quickProduct && <div className="drawer-backdrop" onClick={() => setQuickProduct(null)}><div className="quick-modal" onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setQuickProduct(null)}>×</button><div className="quick-image"><img src={quickProduct.image} alt={quickProduct.name} /></div><div className="quick-copy"><p className="eyebrow">{quickProduct.category}</p><h2>{quickProduct.name}</h2><div className="price-row"><span>{formatINR(quickProduct.price)}</span>{quickProduct.compareAt && <del>{formatINR(quickProduct.compareAt)}</del>}</div><p>Designed to become part of your everyday ritual. Hand-finished in small batches with a soft, lasting glow.</p><div className="quick-actions"><button className="button button-dark" onClick={() => { addToCart(quickProduct); setQuickProduct(null); }}>Add to bag <span>↗</span></button><button className="save-text" onClick={() => toggleWishlist(quickProduct.id)}>{wishlist.includes(quickProduct.id) ? "♥ Saved" : "♡ Save for later"}</button></div></div></div></div>}
+      {checkoutOpen && <div className="drawer-backdrop checkout-backdrop" onClick={() => setCheckoutOpen(false)}><section className="checkout-modal" role="dialog" aria-modal="true" aria-labelledby="checkout-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">CHECKOUT</p><h2 id="checkout-title">Complete your order</h2></div><button aria-label="Close checkout" onClick={() => setCheckoutOpen(false)}>×</button></div><p className="checkout-intro">We’ll use your WhatsApp number to confirm your order and delivery updates.</p><div className="checkout-grid"><label>Customer name<input value={checkoutForm.name} onChange={(event) => setCheckoutForm((current) => ({ ...current, name: event.target.value }))} placeholder="Your full name" required /></label><label>WhatsApp number <span className="required-mark">Required</span><input type="tel" value={checkoutForm.phone} onChange={(event) => setCheckoutForm((current) => ({ ...current, phone: event.target.value }))} placeholder="+91 98765 43210" required /></label><label>Email address <span className="optional-mark">Optional</span><input type="email" value={checkoutForm.email} onChange={(event) => setCheckoutForm((current) => ({ ...current, email: event.target.value }))} placeholder="you@example.com" /></label><label className="checkout-wide">Delivery address<input value={checkoutForm.address} onChange={(event) => setCheckoutForm((current) => ({ ...current, address: event.target.value }))} placeholder="House number, street, city, pincode" required /></label></div><div className="checkout-total"><span>Order total</span><strong>{formatINR(subtotal + deliveryTotal)}</strong></div><div className="checkout-actions"><button className="button button-dark" onClick={submitCheckout}>Place order <span>↗</span></button><button className="save-text" onClick={() => setCheckoutOpen(false)}>Back to cart</button></div></section></div>}
+
+      {quickProduct && <div className="drawer-backdrop" onClick={() => setQuickProduct(null)}><div className="quick-modal" onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setQuickProduct(null)}>×</button><div className="quick-image"><img src={quickProduct.image} alt={quickProduct.name} /></div><div className="quick-copy"><p className="eyebrow">{quickProduct.category}</p><h2>{quickProduct.name}</h2><div className="price-row"><span>{formatINR(quickProduct.price)}</span>{quickProduct.compareAt && <del>{formatINR(quickProduct.compareAt)}</del>}</div><p>Designed to become part of your everyday ritual. Hand-finished in small batches with a soft, lasting glow.</p><div className="quick-actions"><button className="button button-dark" onClick={() => { addToCart(quickProduct); setQuickProduct(null); }}>Add to cart <span>↗</span></button><button className="save-text" onClick={() => toggleWishlist(quickProduct.id)}>{wishlist.includes(quickProduct.id) ? "♥ Saved" : "♡ Save for later"}</button></div></div></div></div>}
 
       {toast && <div className="toast">{toast}<span>✦</span></div>}
     </main>

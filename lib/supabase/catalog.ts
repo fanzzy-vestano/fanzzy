@@ -26,6 +26,12 @@ export type CatalogCategory = {
 const settingKeys = {
   announcement: "announcement",
   heroImage: "hero_image",
+  heroSlides: "hero_slides",
+  heroSlideDuration: "hero_slide_duration",
+  deliveryCharge: "delivery_charge",
+  marketingRecords: "marketing_records",
+  collections: "collections",
+  customers: "customers",
 } as const;
 
 const asError = (value: unknown) => value instanceof Error ? value : new Error(String(value || "Supabase request failed"));
@@ -134,7 +140,7 @@ export async function saveStoreSetting(key: keyof typeof settingKeys, value: str
   return error;
 }
 
-export async function uploadStoreImage(file: File, folder: "products" | "homepage") {
+export async function uploadStoreImage(file: File, folder: "products" | "homepage" | "categories") {
   if (!supabase) return { url: null, error: new Error("Supabase is not configured") };
   try {
     const extension = file.name.split(".").pop()?.toLowerCase() || "jpg";
