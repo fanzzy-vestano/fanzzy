@@ -43,7 +43,7 @@ type MarketingRecord = {
   code?: string;
   discount?: string;
 };
-type DateRange = "this-month" | "last-month" | "all-time";
+type DateRange = "this-month" | "last-month" | "all-time" | "custom";
 type ProductFilter = "all" | "low-stock" | "drafts";
 type OrderDateFilter =
   | "today"
@@ -153,6 +153,7 @@ const defaultHeroSlides = [
 ];
 const defaultHeroSlideDuration = 5.2;
 const defaultDeliveryCharge = { enabled: false, amount: 99 };
+const formatAdminCurrency = (value: number) => `₹${Math.max(0, Math.round(value)).toLocaleString("en-IN")}`;
 const defaultMarketingRecords: MarketingRecord[] = [
   {
     id: "august-welcome",
@@ -379,6 +380,9 @@ export default function AdminPage() {
   const [query, setQuery] = useState("");
   const [toast, setToast] = useState("");
   const [dateRange, setDateRange] = useState<DateRange>("this-month");
+  const [dashboardFromDate, setDashboardFromDate] = useState("2026-08-01");
+  const [dashboardToDate, setDashboardToDate] = useState("2026-08-08");
+  const [dashboardOrders, setDashboardOrders] = useState<OrderRecord[]>(adminOrders);
   const [productFilter, setProductFilter] = useState<ProductFilter>("all");
   const [categoryFilter, setCategoryFilter] = useState("All categories");
   const categories = useMemo(
@@ -410,6 +414,26 @@ export default function AdminPage() {
   const activeRole = adminRoles.find((role) => role.id === activeRoleId) ?? defaultAdminRoles[0];
   const canAccess = (section: string) => activeRole.permissions.includes(section as AdminPermission);
   const visibleMenu = menu.filter((item) => canAccess(item.label));
+
+  useEffect(() => {
+    const syncDashboardOrders = () => {
+      const stored = window.localStorage.getItem("fanzzy-orders");
+      if (!stored) return;
+      try {
+        const parsed = JSON.parse(stored) as OrderRecord[];
+        if (Array.isArray(parsed)) setDashboardOrders(parsed.filter((order) => order?.date && order?.total));
+      } catch {
+        window.localStorage.removeItem("fanzzy-orders");
+      }
+    };
+    syncDashboardOrders();
+    window.addEventListener("storage", syncDashboardOrders);
+    window.addEventListener("fanzzy-orders-updated", syncDashboardOrders);
+    return () => {
+      window.removeEventListener("storage", syncDashboardOrders);
+      window.removeEventListener("fanzzy-orders-updated", syncDashboardOrders);
+    };
+  }, []);
 
   useEffect(() => {
     const syncRoles = () => {
@@ -466,11 +490,33 @@ export default function AdminPage() {
       customers: "246",
       growth: ["+21.7%", "+16.4%", "+7.1%", "+28.6%"],
     },
-  }[dateRange];
+  }[dateRange === "custom" ? "this-month" : dateRange];
+  const customDashboardOrders = dashboardOrders.filter((order) => {
+    if (!dashboardFromDate && !dashboardToDate) return true;
+    if (dashboardFromDate && order.date < dashboardFromDate) return false;
+    if (dashboardToDate && order.date > dashboardToDate) return false;
+    return true;
+  });
+  const customRevenue = customDashboardOrders.reduce(
+    (total, order) => total + (Number(order.total.replace(/[^0-9.]/g, "")) || 0),
+    0,
+  );
+  const customCustomers = new Set(
+    customDashboardOrders.map((order) => order.phone || order.customerName || order.id),
+  ).size;
+  const customMetrics = {
+    revenue: formatAdminCurrency(customRevenue),
+    orders: String(customDashboardOrders.length),
+    average: formatAdminCurrency(customDashboardOrders.length ? customRevenue / customDashboardOrders.length : 0),
+    customers: String(customCustomers),
+    growth: ["Custom", "Custom", "Custom", "Custom"],
+  };
+  const displayedMetrics = dateRange === "custom" ? customMetrics : metrics;
   const dateLabels: Record<DateRange, string> = {
     "this-month": "This month",
     "last-month": "Last month",
     "all-time": "All time",
+    custom: dashboardFromDate || dashboardToDate ? `${dashboardFromDate || "Start"} → ${dashboardToDate || "End"}` : "Custom range",
   };
   const notify = (message: string) => {
     if (message === "Preview opened") {
@@ -561,21 +607,45 @@ export default function AdminPage() {
               Here’s what’s happening across Fanzzy today.
             </p>
           </div>
-          <label className="date-control">
-            {" "}
-            <span>{dateLabels[dateRange]}</span>
-            <select
-              aria-label="Dashboard date range"
-              value={dateRange}
-              onChange={(event) =>
-                setDateRange(event.target.value as DateRange)
-              }
-            >
-              <option value="this-month">This month</option>
-              <option value="last-month">Last month</option>
-              <option value="all-time">All time</option>
-            </select>
-          </label>
+          <div className="dashboard-date-picker">
+            <label className="date-control">
+              <span>{dateLabels[dateRange]}</span>
+              <select
+                aria-label="Dashboard date range"
+                value={dateRange}
+                onChange={(event) =>
+                  setDateRange(event.target.value as DateRange)
+                }
+              >
+                <option value="this-month">This month</option>
+                <option value="last-month">Last month</option>
+                <option value="all-time">All time</option>
+                <option value="custom">Custom range</option>
+              </select>
+            </label>
+            {dateRange === "custom" && (
+              <div className="dashboard-date-fields">
+                <label>
+                  Start date
+                  <input
+                    type="date"
+                    value={dashboardFromDate}
+                    max={dashboardToDate || undefined}
+                    onChange={(event) => setDashboardFromDate(event.target.value)}
+                  />
+                </label>
+                <label>
+                  End date
+                  <input
+                    type="date"
+                    value={dashboardToDate}
+                    min={dashboardFromDate || undefined}
+                    onChange={(event) => setDashboardToDate(event.target.value)}
+                  />
+                </label>
+              </div>
+            )}
+          </div>
         </div>
         <AnnouncementPanel onNotify={notify} />
         {active !== "Overview" && (
@@ -584,32 +654,32 @@ export default function AdminPage() {
         <div className="stats-grid">
           <Stat
             label="Revenue"
-            value={metrics.revenue}
-            change={metrics.growth[0]}
+            value={displayedMetrics.revenue}
+            change={displayedMetrics.growth[0]}
             note={
               dateRange === "this-month" ? "vs. last month" : "selected period"
             }
           />
           <Stat
             label="Orders"
-            value={metrics.orders}
-            change={metrics.growth[1]}
+            value={displayedMetrics.orders}
+            change={displayedMetrics.growth[1]}
             note={
               dateRange === "this-month" ? "vs. last month" : "selected period"
             }
           />
           <Stat
             label="Average order"
-            value={metrics.average}
-            change={metrics.growth[2]}
+            value={displayedMetrics.average}
+            change={displayedMetrics.growth[2]}
             note={
               dateRange === "this-month" ? "vs. last month" : "selected period"
             }
           />
           <Stat
             label="New customers"
-            value={metrics.customers}
-            change={metrics.growth[3]}
+            value={displayedMetrics.customers}
+            change={displayedMetrics.growth[3]}
             note={
               dateRange === "this-month" ? "vs. last month" : "selected period"
             }
@@ -634,7 +704,7 @@ export default function AdminPage() {
               </div>
             </div>
             <div className="chart-value">
-              {metrics.revenue} <span>↑ {metrics.growth[0].slice(1)}</span>
+              {displayedMetrics.revenue} <span>{dateRange === "custom" ? "Selected dates" : `↑ ${displayedMetrics.growth[0].slice(1)}`}</span>
             </div>
             <div className="sales-chart">
               <div className="chart-y">
@@ -703,7 +773,9 @@ export default function AdminPage() {
                 color="wine"
                 label="Delivered"
                 value={
-                  dateRange === "this-month"
+                    dateRange === "custom"
+                      ? String(customDashboardOrders.filter((order) => order.status === "Delivered").length)
+                      : dateRange === "this-month"
                     ? "108"
                     : dateRange === "last-month"
                       ? "94"
@@ -714,7 +786,9 @@ export default function AdminPage() {
                 color="gold"
                 label="Processing"
                 value={
-                  dateRange === "this-month"
+                    dateRange === "custom"
+                      ? String(customDashboardOrders.filter((order) => order.status === "Processing" || order.status === "Packed").length)
+                      : dateRange === "this-month"
                     ? "34"
                     : dateRange === "last-month"
                       ? "29"
@@ -725,7 +799,9 @@ export default function AdminPage() {
                 color="peach"
                 label="Shipped"
                 value={
-                  dateRange === "this-month"
+                    dateRange === "custom"
+                      ? String(customDashboardOrders.filter((order) => order.status === "Shipped").length)
+                      : dateRange === "this-month"
                     ? "28"
                     : dateRange === "last-month"
                       ? "25"
@@ -736,7 +812,9 @@ export default function AdminPage() {
                 color="lavender"
                 label="Pending"
                 value={
-                  dateRange === "this-month"
+                    dateRange === "custom"
+                      ? String(customDashboardOrders.filter((order) => order.status === "Processing").length)
+                      : dateRange === "this-month"
                     ? "14"
                     : dateRange === "last-month"
                       ? "15"

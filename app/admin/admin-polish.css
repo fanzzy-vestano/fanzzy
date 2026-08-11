@@ -32,6 +32,37 @@
   padding-right: 16px;
 }
 
+.dashboard-date-picker {
+  align-items: end;
+  display: grid;
+  gap: 10px;
+  justify-items: end;
+}
+
+.dashboard-date-fields {
+  display: flex;
+  gap: 8px;
+}
+
+.dashboard-date-fields label {
+  color: var(--admin-muted);
+  display: grid;
+  font-family: var(--mono);
+  font-size: 7px;
+  gap: 5px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.dashboard-date-fields input {
+  background: var(--admin-paper);
+  border: 1px solid var(--admin-line);
+  color: var(--wine);
+  font-family: var(--mono);
+  font-size: 8px;
+  padding: 8px;
+}
+
 .table-filters {
   align-items: center;
   display: flex;
@@ -1666,6 +1697,21 @@
 .whatsapp-action { background: #178b58; color: #fff; font-family: var(--mono); font-size: 8px; letter-spacing: .07em; padding: 13px 15px; text-transform: uppercase; }
 
 @media (max-width: 640px) {
+  .dashboard-date-picker {
+    justify-items: start;
+    width: 100%;
+  }
+
+  .dashboard-date-fields {
+    width: 100%;
+  }
+
+  .dashboard-date-fields label,
+  .dashboard-date-fields input {
+    min-width: 0;
+    width: 100%;
+  }
+
   .order-filter-bar {
     align-items: stretch;
     flex-direction: column;
