@@ -27,7 +27,7 @@ type CustomerOrder = {
   address?: string;
   items?: Array<{ name: string; quantity: number; price: string }>;
 };
-type AssistantMessage = { role: "user" | "assistant"; text: string };
+type AssistantMessage = { role: "user" | "assistant"; text: string; productIds?: string[] };
 
 const defaultProducts: Product[] = [
   { id: "aurora", name: "Aurora Drop Earrings", category: "Earrings", price: 1290, compareAt: 1690, image: "https://images.unsplash.com/photo-1635767798638-3e25273a8236?auto=format&fit=crop&w=900&q=85", hoverImage: "https://images.unsplash.com/photo-1535632066927-ab7c9ab60908?auto=format&fit=crop&w=900&q=85", tag: "Bestseller", tone: "#d9c4bc" },
@@ -483,10 +483,22 @@ export default function Home() {
     if (matches.length) return `I found ${matches.map((product) => `${product.name} (${formatINR(product.price)})`).join(", ")}. Open the collection to take a closer look.`;
     return "I’m here to help with products, latest arrivals, budgets, gifts, new orders, order status, shipping, payments, returns, offers, and jewellery care. Try asking: ‘What’s new?’, ‘Show me rings under ₹1500’, or ‘How do I place a new order?’";
   };
+  const assistantProducts = (message: string) => {
+    const query = message.toLowerCase();
+    if (/order|track|delivery|status|ship|return|exchange|care|clean|payment|cod|razorpay/.test(query)) return [];
+    if (/latest|new arrival|newest|recent|just in|arrived/.test(query)) return [...products].reverse().slice(0, 3);
+    const budget = query.match(/(?:under|below|less than|within|budget)\s*(?:₹|rs\.?\s*)?([\d,]+)/)?.[1];
+    if (budget) return products.filter((product) => product.price <= Number(budget.replace(/,/g, ""))).slice(0, 3);
+    const category = ["earrings", "necklaces", "bracelets", "rings"].find((item) => query.includes(item));
+    if (category) return products.filter((product) => product.category.toLowerCase().includes(category)).slice(0, 3);
+    if (/gift|present|birthday|anniversary/.test(query)) return products.filter((product) => product.tag === "Bestseller" || product.tag === "New in").slice(0, 3);
+    return products.filter((product) => `${product.name} ${product.category}`.toLowerCase().includes(query)).slice(0, 3);
+  };
   const sendAssistantMessage = (value = assistantInput) => {
     const message = value.trim();
     if (!message) return;
-    setAssistantMessages((current) => [...current, { role: "user", text: message }, { role: "assistant", text: assistantReply(message) }]);
+    const matches = assistantProducts(message);
+    setAssistantMessages((current) => [...current, { role: "user", text: message }, { role: "assistant", text: assistantReply(message), productIds: matches.map((product) => product.id) }]);
     setAssistantInput("");
   };
 
@@ -539,7 +551,7 @@ export default function Home() {
 
       <button className="whatsapp-float" onClick={() => setAssistantOpen(true)} aria-label="Open Fanzzy AI Assistant">✦ <span>Chat with AI</span></button>
 
-      {assistantOpen && <div className="drawer-backdrop" onClick={() => setAssistantOpen(false)}><aside className="assistant-drawer" role="dialog" aria-modal="true" aria-labelledby="assistant-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">FANZZY AI</p><h2 id="assistant-title">How can I help?</h2></div><button aria-label="Close AI assistant" onClick={() => setAssistantOpen(false)}>×</button></div><div className="assistant-messages" aria-live="polite">{assistantMessages.map((message, index) => <div className={`assistant-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.text}</span></div>)}</div><div className="assistant-prompts"><button onClick={() => sendAssistantMessage("Help me choose a gift")}>Choose a gift</button><button onClick={() => sendAssistantMessage("Track my order")}>Track my order</button><button onClick={() => sendAssistantMessage("How do I care for my jewellery?")}>Jewellery care</button></div><form className="assistant-form" onSubmit={(event) => { event.preventDefault(); sendAssistantMessage(); }}><input value={assistantInput} onChange={(event) => setAssistantInput(event.target.value)} placeholder="Ask Fanzzy Assistant..." aria-label="Ask Fanzzy Assistant" /><button type="submit" aria-label="Send message">↗</button></form></aside></div>}
+      {assistantOpen && <div className="drawer-backdrop" onClick={() => setAssistantOpen(false)}><aside className="assistant-drawer" role="dialog" aria-modal="true" aria-labelledby="assistant-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">FANZZY AI</p><h2 id="assistant-title">How can I help?</h2></div><button aria-label="Close AI assistant" onClick={() => setAssistantOpen(false)}>×</button></div><div className="assistant-messages" aria-live="polite">{assistantMessages.map((message, index) => <div className={`assistant-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.text}{message.productIds?.length ? <div className="assistant-product-actions">{message.productIds.map((productId) => { const product = products.find((item) => item.id === productId); return product ? <button key={product.id} onClick={() => { setQuickProduct(product); setAssistantOpen(false); }}>View {product.name} · {formatINR(product.price)} ↗</button> : null; })}</div> : null}</span></div>)}</div><div className="assistant-prompts"><button onClick={() => sendAssistantMessage("Help me choose a gift")}>Choose a gift</button><button onClick={() => sendAssistantMessage("Track my order")}>Track my order</button><button onClick={() => sendAssistantMessage("How do I care for my jewellery?")}>Jewellery care</button></div><form className="assistant-form" onSubmit={(event) => { event.preventDefault(); sendAssistantMessage(); }}><input value={assistantInput} onChange={(event) => setAssistantInput(event.target.value)} placeholder="Ask Fanzzy Assistant..." aria-label="Ask Fanzzy Assistant" /><button type="submit" aria-label="Send message">↗</button></form></aside></div>}
 
       {searchOpen && <div className="overlay search-overlay" role="dialog" aria-modal="true" aria-label="Search"><div className="overlay-top"><span className="wordmark"><img src={siteAsset("fanzzy-mark.png")} alt="Fanzzy" className="brand-logo" /></span><button onClick={() => setSearchOpen(false)}>Close&nbsp; ×</button></div><div className="search-content"><p className="eyebrow">SEARCH THE COLLECTION</p><div className="large-search"><input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Try “gold hoops”" /><span>⌕</span></div>{search && <div className="search-results">{filteredProducts.length ? filteredProducts.map((product) => <button key={product.id} onClick={() => { setQuickProduct(product); setSearchOpen(false); }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(product.price)}</small></span><b>↗</b></button>) : <p className="muted">No pieces found. Try another search.</p>}</div>}{!search && <div className="search-suggestions"><span>Trending now</span><button onClick={() => setSearch("hoops")}>Hoops</button><button onClick={() => setSearch("pearl")}>Pearls</button><button onClick={() => setSearch("chain")}>Chains</button></div>}</div></div>}
 
