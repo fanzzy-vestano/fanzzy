@@ -45,13 +45,8 @@ const defaultCategories = [
 ];
 
 const formatINR = (value: number) => `₹${(Number.isFinite(value) ? value : 0).toLocaleString("en-IN")}`;
-const defaultHeroImage = "https://images.unsplash.com/photo-1599643478518-a784e5dc4c8f?auto=format&fit=crop&w=1200&q=90";
-const defaultHeroSlides = [
-  "https://images.unsplash.com/photo-1515562141207-7a88fb7ce338?auto=format&fit=crop&w=1800&q=90",
-  "https://images.unsplash.com/photo-1617038220319-276d3cfab638?auto=format&fit=crop&w=1800&q=90",
-  "https://images.unsplash.com/photo-1635767798638-3e25273a8236?auto=format&fit=crop&w=1800&q=90",
-];
-const initialHeroSlides = [defaultHeroImage, ...defaultHeroSlides];
+const blockedHeroImage = "photo-1599643478518-a784e5dc4c8f";
+const initialHeroSlides: string[] = [];
 const defaultHeroSlideDuration = 5.2;
 const defaultDeliveryCharge = { enabled: false, amount: 99 };
 const siteBasePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
@@ -296,8 +291,9 @@ export default function Home() {
       if (storedSlides) {
         try {
           const parsed = JSON.parse(storedSlides);
-          if (Array.isArray(parsed) && parsed.filter((value): value is string => typeof value === "string" && value.trim().length > 0).length) {
-            setHeroSlides(parsed.filter((value): value is string => typeof value === "string" && value.trim().length > 0).slice(0, 4));
+          const allowedSlides = Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string" && value.trim().length > 0 && !value.includes(blockedHeroImage)).slice(0, 4) : [];
+          if (allowedSlides.length) {
+            setHeroSlides(allowedSlides);
             return;
           }
         } catch {
@@ -306,7 +302,7 @@ export default function Home() {
       }
       const legacy = await fetchStoreSetting("heroImage");
       const storedLegacy = legacy.value || window.localStorage.getItem("fanzzy-hero-image");
-      if (storedLegacy) setHeroSlides([storedLegacy, ...defaultHeroSlides]);
+      if (storedLegacy && !storedLegacy.includes(blockedHeroImage)) setHeroSlides([storedLegacy]);
     };
     void syncHeroSlides();
     window.addEventListener("storage", syncHeroSlides);
@@ -320,6 +316,7 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    if (!heroSlides.length) return;
     setHeroSlideIndex(0);
     const timer = window.setInterval(() => {
       setHeroSlideIndex((current) => (current + 1) % heroSlides.length);
@@ -432,7 +429,7 @@ export default function Home() {
   }, [orders, orderLookupPhone]);
 
   return (
-    <main className="site-shell">
+    <main className="site-shell" id="top">
       <div className="announcement"><strong>{announcementText}</strong><button onClick={() => announce("Announcement link selected")}>Explore now&nbsp; ↗</button></div>
 
       <header className="site-header">
@@ -462,9 +459,7 @@ export default function Home() {
         </div>
       </div>}
 
-      <section className="hero hero-background" id="top">
-        <div className="hero-slide-layer" key={heroSlides[heroSlideIndex]}><img src={heroSlides[heroSlideIndex]} alt="Fanzzy collection highlight" /></div>
-      </section>
+      {heroSlides.length > 0 && <section className="hero hero-background" id="top"><div className="hero-slide-layer" key={heroSlides[heroSlideIndex]}><img src={heroSlides[heroSlideIndex]} alt="Fanzzy collection highlight" /></div></section>}
 
       <section className="section-block" id="categories"><div className="category-showcase"><div className="category-intro"><h2>Find your <em>signature.</em></h2><a className="text-link" href={`${siteBasePath}/collections`}>View all categories <span>↗</span></a></div><div className="category-grid">{categories.map((category, index) => <button className={`category-card category-${index + 1}`} key={category.name} onClick={() => { setActiveCategory(category.name); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}><img src={category.image} alt="" /><span className="category-overlay" /><span className="category-info"><strong>{category.name}</strong></span></button>)}</div></div></section>
 
