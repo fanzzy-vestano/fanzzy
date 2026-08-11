@@ -8,6 +8,7 @@ export type CatalogProduct = {
   category: string;
   stock: number;
   price: number;
+  cost?: number;
   status: CatalogStatus;
   image: string;
   hoverImage?: string;
@@ -44,6 +45,7 @@ const asProduct = (row: Record<string, unknown>): CatalogProduct => ({
   category: String(row.category ?? "Uncategorised"),
   stock: Number(row.stock ?? 0),
   price: Number(row.price ?? 0),
+  cost: row.cost == null ? 0 : Number(row.cost),
   status: (row.status === "Draft" || row.status === "Low stock" ? row.status : "Published") as CatalogStatus,
   image: String(row.image ?? ""),
   hoverImage: typeof row.hover_image === "string" ? row.hover_image : undefined,
@@ -74,6 +76,7 @@ export async function saveCatalogProduct(product: CatalogProduct) {
       category: product.category,
       stock: product.stock,
       price: product.price,
+      cost: product.cost ?? 0,
       status: product.status,
       image: product.image,
       hover_image: product.hoverImage ?? product.image,
