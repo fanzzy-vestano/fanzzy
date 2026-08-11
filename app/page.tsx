@@ -25,6 +25,7 @@ type CustomerOrder = {
   phone: string;
   email?: string;
   address?: string;
+  coupon?: string;
   items?: Array<{ name: string; quantity: number; price: string }>;
 };
 type AssistantMessage = { role: "user" | "assistant"; text: string; productIds?: string[] };
@@ -55,6 +56,14 @@ const siteAsset = (name: string) => `${siteBasePath}/${name}`;
 const productTones = ["#d9c4bc", "#dad7ce", "#d0c2b0", "#e5ddd1"];
 const formatOrderDate = (value: string) => new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", year: "numeric" }).format(new Date(`${value}T00:00:00`));
 const phoneDigits = (value: string) => value.replace(/\D/g, "");
+const fallbackCoupon: MarketingRecord = { kind: "Coupon", name: "HELLOFANZZY", detail: "First order discount", status: "Active", code: "HELLOFANZZY", discount: "10% off" };
+const getCouponDiscount = (coupon: MarketingRecord, subtotal: number) => {
+  const percent = coupon.discount?.match(/(\d+(?:\.\d+)?)\s*%/);
+  if (percent) return Math.min(subtotal, Math.round((subtotal * Number(percent[1])) / 100));
+  const amount = coupon.discount?.match(/(?:₹|rs\.?|inr\s*)([\d,]+)/i);
+  if (amount) return Math.min(subtotal, Number(amount[1].replace(/,/g, "")) || 0);
+  return 0;
+};
 
 function normalizeStoredProduct(value: unknown, index: number): Product | null {
   if (!value || typeof value !== "object") return null;
@@ -121,6 +130,9 @@ export default function Home() {
   ]);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [checkoutForm, setCheckoutForm] = useState({ name: "", phone: "", email: "", address: "" });
+  const [couponInput, setCouponInput] = useState("");
+  const [appliedCoupon, setAppliedCoupon] = useState<MarketingRecord | null>(null);
+  const [marketingRecords, setMarketingRecords] = useState<MarketingRecord[]>([]);
   const [quickProduct, setQuickProduct] = useState<Product | null>(null);
   const [toast, setToast] = useState("");
   const [email, setEmail] = useState("");
@@ -243,7 +255,9 @@ export default function Home() {
   const cartItems = products.filter((product) => cart[product.id]);
   const cartCount = Object.values(cart).reduce((sum, count) => sum + count, 0);
   const subtotal = cartItems.reduce((sum, product) => sum + product.price * (cart[product.id] ?? 0), 0);
+  const couponDiscount = appliedCoupon ? getCouponDiscount(appliedCoupon, subtotal) : 0;
   const deliveryTotal = deliveryCharge.enabled ? deliveryCharge.amount : 0;
+  const orderTotal = Math.max(0, subtotal - couponDiscount + deliveryTotal);
 
   useEffect(() => {
     if (!toast) return;
@@ -276,14 +290,18 @@ export default function Home() {
       const remote = await fetchStoreSetting("marketingRecords");
       const stored = remote.value || window.localStorage.getItem("fanzzy-marketing-records");
       if (!stored) {
+        setMarketingRecords([]);
         setActiveCampaign(null);
         return;
       }
       try {
         const parsed = JSON.parse(stored) as MarketingRecord[];
-        const active = Array.isArray(parsed) ? parsed.find((record) => record?.status === "Active" && record?.name) : null;
+        const valid = Array.isArray(parsed) ? parsed.filter((record) => record?.name) : [];
+        setMarketingRecords(valid);
+        const active = valid.find((record) => record?.status === "Active" && record?.name);
         setActiveCampaign(active ?? null);
       } catch {
+        setMarketingRecords([]);
         setActiveCampaign(null);
       }
     };
@@ -396,6 +414,20 @@ export default function Home() {
     setCartOpen(false);
     setCheckoutOpen(true);
   };
+  const applyCoupon = () => {
+    const code = couponInput.trim().toUpperCase();
+    if (!code) return announce("Enter a coupon code");
+    const source = marketingRecords.length ? marketingRecords : [fallbackCoupon];
+    const coupon = source.find((record) => record.kind === "Coupon" && record.status === "Active" && record.code?.toUpperCase() === code);
+    if (!coupon) {
+      setAppliedCoupon(null);
+      return announce("That coupon is not active or does not exist");
+    }
+    if (!getCouponDiscount(coupon, subtotal)) return announce("This coupon has no valid discount");
+    setAppliedCoupon(coupon);
+    setCouponInput(code);
+    announce(`${code} applied`);
+  };
   const submitCheckout = () => {
     const name = checkoutForm.name.trim();
     const digits = checkoutForm.phone.replace(/\D/g, "");
@@ -407,11 +439,12 @@ export default function Home() {
       id: orderId,
       date: new Date().toISOString().slice(0, 10),
       status: "Processing",
-      total: formatINR(subtotal + deliveryTotal),
+      total: formatINR(orderTotal),
       customerName: name,
       phone: checkoutForm.phone.trim(),
       email: checkoutForm.email.trim(),
       address: checkoutForm.address.trim(),
+      ...(appliedCoupon ? { coupon: appliedCoupon.code } : {}),
       items: cartItems.map((product) => ({ name: product.name, quantity: cart[product.id] ?? 0, price: formatINR(product.price) })),
     };
     let previousOrders: unknown[] = [];
@@ -428,6 +461,8 @@ export default function Home() {
     setCart({});
     setCheckoutOpen(false);
     setCheckoutForm({ name: "", phone: "", email: "", address: "" });
+    setCouponInput("");
+    setAppliedCoupon(null);
     announce(`${orderId} placed successfully`);
   };
 
@@ -559,7 +594,7 @@ export default function Home() {
 
       {cartOpen && <div className="drawer-backdrop" onClick={() => setCartOpen(false)}><aside className="cart-drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR CART</p><h2>{cartCount ? `${cartCount} piece${cartCount > 1 ? "s" : ""}` : "A little empty"}</h2></div><button onClick={() => setCartOpen(false)}>×</button></div>{cartItems.length ? <><div className="drawer-items">{cartItems.map((product) => <div className="drawer-item" key={product.id}><img src={product.image} alt="" /><div><strong>{product.name}</strong><small>{formatINR(product.price)}</small><div className="quantity"><button onClick={() => updateQuantity(product.id, -1)}>−</button><span>{cart[product.id]}</span><button onClick={() => updateQuantity(product.id, 1)}>+</button></div></div><b>{formatINR(product.price * (cart[product.id] ?? 0))}</b></div>)}</div><div className="drawer-footer"><div><span>Subtotal</span><strong>{formatINR(subtotal)}</strong></div><div><span>Delivery</span><strong>{deliveryCharge.enabled ? formatINR(deliveryTotal) : "Free"}</strong></div><div className="drawer-total"><span>Total</span><strong>{formatINR(subtotal + deliveryTotal)}</strong></div><p>{deliveryCharge.enabled ? "Delivery charge applied to this order." : "Complimentary shipping above ₹999."}</p><button className="button button-dark full-width" onClick={openCheckout}>Proceed to buy <span>↗</span></button></div></> : <div className="empty-bag"><div>✦</div><p>Your future favourites<br />belong here.</p><button className="text-link" onClick={() => setCartOpen(false)}>Continue shopping <span>↗</span></button></div>}</aside></div>}
 
-      {checkoutOpen && <div className="drawer-backdrop checkout-backdrop" onClick={() => setCheckoutOpen(false)}><section className="checkout-modal" role="dialog" aria-modal="true" aria-labelledby="checkout-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">CHECKOUT</p><h2 id="checkout-title">Complete your order</h2></div><button aria-label="Close checkout" onClick={() => setCheckoutOpen(false)}>×</button></div><p className="checkout-intro">We’ll use your WhatsApp number to confirm your order and delivery updates.</p><div className="checkout-grid"><label>Customer name<input value={checkoutForm.name} onChange={(event) => setCheckoutForm((current) => ({ ...current, name: event.target.value }))} placeholder="Your full name" required /></label><label>WhatsApp number <span className="required-mark">Required</span><input type="tel" value={checkoutForm.phone} onChange={(event) => setCheckoutForm((current) => ({ ...current, phone: event.target.value }))} placeholder="+91 98765 43210" required /></label><label>Email address <span className="optional-mark">Optional</span><input type="email" value={checkoutForm.email} onChange={(event) => setCheckoutForm((current) => ({ ...current, email: event.target.value }))} placeholder="you@example.com" /></label><label className="checkout-wide">Delivery address<input value={checkoutForm.address} onChange={(event) => setCheckoutForm((current) => ({ ...current, address: event.target.value }))} placeholder="House number, street, city, pincode" required /></label></div><div className="checkout-total"><span>Order total</span><strong>{formatINR(subtotal + deliveryTotal)}</strong></div><div className="checkout-actions"><button className="button button-dark" onClick={submitCheckout}>Place order <span>↗</span></button><button className="save-text" onClick={() => setCheckoutOpen(false)}>Back to cart</button></div></section></div>}
+      {checkoutOpen && <div className="drawer-backdrop checkout-backdrop" onClick={() => setCheckoutOpen(false)}><section className="checkout-modal" role="dialog" aria-modal="true" aria-labelledby="checkout-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">CHECKOUT</p><h2 id="checkout-title">Complete your order</h2></div><button aria-label="Close checkout" onClick={() => setCheckoutOpen(false)}>×</button></div><p className="checkout-intro">We’ll use your WhatsApp number to confirm your order and delivery updates.</p><div className="checkout-grid"><label>Customer name<input value={checkoutForm.name} onChange={(event) => setCheckoutForm((current) => ({ ...current, name: event.target.value }))} placeholder="Your full name" required /></label><label>WhatsApp number <span className="required-mark">Required</span><input type="tel" value={checkoutForm.phone} onChange={(event) => setCheckoutForm((current) => ({ ...current, phone: event.target.value }))} placeholder="+91 98765 43210" required /></label><label>Email address <span className="optional-mark">Optional</span><input type="email" value={checkoutForm.email} onChange={(event) => setCheckoutForm((current) => ({ ...current, email: event.target.value }))} placeholder="you@example.com" /></label><label className="checkout-wide">Delivery address<input value={checkoutForm.address} onChange={(event) => setCheckoutForm((current) => ({ ...current, address: event.target.value }))} placeholder="House number, street, city, pincode" required /></label><div className="checkout-coupon checkout-wide"><label htmlFor="checkout-coupon-code">Coupon code <span className="optional-mark">Optional</span></label><div className="coupon-entry"><input id="checkout-coupon-code" value={couponInput} onChange={(event) => { setCouponInput(event.target.value.toUpperCase()); setAppliedCoupon(null); }} placeholder="Enter coupon code" autoCapitalize="characters" /><button className="button button-light" type="button" onClick={applyCoupon}>Apply</button></div>{appliedCoupon && <p className="coupon-success">{appliedCoupon.code} applied · {appliedCoupon.discount} off</p>}</div></div>{couponDiscount > 0 && <div className="checkout-total coupon-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div className="checkout-total"><span>Order total</span><strong>{formatINR(orderTotal)}</strong></div><div className="checkout-actions"><button className="button button-dark" onClick={submitCheckout}>Place order <span>↗</span></button><button className="save-text" onClick={() => setCheckoutOpen(false)}>Back to cart</button></div></section></div>}
 
       {quickProduct && <div className="drawer-backdrop" onClick={() => setQuickProduct(null)}><div className="quick-modal" onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setQuickProduct(null)}>×</button><div className="quick-image"><img src={quickProduct.image} alt={quickProduct.name} /></div><div className="quick-copy"><p className="eyebrow">{quickProduct.category}</p><h2>{quickProduct.name}</h2><div className="price-row"><span>{formatINR(quickProduct.price)}</span>{quickProduct.compareAt && <del>{formatINR(quickProduct.compareAt)}</del>}</div><p>Designed to become part of your everyday ritual. Hand-finished in small batches with a soft, lasting glow.</p><div className="quick-actions"><button className="button button-dark" onClick={() => { addToCart(quickProduct); setQuickProduct(null); }}>Add to cart <span>↗</span></button><button className="save-text" onClick={() => toggleWishlist(quickProduct.id)}>{wishlist.includes(quickProduct.id) ? "♥ Saved" : "♡ Save for later"}</button></div></div></div></div>}
 

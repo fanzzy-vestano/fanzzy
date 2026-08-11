@@ -2273,6 +2273,14 @@ function MarketingWorkspace({
       onNotify("Add a name before saving");
       return;
     }
+    if (form.kind === "Coupon" && !form.code.trim()) {
+      onNotify("Add a coupon code before saving");
+      return;
+    }
+    if (form.kind === "Coupon" && !form.discount.trim()) {
+      onNotify("Add a coupon discount before saving");
+      return;
+    }
     const record: MarketingRecord = {
       id: editingId ?? `${form.kind.toLowerCase()}-${Date.now()}`,
       kind: form.kind,

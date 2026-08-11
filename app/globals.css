@@ -49,7 +49,15 @@ img { display: block; width: 100%; }
 .checkout-wide { grid-column: 1 / -1; }
 .required-mark { color: #b86a6d; font-size: 7px; }
 .optional-mark { color: var(--muted); font-size: 7px; }
+.checkout-coupon { border-top: 1px solid var(--line); padding-top: 20px; }
+.checkout-coupon > label { color: var(--wine); display: flex; font-family: var(--mono); font-size: 8px; gap: 7px; letter-spacing: .08em; text-transform: uppercase; }
+.coupon-entry { align-items: stretch; display: flex; gap: 10px; margin-top: 9px; }
+.coupon-entry input { flex: 1; min-width: 0; }
+.coupon-entry .button { flex: 0 0 auto; padding: 13px 18px; }
+.coupon-success { color: #567248; font-family: var(--mono); font-size: 9px; letter-spacing: .06em; margin: 9px 0 0; text-transform: uppercase; }
 .checkout-total { border-top: 1px solid var(--line); display: flex; justify-content: space-between; margin-top: 25px; padding-top: 18px; }
+.coupon-total { margin-top: 18px; }
+.coupon-total strong { color: #567248; }
 .checkout-total span { color: var(--muted); font-size: 12px; }
 .checkout-total strong { color: var(--wine); font-family: var(--mono); font-size: 13px; font-weight: 400; }
 .checkout-actions { align-items: center; display: flex; gap: 20px; margin-top: 22px; }
