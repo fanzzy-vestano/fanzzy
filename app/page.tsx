@@ -129,8 +129,20 @@ export default function Home() {
   useEffect(() => {
     const syncProducts = async () => {
       const remote = await fetchCatalogProducts();
+      const stored = window.localStorage.getItem("fanzzy-products");
+      let localProducts: Product[] = [];
+      if (stored) {
+        try {
+          const parsed: unknown = JSON.parse(stored);
+          if (Array.isArray(parsed)) {
+            localProducts = parsed.map(normalizeStoredProduct).filter((product): product is Product => product !== null);
+          }
+        } catch {
+          window.localStorage.removeItem("fanzzy-products");
+        }
+      }
       if (!remote.error && remote.data && remote.data.length) {
-        setProducts(remote.data.map((product, index) => normalizeStoredProduct({
+        const remoteProducts = remote.data.map((product, index) => normalizeStoredProduct({
           id: product.sku,
           name: product.name,
           category: product.category,
@@ -140,19 +152,13 @@ export default function Home() {
           tag: product.tag,
           tone: product.tone,
           compareAt: product.compareAt,
-        }, index)).filter((product): product is Product => product !== null));
+        }, index)).filter((product): product is Product => product !== null);
+        const merged = new Map(remoteProducts.map((product) => [product.id, product]));
+        localProducts.forEach((product) => merged.set(product.id, product));
+        setProducts(Array.from(merged.values()));
         return;
       }
-      const stored = window.localStorage.getItem("fanzzy-products");
-      if (!stored) return;
-      try {
-        const parsed: unknown = JSON.parse(stored);
-        if (Array.isArray(parsed)) {
-          setProducts(parsed.map(normalizeStoredProduct).filter((product): product is Product => product !== null));
-        }
-      } catch {
-        window.localStorage.removeItem("fanzzy-products");
-      }
+      if (localProducts.length) setProducts(localProducts);
     };
     void syncProducts();
     window.addEventListener("storage", syncProducts);

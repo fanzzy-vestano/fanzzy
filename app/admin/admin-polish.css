@@ -816,6 +816,223 @@
   font-weight: 400;
 }
 
+.settings-list {
+  display: grid;
+}
+
+.settings-list button {
+  align-items: center;
+  background: transparent;
+  border-bottom: 1px solid #eee9e4;
+  color: var(--admin-ink);
+  display: grid;
+  gap: 14px;
+  grid-template-columns: 32px minmax(150px, 1fr) 1fr 20px;
+  padding: 21px 0;
+  text-align: left;
+}
+
+.settings-list button:hover strong,
+.settings-list button:hover b {
+  color: var(--wine);
+}
+
+.settings-list strong {
+  font-family: var(--serif);
+  font-size: 17px;
+  font-weight: 500;
+}
+
+.settings-list small {
+  color: var(--admin-muted);
+  font-size: 10px;
+}
+
+.settings-list b {
+  color: var(--admin-muted);
+  font-size: 16px;
+  font-weight: 400;
+}
+
+.settings-modal {
+  max-width: 680px;
+}
+
+.settings-modal h3 {
+  color: var(--wine);
+  font-family: var(--serif);
+  font-size: 30px;
+  font-weight: 500;
+  letter-spacing: -.06em;
+  margin: -8px 0 8px;
+}
+
+.settings-modal-copy,
+.settings-help {
+  color: var(--admin-muted);
+  font-size: 11px;
+  line-height: 1.7;
+  margin: 0 0 22px;
+}
+
+.settings-form-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: 1fr 1fr;
+}
+
+.settings-form-grid label,
+.settings-payment-form > label:not(.settings-check) {
+  color: var(--admin-muted);
+  display: flex;
+  flex-direction: column;
+  font-family: var(--mono);
+  font-size: 8px;
+  gap: 7px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.settings-form-grid input,
+.settings-form-grid textarea,
+.settings-payment-form > label:not(.settings-check) input,
+.settings-role-row input {
+  background: var(--admin-paper);
+  border: 1px solid var(--admin-line);
+  color: var(--admin-ink);
+  font-family: var(--sans);
+  font-size: 11px;
+  letter-spacing: 0;
+  outline: 0;
+  padding: 11px 12px;
+  resize: vertical;
+  text-transform: none;
+}
+
+.settings-form-grid input:focus,
+.settings-form-grid textarea:focus,
+.settings-payment-form input:focus,
+.settings-role-row input:focus {
+  border-color: var(--wine);
+}
+
+.settings-wide,
+.settings-help {
+  grid-column: 1 / -1;
+}
+
+.settings-help {
+  background: #f5eee8;
+  margin: 2px 0 0;
+  padding: 12px;
+}
+
+.settings-payment-form,
+.settings-roles-form {
+  display: grid;
+  gap: 14px;
+}
+
+.settings-check {
+  background: #f8f3ed;
+  border: 1px solid var(--admin-line);
+  display: grid;
+  gap: 5px 10px;
+  grid-template-columns: 16px 1fr;
+  padding: 13px;
+}
+
+.settings-check input {
+  accent-color: var(--wine);
+  grid-row: span 2;
+  margin-top: 2px;
+}
+
+.settings-check span {
+  color: var(--wine);
+  font-size: 12px;
+}
+
+.settings-check small {
+  color: var(--admin-muted);
+  font-size: 10px;
+}
+
+.settings-role-list {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-role-card {
+  background: #f8f3ed;
+  border: 1px solid var(--admin-line);
+  padding: 10px;
+}
+
+.settings-role-row {
+  display: flex;
+  gap: 8px;
+}
+
+.settings-role-row input {
+  flex: 1;
+}
+
+.settings-permission-grid {
+  border-top: 1px solid var(--admin-line);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 12px;
+  margin-top: 10px;
+  padding-top: 10px;
+}
+
+.settings-permission-grid label {
+  align-items: center;
+  color: var(--admin-muted);
+  display: inline-flex;
+  font-family: var(--mono);
+  font-size: 7px;
+  gap: 5px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.settings-permission-grid input {
+  accent-color: var(--wine);
+}
+
+.settings-role-row button {
+  background: #f2ece5;
+  color: var(--wine);
+  font-size: 19px;
+  width: 40px;
+}
+
+.settings-modal-actions {
+  border-top: 1px solid var(--admin-line);
+  display: flex;
+  gap: 8px;
+  margin-top: 26px;
+  padding-top: 18px;
+}
+
+.role-switcher {
+  background: transparent;
+  border: 0;
+  color: var(--admin-muted);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 7px;
+  grid-column: 2 / -1;
+  letter-spacing: .05em;
+  margin-top: -5px;
+  max-width: 170px;
+  outline: 0;
+  padding: 0;
+  text-transform: uppercase;
+}
+
 .marketing-list {
   display: grid;
 }
@@ -1312,6 +1529,24 @@
 
   .module-list small {
     display: none;
+  }
+
+  .settings-list button {
+    gap: 8px;
+    grid-template-columns: 25px 1fr 20px;
+  }
+
+  .settings-list small {
+    display: none;
+  }
+
+  .settings-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-wide,
+  .settings-help {
+    grid-column: auto;
   }
 }
 

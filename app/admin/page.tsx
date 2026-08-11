@@ -51,6 +51,41 @@ type OrderDateFilter =
   | "this-month"
   | "all-time"
   | "custom";
+type AdminPermission =
+  | "Overview"
+  | "Products"
+  | "Categories"
+  | "Collections"
+  | "Orders"
+  | "Customers"
+  | "Marketing"
+  | "Homepage"
+  | "Delivery charge"
+  | "Settings";
+type AdminRole = {
+  id: string;
+  name: string;
+  title: string;
+  permissions: AdminPermission[];
+};
+const allAdminPermissions: AdminPermission[] = [
+  "Overview",
+  "Products",
+  "Categories",
+  "Collections",
+  "Orders",
+  "Customers",
+  "Marketing",
+  "Homepage",
+  "Delivery charge",
+  "Settings",
+];
+const defaultAdminRoles: AdminRole[] = [
+  { id: "vestano", name: "Vestano", title: "Super admin", permissions: allAdminPermissions },
+  { id: "store-manager", name: "Store manager", title: "Operations", permissions: ["Overview", "Products", "Categories", "Collections", "Orders", "Customers", "Homepage", "Delivery charge"] },
+  { id: "fulfilment", name: "Fulfilment", title: "Orders & delivery", permissions: ["Overview", "Orders", "Customers", "Delivery charge"] },
+  { id: "marketing", name: "Marketing", title: "Content & growth", permissions: ["Overview", "Collections", "Marketing", "Homepage"] },
+];
 
 const adminProducts: AdminProduct[] = [
   {
@@ -339,6 +374,8 @@ const menu = [
 
 export default function AdminPage() {
   const [active, setActive] = useState("Overview");
+  const [adminRoles, setAdminRoles] = useState<AdminRole[]>(defaultAdminRoles);
+  const [activeRoleId, setActiveRoleId] = useState("vestano");
   const [query, setQuery] = useState("");
   const [toast, setToast] = useState("");
   const [dateRange, setDateRange] = useState<DateRange>("this-month");
@@ -370,6 +407,43 @@ export default function AdminPage() {
       }),
     [categoryFilter, productFilter, query],
   );
+  const activeRole = adminRoles.find((role) => role.id === activeRoleId) ?? defaultAdminRoles[0];
+  const canAccess = (section: string) => activeRole.permissions.includes(section as AdminPermission);
+  const visibleMenu = menu.filter((item) => canAccess(item.label));
+
+  useEffect(() => {
+    const syncRoles = () => {
+      const storedRoles = window.localStorage.getItem("fanzzy-admin-roles");
+      if (storedRoles) {
+        try {
+          const parsed = JSON.parse(storedRoles) as AdminRole[];
+          if (Array.isArray(parsed) && parsed.length && parsed.every((role) => role?.id && Array.isArray(role.permissions))) setAdminRoles(parsed);
+        } catch {
+          window.localStorage.removeItem("fanzzy-admin-roles");
+        }
+      }
+      const storedRole = window.localStorage.getItem("fanzzy-active-admin-role");
+      if (storedRole) setActiveRoleId(storedRole);
+    };
+    syncRoles();
+    window.addEventListener("fanzzy-store-settings-updated", syncRoles);
+    return () => window.removeEventListener("fanzzy-store-settings-updated", syncRoles);
+  }, []);
+
+  useEffect(() => {
+    if (!canAccess(active)) setActive(canAccess("Overview") ? "Overview" : (visibleMenu[0]?.label ?? "Overview"));
+    // The role controls the visible workspace; this keeps a previously selected page from leaking across roles.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeRoleId, adminRoles]);
+
+  const switchRole = (roleId: string) => {
+    const nextRole = adminRoles.find((role) => role.id === roleId) ?? defaultAdminRoles[0];
+    setActiveRoleId(nextRole.id);
+    window.localStorage.setItem("fanzzy-active-admin-role", nextRole.id);
+    setActive(nextRole.permissions.includes("Overview") ? "Overview" : nextRole.permissions[0]);
+    setToast(`Viewing as ${nextRole.name} · ${nextRole.title}`);
+    window.setTimeout(() => setToast(""), 2200);
+  };
   const metrics = {
     "this-month": {
       revenue: "₹2,48,620",
@@ -423,16 +497,18 @@ export default function AdminPage() {
           <span className="live-dot">LIVE</span>
         </div>
         <div className="admin-profile">
-          <div className="avatar">VE</div>
+          <div className="avatar">{activeRole.name.slice(0, 2).toUpperCase()}</div>
           <div>
-            <strong>Vestano</strong>
-            <small>Super admin</small>
+            <strong>{activeRole.name}</strong>
+            <small>{activeRole.title}</small>
           </div>
-          <button onClick={() => notify("Profile menu opened")}>⌄</button>
+          <select className="role-switcher" aria-label="Switch admin role" value={activeRole.id} onChange={(event) => switchRole(event.target.value)}>
+            {adminRoles.map((role) => <option value={role.id} key={role.id}>{role.name} · {role.title}</option>)}
+          </select>
         </div>
         <p className="admin-label">Workspace</p>
         <nav className="admin-nav">
-          {menu.map((item) => (
+          {visibleMenu.map((item) => (
             <button
               key={item.label}
               className={active === item.label ? "active" : ""}
@@ -445,7 +521,7 @@ export default function AdminPage() {
           ))}
         </nav>
         <div className="sidebar-bottom">
-          <button onClick={() => setActive("Settings")}>
+          <button onClick={() => canAccess("Settings") ? setActive("Settings") : notify(`${activeRole.title} cannot access Settings`)}>
             <span className="nav-icon">⚙</span>Settings
           </button>
           <a href={`${siteBasePath}/`}>
@@ -1088,6 +1164,7 @@ function ModuleWorkspace({
   if (module === "Collections")
     return <CollectionsWorkspace onNotify={onNotify} />;
   if (module === "Customers") return <CustomersWorkspace onNotify={onNotify} />;
+  if (module === "Settings") return <SettingsWorkspace onNotify={onNotify} />;
   const content = moduleContent[module] ?? {
     eyebrow: "WORKSPACE",
     title: module,
@@ -1139,6 +1216,133 @@ function ModuleWorkspace({
           </button>
         ))}
       </div>
+    </section>
+  );
+}
+
+type SettingsSection = "Store profile" | "Shipping rules" | "Payment methods" | "Admin roles";
+
+function SettingsWorkspace({
+  onNotify,
+}: {
+  onNotify: (message: string) => void;
+}) {
+  const [selectedSection, setSelectedSection] = useState<SettingsSection | null>(null);
+  const [profile, setProfile] = useState({
+    storeName: "Fanzzy",
+    email: "hello@fanzzy.in",
+    whatsapp: "+91 98765 43210",
+    address: "India",
+  });
+  const [shipping, setShipping] = useState({
+    freeAbove: "999",
+    processing: "1–2 business days",
+    returns: "7 days",
+  });
+  const [payments, setPayments] = useState({
+    online: true,
+    cod: true,
+    provider: "Razorpay",
+  });
+  const [roles, setRoles] = useState<AdminRole[]>(defaultAdminRoles);
+
+  useEffect(() => {
+    const read = <T,>(key: string, fallback: T): T => {
+      const stored = window.localStorage.getItem(key);
+      if (!stored) return fallback;
+      try {
+        return JSON.parse(stored) as T;
+      } catch {
+        return fallback;
+      }
+    };
+    setProfile(read("fanzzy-store-profile", profile));
+    setShipping(read("fanzzy-shipping-rules", shipping));
+    setPayments(read("fanzzy-payment-methods", payments));
+    const storedRoles = read<AdminRole[]>("fanzzy-admin-roles", defaultAdminRoles);
+    setRoles(storedRoles.map((role, index) => ({
+      id: role.id || `role-${index}`,
+      name: role.name || "New role",
+      title: role.title || "Team member",
+      permissions: Array.isArray(role.permissions) ? role.permissions.filter((permission): permission is AdminPermission => allAdminPermissions.includes(permission as AdminPermission)) : ["Overview"],
+    })));
+    // These values are only read on mount; the defaults above provide the first render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const saveSettings = () => {
+    window.localStorage.setItem("fanzzy-store-profile", JSON.stringify(profile));
+    window.localStorage.setItem("fanzzy-shipping-rules", JSON.stringify(shipping));
+    window.localStorage.setItem("fanzzy-payment-methods", JSON.stringify(payments));
+    window.localStorage.setItem("fanzzy-admin-roles", JSON.stringify(roles));
+    window.dispatchEvent(new Event("fanzzy-store-settings-updated"));
+    onNotify("Store settings saved");
+  };
+
+  const statusFor = (section: SettingsSection) => {
+    if (section === "Store profile") return profile.storeName ? "Configured" : "Needs details";
+    if (section === "Shipping rules") return `${Object.values(shipping).filter(Boolean).length} active`;
+    if (section === "Payment methods") return `${payments.online || payments.cod ? payments.provider + " ready" : "No methods active"}`;
+    return `${roles.filter((role) => role.name.trim()).length} configured`;
+  };
+
+  return (
+    <section className="panel module-workspace settings-workspace">
+      <div className="module-workspace-head">
+        <div>
+          <p className="eyebrow">SYSTEM</p>
+          <h2>Store settings</h2>
+          <p>Configure store details, shipping, payments, theme, and team access.</p>
+        </div>
+        <div className="module-actions">
+          <button className="module-secondary" onClick={() => setSelectedSection("Admin roles")}>View permissions ↗</button>
+          <button className="module-primary" onClick={saveSettings}>+ Save settings</button>
+        </div>
+      </div>
+      <div className="module-summary"><span><i className="status-light" />Live workspace</span><span>4 active records</span></div>
+      <div className="settings-list">
+        {(["Store profile", "Shipping rules", "Payment methods", "Admin roles"] as SettingsSection[]).map((section, index) => (
+          <button key={section} onClick={() => setSelectedSection(section)}>
+            <span className="module-row-number">0{index + 1}</span>
+            <strong>{section}</strong>
+            <small>{statusFor(section)}</small>
+            <b>↗</b>
+          </button>
+        ))}
+      </div>
+
+      {selectedSection && <div className="product-modal-backdrop" onClick={() => setSelectedSection(null)}>
+        <div className="product-modal-card settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title" onClick={(event) => event.stopPropagation()}>
+          <button className="product-modal-close" aria-label="Close settings" onClick={() => setSelectedSection(null)}>×</button>
+          <p className="eyebrow">STORE SETTINGS</p>
+          <h3 id="settings-modal-title">{selectedSection}</h3>
+          <p className="settings-modal-copy">Update this section and save once to keep the storefront and your team workspace in sync.</p>
+
+          {selectedSection === "Store profile" && <div className="settings-form-grid">
+            <label>Store name<input value={profile.storeName} onChange={(event) => setProfile((current) => ({ ...current, storeName: event.target.value }))} /></label>
+            <label>Support email<input type="email" value={profile.email} onChange={(event) => setProfile((current) => ({ ...current, email: event.target.value }))} /></label>
+            <label>WhatsApp number<input type="tel" value={profile.whatsapp} onChange={(event) => setProfile((current) => ({ ...current, whatsapp: event.target.value }))} /></label>
+            <label className="settings-wide">Business address<textarea value={profile.address} onChange={(event) => setProfile((current) => ({ ...current, address: event.target.value }))} rows={3} /></label>
+          </div>}
+
+          {selectedSection === "Shipping rules" && <div className="settings-form-grid">
+            <label>Free shipping above (₹)<input inputMode="numeric" value={shipping.freeAbove} onChange={(event) => setShipping((current) => ({ ...current, freeAbove: event.target.value }))} /></label>
+            <label>Processing time<input value={shipping.processing} onChange={(event) => setShipping((current) => ({ ...current, processing: event.target.value }))} /></label>
+            <label>Returns window<input value={shipping.returns} onChange={(event) => setShipping((current) => ({ ...current, returns: event.target.value }))} /></label>
+            <p className="settings-help">Use Delivery charge in the sidebar to turn on a paid delivery fee and set its amount.</p>
+          </div>}
+
+          {selectedSection === "Payment methods" && <div className="settings-payment-form">
+            <label className="settings-check"><input type="checkbox" checked={payments.online} onChange={(event) => setPayments((current) => ({ ...current, online: event.target.checked }))} /><span>Online payments</span><small>Accept payments through your configured gateway.</small></label>
+            <label className="settings-check"><input type="checkbox" checked={payments.cod} onChange={(event) => setPayments((current) => ({ ...current, cod: event.target.checked }))} /><span>Cash on delivery</span><small>Let customers choose COD at checkout.</small></label>
+            <label>Payment provider<input value={payments.provider} onChange={(event) => setPayments((current) => ({ ...current, provider: event.target.value }))} /></label>
+          </div>}
+
+          {selectedSection === "Admin roles" && <div className="settings-roles-form"><div className="settings-role-list">{roles.map((role, index) => <div className="settings-role-card" key={role.id}><div className="settings-role-row"><input value={role.name} aria-label={`${role.name} name`} onChange={(event) => setRoles((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item))} /><input value={role.title} aria-label={`${role.name} title`} onChange={(event) => setRoles((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, title: event.target.value } : item))} /><button aria-label={`Remove ${role.name}`} onClick={() => setRoles((current) => current.filter((_, itemIndex) => itemIndex !== index))}>×</button></div><div className="settings-permission-grid">{allAdminPermissions.map((permission) => <label key={permission}><input type="checkbox" checked={role.permissions.includes(permission)} onChange={(event) => setRoles((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, permissions: event.target.checked ? [...new Set([...item.permissions, permission])] : item.permissions.filter((itemPermission) => itemPermission !== permission) } : item))} /><span>{permission}</span></label>)}</div></div>)}</div><button className="module-secondary" onClick={() => setRoles((current) => [...current, { id: `role-${Date.now()}`, name: "New role", title: "Team member", permissions: ["Overview"] }])}>+ Add role</button></div>}
+
+          <div className="settings-modal-actions"><button className="module-primary" onClick={() => { saveSettings(); setSelectedSection(null); }}>Save changes</button><button className="module-secondary" onClick={() => setSelectedSection(null)}>Cancel</button></div>
+        </div>
+      </div>}
     </section>
   );
 }
@@ -3499,8 +3703,33 @@ function ProductLibraryWorkspace({
           hoverImage:
             product.hoverImage || product.image || adminProducts[0].image,
         }));
-        setProducts(mapped);
-        persistCatalog(mapped);
+        let localProducts: AdminProduct[] = [];
+        const stored = window.localStorage.getItem("fanzzy-products");
+        if (stored) {
+          try {
+            const parsed = JSON.parse(stored) as Array<Partial<AdminProduct>>;
+            if (Array.isArray(parsed)) {
+              localProducts = parsed.filter((product) => typeof product.name === "string" && product.name.trim()).map((product, index) => ({
+                name: product.name!.trim(),
+                price: typeof product.price === "number" ? `₹${product.price.toLocaleString("en-IN")}` : product.price || "₹0",
+                cost: typeof product.cost === "number" ? `₹${product.cost.toLocaleString("en-IN")}` : product.cost || "₹0",
+                sku: product.sku || `FZ-LOCAL-${String(index + 1).padStart(2, "0")}`,
+                category: product.category || "Uncategorised",
+                stock: product.stock ?? 0,
+                status: product.status ?? "Published",
+                image: product.image || adminProducts[0].image,
+                hoverImage: product.hoverImage || product.image || adminProducts[0].image,
+              }));
+            }
+          } catch {
+            window.localStorage.removeItem("fanzzy-products");
+          }
+        }
+        const merged = new Map(mapped.map((product) => [product.sku, product]));
+        localProducts.forEach((product) => merged.set(product.sku, product));
+        const nextProducts = Array.from(merged.values());
+        setProducts(nextProducts);
+        persistCatalog(nextProducts);
         return;
       }
       const stored = window.localStorage.getItem("fanzzy-products");
