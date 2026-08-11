@@ -27,6 +27,7 @@ type CustomerOrder = {
   address?: string;
   items?: Array<{ name: string; quantity: number; price: string }>;
 };
+type AssistantMessage = { role: "user" | "assistant"; text: string };
 
 const defaultProducts: Product[] = [
   { id: "aurora", name: "Aurora Drop Earrings", category: "Earrings", price: 1290, compareAt: 1690, image: "https://images.unsplash.com/photo-1635767798638-3e25273a8236?auto=format&fit=crop&w=900&q=85", hoverImage: "https://images.unsplash.com/photo-1535632066927-ab7c9ab60908?auto=format&fit=crop&w=900&q=85", tag: "Bestseller", tone: "#d9c4bc" },
@@ -113,6 +114,11 @@ export default function Home() {
   const [ordersOpen, setOrdersOpen] = useState(false);
   const [orders, setOrders] = useState<CustomerOrder[]>([]);
   const [orderLookupPhone, setOrderLookupPhone] = useState("");
+  const [assistantOpen, setAssistantOpen] = useState(false);
+  const [assistantInput, setAssistantInput] = useState("");
+  const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([
+    { role: "assistant", text: "Hi, I’m Fanzzy Assistant. I can help you find a piece, choose a gift, check an order, or answer care questions." },
+  ]);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [checkoutForm, setCheckoutForm] = useState({ name: "", phone: "", email: "", address: "" });
   const [quickProduct, setQuickProduct] = useState<Product | null>(null);
@@ -433,21 +439,32 @@ export default function Home() {
       return Boolean(orderPhone) && (orderPhone.endsWith(lookup) || lookup.endsWith(orderPhone));
     });
   }, [orders, orderLookupPhone]);
-  const openWhatsAppChat = () => {
-    let phone = "919876543210";
-    try {
-      const storedProfile = window.localStorage.getItem("fanzzy-store-profile");
-      if (storedProfile) {
-        const parsed = JSON.parse(storedProfile) as { whatsapp?: string };
-        if (parsed.whatsapp) phone = parsed.whatsapp;
-      }
-    } catch {
-      // Use the default store contact when local settings are unavailable.
+  const assistantReply = (message: string) => {
+    const query = message.toLowerCase();
+    if (/hello|hi|hey|help/.test(query)) return "Tell me what you’re looking for — a gift, a necklace, earrings, a ring, a bracelet, order help, shipping, returns, or care advice.";
+    if (/order|track|delivery|status/.test(query)) {
+      if (!orders.length) return "I don’t see an order on this device yet. Place an order first, then open My orders to track it with your WhatsApp number.";
+      const latest = orders[0];
+      return `Your latest order ${latest.id} is currently ${latest.status}. The total is ${latest.total}. Open My orders for the full history.`;
     }
-    const digits = phone.replace(/\D/g, "");
-    if (digits.length < 10) return announce("Add a valid WhatsApp number in Store settings");
-    const message = "Hi Fanzzy, I need help with a jewellery order.";
-    window.open(`https://wa.me/${digits}?text=${encodeURIComponent(message)}`, "_blank", "noopener,noreferrer");
+    if (/ship|deliver/.test(query)) return "We offer complimentary shipping above ₹999. Your order updates are shared using the WhatsApp number entered at checkout.";
+    if (/return|exchange/.test(query)) return "Returns are accepted within 7 days for eligible unworn pieces. Keep the packaging safe and contact us if you need help with a return.";
+    if (/care|clean|maintain/.test(query)) return "Keep jewellery away from perfume, water, and sprays. Store each piece separately in a soft pouch and gently wipe it after wear.";
+    if (/gift|present|birthday|anniversary/.test(query)) return "For gifting, I’d start with a versatile pair of earrings or a delicate necklace. Tell me the recipient’s style or your budget and I’ll narrow it down.";
+    const category = ["earrings", "necklaces", "bracelets", "rings"].find((item) => query.includes(item));
+    if (category) {
+      const matches = products.filter((product) => product.category.toLowerCase().includes(category)).slice(0, 3);
+      if (matches.length) return `Here are a few ${category} to explore: ${matches.map((product) => `${product.name} (${formatINR(product.price)})`).join(", ")}.`;
+    }
+    const matches = products.filter((product) => `${product.name} ${product.category}`.toLowerCase().includes(query)).slice(0, 3);
+    if (matches.length) return `I found ${matches.map((product) => `${product.name} (${formatINR(product.price)})`).join(", ")}. Open the collection to take a closer look.`;
+    return "I can help you discover jewellery, choose a gift, track an order, or answer shipping, returns, and care questions. What would you like to do?";
+  };
+  const sendAssistantMessage = (value = assistantInput) => {
+    const message = value.trim();
+    if (!message) return;
+    setAssistantMessages((current) => [...current, { role: "user", text: message }, { role: "assistant", text: assistantReply(message) }]);
+    setAssistantInput("");
   };
 
   return (
@@ -497,7 +514,9 @@ export default function Home() {
 
       <footer className="site-footer" id="footer"><div className="footer-brand"><a href="#top" className="wordmark wordmark-light"><img src={siteAsset("fanzzy-mark.png")} alt="Fanzzy" className="brand-logo" /></a><p>Quietly remarkable jewellery<br />for all your becoming.</p></div><div><p className="eyebrow light">Explore</p><a href="#shop">New arrivals</a><a href="#shop">Bestsellers</a><a href="#categories">Collections</a><a href="#shop">Gift cards</a></div><div><p className="eyebrow light">Need a hand?</p><a href="#footer">Contact us</a><a href="#footer">Shipping & returns</a><a href="#footer">Care guide</a><a href="#footer">FAQs</a></div><div><p className="eyebrow light">Follow along</p><a href="#footer">Instagram ↗</a><a href="#footer">Pinterest ↗</a><a href="#footer">WhatsApp ↗</a><p className="footer-small">Made with intention in India.<br />© Fanzzy 2024</p></div><div className="footer-bottom"><span>Privacy</span><span>Terms</span><span>Accessibility</span><span>India / INR ₹</span></div></footer>
 
-      <button className="whatsapp-float" onClick={openWhatsAppChat} aria-label="Chat with Fanzzy on WhatsApp">✦ <span>Chat with us</span></button>
+      <button className="whatsapp-float" onClick={() => setAssistantOpen(true)} aria-label="Open Fanzzy AI Assistant">✦ <span>Chat with AI</span></button>
+
+      {assistantOpen && <div className="drawer-backdrop" onClick={() => setAssistantOpen(false)}><aside className="assistant-drawer" role="dialog" aria-modal="true" aria-labelledby="assistant-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">FANZZY AI</p><h2 id="assistant-title">How can I help?</h2></div><button aria-label="Close AI assistant" onClick={() => setAssistantOpen(false)}>×</button></div><div className="assistant-messages" aria-live="polite">{assistantMessages.map((message, index) => <div className={`assistant-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.text}</span></div>)}</div><div className="assistant-prompts"><button onClick={() => sendAssistantMessage("Help me choose a gift")}>Choose a gift</button><button onClick={() => sendAssistantMessage("Track my order")}>Track my order</button><button onClick={() => sendAssistantMessage("How do I care for my jewellery?")}>Jewellery care</button></div><form className="assistant-form" onSubmit={(event) => { event.preventDefault(); sendAssistantMessage(); }}><input value={assistantInput} onChange={(event) => setAssistantInput(event.target.value)} placeholder="Ask Fanzzy Assistant..." aria-label="Ask Fanzzy Assistant" /><button type="submit" aria-label="Send message">↗</button></form></aside></div>}
 
       {searchOpen && <div className="overlay search-overlay" role="dialog" aria-modal="true" aria-label="Search"><div className="overlay-top"><span className="wordmark"><img src={siteAsset("fanzzy-mark.png")} alt="Fanzzy" className="brand-logo" /></span><button onClick={() => setSearchOpen(false)}>Close&nbsp; ×</button></div><div className="search-content"><p className="eyebrow">SEARCH THE COLLECTION</p><div className="large-search"><input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Try “gold hoops”" /><span>⌕</span></div>{search && <div className="search-results">{filteredProducts.length ? filteredProducts.map((product) => <button key={product.id} onClick={() => { setQuickProduct(product); setSearchOpen(false); }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(product.price)}</small></span><b>↗</b></button>) : <p className="muted">No pieces found. Try another search.</p>}</div>}{!search && <div className="search-suggestions"><span>Trending now</span><button onClick={() => setSearch("hoops")}>Hoops</button><button onClick={() => setSearch("pearl")}>Pearls</button><button onClick={() => setSearch("chain")}>Chains</button></div>}</div></div>}
 

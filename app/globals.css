@@ -169,8 +169,15 @@ img { display: block; width: 100%; }
 .customer-order-items span { color: var(--ink); }.customer-order-items span b { color: var(--muted); font-family: var(--mono); font-size: 9px; font-weight: 400; }.customer-order-items small { color: var(--wine); font-family: var(--mono); font-size: 9px; }.legacy-order { border-bottom: 0; color: var(--muted); display: block; font-size: 10px; line-height: 1.5; }
 .customer-order-total { align-items: center; display: flex; justify-content: space-between; padding-top: 14px; }.customer-order-total span { color: var(--muted); font-size: 10px; }.customer-order-total strong { color: var(--wine); font-family: var(--mono); font-size: 12px; font-weight: 400; }
 .orders-empty { align-items: center; display: flex; flex: 1; flex-direction: column; justify-content: center; padding: 45px 20px; text-align: center; }.orders-empty > div { color: var(--gold); font-size: 38px; }.orders-empty h3 { color: var(--wine); font-family: var(--serif); font-size: 28px; font-weight: 500; letter-spacing: -.05em; margin: 8px 0; }.orders-empty p { color: var(--muted); font-size: 11px; line-height: 1.7; margin: 0 0 24px; max-width: 300px; }
+.assistant-drawer { background: var(--paper); border-radius: 22px 0 0 22px; display: flex; flex-direction: column; height: 100%; margin-left: auto; max-width: 470px; padding: 36px; width: 100%; }
+.assistant-messages { display: flex; flex: 1; flex-direction: column; gap: 12px; overflow-y: auto; padding: 24px 0; }
+.assistant-message { display: flex; max-width: 88%; }.assistant-message span { font-size: 12px; line-height: 1.65; padding: 12px 14px; }.assistant-message.assistant span { background: #f4ebe3; color: var(--ink); }.assistant-message.user { align-self: end; }.assistant-message.user span { background: var(--wine); color: #fff9f0; }
+.assistant-prompts { display: flex; flex-wrap: wrap; gap: 7px; padding: 13px 0; }.assistant-prompts button { background: transparent; border: 1px solid var(--line); color: var(--wine); font-family: var(--mono); font-size: 8px; letter-spacing: .04em; padding: 9px 10px; text-transform: uppercase; }.assistant-prompts button:hover { border-color: var(--wine); }
+.assistant-form { border-bottom: 1px solid var(--wine); display: flex; gap: 8px; }.assistant-form input { background: transparent; border: 0; color: var(--wine); flex: 1; font-family: var(--sans); font-size: 12px; outline: 0; padding: 14px 0; }.assistant-form button { background: transparent; color: var(--wine); font-size: 21px; }
 
 @media (max-width: 760px) {
+  .assistant-drawer { border-radius: 22px 0 0 22px; max-width: none; padding: 26px 20px; }
+
   .orders-drawer { border-radius: 22px 0 0 22px; max-width: none; padding: 26px 20px; }
   .customer-order-head { align-items: start; flex-direction: column; }
 }
