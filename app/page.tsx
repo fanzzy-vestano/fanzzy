@@ -433,6 +433,22 @@ export default function Home() {
       return Boolean(orderPhone) && (orderPhone.endsWith(lookup) || lookup.endsWith(orderPhone));
     });
   }, [orders, orderLookupPhone]);
+  const openWhatsAppChat = () => {
+    let phone = "919876543210";
+    try {
+      const storedProfile = window.localStorage.getItem("fanzzy-store-profile");
+      if (storedProfile) {
+        const parsed = JSON.parse(storedProfile) as { whatsapp?: string };
+        if (parsed.whatsapp) phone = parsed.whatsapp;
+      }
+    } catch {
+      // Use the default store contact when local settings are unavailable.
+    }
+    const digits = phone.replace(/\D/g, "");
+    if (digits.length < 10) return announce("Add a valid WhatsApp number in Store settings");
+    const message = "Hi Fanzzy, I need help with a jewellery order.";
+    window.open(`https://wa.me/${digits}?text=${encodeURIComponent(message)}`, "_blank", "noopener,noreferrer");
+  };
 
   return (
     <main className="site-shell" id="top">
@@ -481,7 +497,7 @@ export default function Home() {
 
       <footer className="site-footer" id="footer"><div className="footer-brand"><a href="#top" className="wordmark wordmark-light"><img src={siteAsset("fanzzy-mark.png")} alt="Fanzzy" className="brand-logo" /></a><p>Quietly remarkable jewellery<br />for all your becoming.</p></div><div><p className="eyebrow light">Explore</p><a href="#shop">New arrivals</a><a href="#shop">Bestsellers</a><a href="#categories">Collections</a><a href="#shop">Gift cards</a></div><div><p className="eyebrow light">Need a hand?</p><a href="#footer">Contact us</a><a href="#footer">Shipping & returns</a><a href="#footer">Care guide</a><a href="#footer">FAQs</a></div><div><p className="eyebrow light">Follow along</p><a href="#footer">Instagram ↗</a><a href="#footer">Pinterest ↗</a><a href="#footer">WhatsApp ↗</a><p className="footer-small">Made with intention in India.<br />© Fanzzy 2024</p></div><div className="footer-bottom"><span>Privacy</span><span>Terms</span><span>Accessibility</span><span>India / INR ₹</span></div></footer>
 
-      <button className="whatsapp-float" onClick={() => announce("We'll be in touch shortly")}>✦ <span>Chat with us</span></button>
+      <button className="whatsapp-float" onClick={openWhatsAppChat} aria-label="Chat with Fanzzy on WhatsApp">✦ <span>Chat with us</span></button>
 
       {searchOpen && <div className="overlay search-overlay" role="dialog" aria-modal="true" aria-label="Search"><div className="overlay-top"><span className="wordmark"><img src={siteAsset("fanzzy-mark.png")} alt="Fanzzy" className="brand-logo" /></span><button onClick={() => setSearchOpen(false)}>Close&nbsp; ×</button></div><div className="search-content"><p className="eyebrow">SEARCH THE COLLECTION</p><div className="large-search"><input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Try “gold hoops”" /><span>⌕</span></div>{search && <div className="search-results">{filteredProducts.length ? filteredProducts.map((product) => <button key={product.id} onClick={() => { setQuickProduct(product); setSearchOpen(false); }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(product.price)}</small></span><b>↗</b></button>) : <p className="muted">No pieces found. Try another search.</p>}</div>}{!search && <div className="search-suggestions"><span>Trending now</span><button onClick={() => setSearch("hoops")}>Hoops</button><button onClick={() => setSearch("pearl")}>Pearls</button><button onClick={() => setSearch("chain")}>Chains</button></div>}</div></div>}
 
