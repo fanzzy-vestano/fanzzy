@@ -1436,6 +1436,47 @@ function ReportsWorkspace({
   const showCategoryReport = view === "overview" || view === "category";
   const showInventoryReport = view === "overview" || view === "inventory";
   const showOrderReport = view === "overview" || view === "orders";
+  const exportReport = () => {
+    const escapeCsv = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
+    let headers: string[] = [];
+    let rows: unknown[][] = [];
+    if (view === "category") {
+      headers = ["category", "units_sold", "revenue"];
+      rows = report.categoryRows.map((category) => [category.name, category.units, formatAdminCurrency(category.revenue)]);
+    } else if (view === "item" || view === "top-selling") {
+      headers = ["product", "sku", "category", "units_sold", "revenue", "stock"];
+      rows = report.topProducts.map((row) => [row.product.name, row.product.sku, row.product.category, row.units, formatAdminCurrency(row.revenue), row.product.stock]);
+    } else if (view === "inventory") {
+      headers = ["product", "sku", "stock", "units_sold", "stock_value"];
+      rows = report.agedProducts.map((row) => [row.product.name, row.product.sku, row.product.stock, row.units, formatAdminCurrency(parseReportMoney(row.product.price) * row.product.stock)]);
+    } else if (view === "orders") {
+      headers = ["order_status", "order_count"];
+      rows = report.statuses.map((status) => [status.name, status.count]);
+    } else {
+      headers = ["report_section", "name", "value", "detail"];
+      rows = [
+        ["KPI", "Revenue", formatAdminCurrency(report.totalRevenue), periodLabel],
+        ["KPI", "Units sold", report.unitsSold, "From order items"],
+        ["KPI", "Orders", filteredOrders.length, periodLabel],
+        ["KPI", "Stock value", formatAdminCurrency(report.stockValue), "Current catalog"],
+        ...report.categoryRows.map((category) => ["Category", category.name, category.units, formatAdminCurrency(category.revenue)]),
+        ...report.topProducts.map((row) => ["Top-selling item", row.product.name, row.units, formatAdminCurrency(row.revenue)]),
+        ...report.agedProducts.map((row) => ["Inventory / aged", row.product.name, row.product.stock, `${row.units} units sold`]),
+        ...report.statuses.map((status) => ["Order status", status.name, status.count, "Orders"]),
+      ];
+    }
+    const csv = [headers, ...rows].map((row) => row.map(escapeCsv).join(",")).join("\r\n");
+    const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `fanzzy-${view === "overview" ? "all-reports" : `${view}-report`}-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    onNotify("Report exported");
+  };
 
   return (
     <section className="panel module-workspace reports-workspace">
@@ -1446,6 +1487,7 @@ function ReportsWorkspace({
           <p>See what sells, what is slowing down, and where your store is strongest.</p>
         </div>
         <div className="report-period-control">
+          <button className="module-secondary report-export-button" onClick={exportReport}>Export report ↗</button>
           <label>
             Report period
             <select value={period} onChange={(event) => setPeriod(event.target.value as ReportPeriod)}>
