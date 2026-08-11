@@ -587,45 +587,6 @@ export default function AdminPage() {
               Here’s what’s happening across Fanzzy today.
             </p>
           </div>
-          <div className="dashboard-date-picker">
-            <label className="date-control">
-              <span>{dateLabels[dateRange]}</span>
-              <select
-                aria-label="Dashboard date range"
-                value={dateRange}
-                onChange={(event) =>
-                  setDateRange(event.target.value as DateRange)
-                }
-              >
-                <option value="this-month">This month</option>
-                <option value="last-month">Last month</option>
-                <option value="all-time">All time</option>
-                <option value="custom">Custom range</option>
-              </select>
-            </label>
-            {dateRange === "custom" && (
-              <div className="dashboard-date-fields">
-                <label>
-                  Start date
-                  <input
-                    type="date"
-                    value={dashboardFromDate}
-                    max={dashboardToDate || undefined}
-                    onChange={(event) => setDashboardFromDate(event.target.value)}
-                  />
-                </label>
-                <label>
-                  End date
-                  <input
-                    type="date"
-                    value={dashboardToDate}
-                    min={dashboardFromDate || undefined}
-                    onChange={(event) => setDashboardToDate(event.target.value)}
-                  />
-                </label>
-              </div>
-            )}
-          </div>
         </div>
         <AnnouncementPanel onNotify={notify} />
         {active !== "Overview" && (
