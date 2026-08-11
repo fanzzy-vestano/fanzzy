@@ -37,7 +37,6 @@
 }
 
 .hero-slide-layer {
-  aspect-ratio: 3 / 1;
   background: #f5eee8;
   overflow: hidden;
   position: relative;
@@ -47,8 +46,8 @@
 .hero-slide-layer img {
   animation: hero-slide-in .9s ease both;
   display: block;
-  height: 100%;
-  object-fit: cover;
+  height: auto;
+  object-fit: contain;
   object-position: center;
   width: 100%;
 }
@@ -157,6 +156,7 @@
   }
 
   .hero-slide-layer img {
+    height: 100%;
     object-fit: cover;
   }
 
