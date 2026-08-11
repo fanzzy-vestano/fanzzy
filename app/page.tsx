@@ -441,16 +441,39 @@ export default function Home() {
   }, [orders, orderLookupPhone]);
   const assistantReply = (message: string) => {
     const query = message.toLowerCase();
-    if (/hello|hi|hey|help/.test(query)) return "Tell me what you’re looking for — a gift, a necklace, earrings, a ring, a bracelet, order help, shipping, returns, or care advice.";
+    const money = (value: number) => formatINR(value);
+    const productSummary = (items: Product[]) => items.slice(0, 3).map((product) => `${product.name} (${money(product.price)})`).join(", ");
+    if (/hello|hi|hey|help/.test(query)) return "I can help with almost anything in the store: latest arrivals, product suggestions, budgets, gifts, stock, a new order, order tracking, shipping, returns, payments, and jewellery care. Ask me anything.";
+    if (/latest|new arrival|newest|recent|just in|arrived/.test(query)) {
+      const latest = [...products].reverse().slice(0, 3);
+      return latest.length ? `Our latest arrivals are ${productSummary(latest)}. Ask me about any one of them or tell me your budget.` : "There are no new arrivals loaded yet. Please check back after Admin adds the next pieces.";
+    }
+    if (/new order|place an order|buy|purchase|checkout|how do i order/.test(query)) return cartCount ? `You have ${cartCount} piece${cartCount === 1 ? "" : "s"} in your cart. Open Cart, choose Proceed to buy, add your details, and place the order.` : "To place a new order, open Shop, choose a piece, tap + to add it to your cart, then use Proceed to buy at checkout.";
     if (/order|track|delivery|status/.test(query)) {
       if (!orders.length) return "I don’t see an order on this device yet. Place an order first, then open My orders to track it with your WhatsApp number.";
       const latest = orders[0];
       return `Your latest order ${latest.id} is currently ${latest.status}. The total is ${latest.total}. Open My orders for the full history.`;
     }
+    if (/price|cost|budget|under|below|less than/.test(query)) {
+      const budget = query.match(/(?:under|below|less than|within|budget)\s*(?:₹|rs\.?\s*)?([\d,]+)/)?.[1];
+      if (budget) {
+        const amount = Number(budget.replace(/,/g, ""));
+        const matches = products.filter((product) => product.price <= amount);
+        return matches.length ? `Within ${money(amount)}, I found ${productSummary(matches)}.` : `I couldn’t find a piece under ${money(amount)} yet. Try increasing your budget or ask for our lowest-priced pieces.`;
+      }
+      return `Our pieces currently range from ${money(Math.min(...products.map((product) => product.price)))} to ${money(Math.max(...products.map((product) => product.price)))}. Tell me a maximum budget and I’ll filter them.`;
+    }
+    if (/stock|available|availability|in stock/.test(query)) {
+      const available = products.filter((product) => product.price >= 0);
+      return available.length ? `These pieces are currently listed in the catalog: ${productSummary(available)}. Ask me for a specific product and I’ll check its listing.` : "The catalog is updating. Please check again in a moment.";
+    }
     if (/ship|deliver/.test(query)) return "We offer complimentary shipping above ₹999. Your order updates are shared using the WhatsApp number entered at checkout.";
     if (/return|exchange/.test(query)) return "Returns are accepted within 7 days for eligible unworn pieces. Keep the packaging safe and contact us if you need help with a return.";
     if (/care|clean|maintain/.test(query)) return "Keep jewellery away from perfume, water, and sprays. Store each piece separately in a soft pouch and gently wipe it after wear.";
     if (/gift|present|birthday|anniversary/.test(query)) return "For gifting, I’d start with a versatile pair of earrings or a delicate necklace. Tell me the recipient’s style or your budget and I’ll narrow it down.";
+    if (/offer|discount|coupon|promo|sale/.test(query)) return "Look for the current offer banner on the storefront. You can copy an active coupon code there before checkout.";
+    if (/payment|cod|cash|online|razorpay/.test(query)) return "At checkout, enter your name, WhatsApp number, email if needed, and delivery address. Available payment options are shown when the order is placed.";
+    if (/category|collection|what do you sell|jewellery|jewelry/.test(query)) return "Fanzzy has earrings, necklaces, bracelets, and rings. Ask for a category or open View all categories to browse the full edit.";
     const category = ["earrings", "necklaces", "bracelets", "rings"].find((item) => query.includes(item));
     if (category) {
       const matches = products.filter((product) => product.category.toLowerCase().includes(category)).slice(0, 3);
@@ -458,7 +481,7 @@ export default function Home() {
     }
     const matches = products.filter((product) => `${product.name} ${product.category}`.toLowerCase().includes(query)).slice(0, 3);
     if (matches.length) return `I found ${matches.map((product) => `${product.name} (${formatINR(product.price)})`).join(", ")}. Open the collection to take a closer look.`;
-    return "I can help you discover jewellery, choose a gift, track an order, or answer shipping, returns, and care questions. What would you like to do?";
+    return "I’m here to help with products, latest arrivals, budgets, gifts, new orders, order status, shipping, payments, returns, offers, and jewellery care. Try asking: ‘What’s new?’, ‘Show me rings under ₹1500’, or ‘How do I place a new order?’";
   };
   const sendAssistantMessage = (value = assistantInput) => {
     const message = value.trim();
