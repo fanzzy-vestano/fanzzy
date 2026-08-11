@@ -82,9 +82,6 @@ const allAdminPermissions: AdminPermission[] = [
 ];
 const defaultAdminRoles: AdminRole[] = [
   { id: "vestano", name: "Vestano", title: "Super admin", permissions: allAdminPermissions },
-  { id: "store-manager", name: "Store manager", title: "Operations", permissions: ["Overview", "Products", "Categories", "Collections", "Orders", "Customers", "Homepage", "Delivery charge"] },
-  { id: "fulfilment", name: "Fulfilment", title: "Orders & delivery", permissions: ["Overview", "Orders", "Customers", "Delivery charge"] },
-  { id: "marketing", name: "Marketing", title: "Content & growth", permissions: ["Overview", "Collections", "Marketing", "Homepage"] },
 ];
 
 const adminProducts: AdminProduct[] = [
@@ -437,17 +434,10 @@ export default function AdminPage() {
 
   useEffect(() => {
     const syncRoles = () => {
-      const storedRoles = window.localStorage.getItem("fanzzy-admin-roles");
-      if (storedRoles) {
-        try {
-          const parsed = JSON.parse(storedRoles) as AdminRole[];
-          if (Array.isArray(parsed) && parsed.length && parsed.every((role) => role?.id && Array.isArray(role.permissions))) setAdminRoles(parsed);
-        } catch {
-          window.localStorage.removeItem("fanzzy-admin-roles");
-        }
-      }
-      const storedRole = window.localStorage.getItem("fanzzy-active-admin-role");
-      if (storedRole) setActiveRoleId(storedRole);
+      setAdminRoles(defaultAdminRoles);
+      setActiveRoleId("vestano");
+      window.localStorage.setItem("fanzzy-admin-roles", JSON.stringify(defaultAdminRoles));
+      window.localStorage.setItem("fanzzy-active-admin-role", "vestano");
     };
     syncRoles();
     window.addEventListener("fanzzy-store-settings-updated", syncRoles);
@@ -460,14 +450,6 @@ export default function AdminPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeRoleId, adminRoles]);
 
-  const switchRole = (roleId: string) => {
-    const nextRole = adminRoles.find((role) => role.id === roleId) ?? defaultAdminRoles[0];
-    setActiveRoleId(nextRole.id);
-    window.localStorage.setItem("fanzzy-active-admin-role", nextRole.id);
-    setActive(nextRole.permissions.includes("Overview") ? "Overview" : nextRole.permissions[0]);
-    setToast(`Viewing as ${nextRole.name} · ${nextRole.title}`);
-    window.setTimeout(() => setToast(""), 2200);
-  };
   const metrics = {
     "this-month": {
       revenue: "₹2,48,620",
@@ -548,9 +530,7 @@ export default function AdminPage() {
             <strong>{activeRole.name}</strong>
             <small>{activeRole.title}</small>
           </div>
-          <select className="role-switcher" aria-label="Switch admin role" value={activeRole.id} onChange={(event) => switchRole(event.target.value)}>
-            {adminRoles.map((role) => <option value={role.id} key={role.id}>{role.name} · {role.title}</option>)}
-          </select>
+          <span className="admin-access-badge">FULL ACCESS</span>
         </div>
         <p className="admin-label">Workspace</p>
         <nav className="admin-nav">
@@ -1219,7 +1199,7 @@ const moduleContent: Record<
       "Store profile · Configured",
       "Shipping rules · 3 active",
       "Payment methods · Razorpay ready",
-      "Admin roles · 4 configured",
+      "Admin roles · 1 full access role",
     ],
   },
 };
@@ -1337,13 +1317,8 @@ function SettingsWorkspace({
     setProfile(read("fanzzy-store-profile", profile));
     setShipping(read("fanzzy-shipping-rules", shipping));
     setPayments(read("fanzzy-payment-methods", payments));
-    const storedRoles = read<AdminRole[]>("fanzzy-admin-roles", defaultAdminRoles);
-    setRoles(storedRoles.map((role, index) => ({
-      id: role.id || `role-${index}`,
-      name: role.name || "New role",
-      title: role.title || "Team member",
-      permissions: Array.isArray(role.permissions) ? role.permissions.filter((permission): permission is AdminPermission => allAdminPermissions.includes(permission as AdminPermission)) : ["Overview"],
-    })));
+    setRoles(defaultAdminRoles);
+    window.localStorage.setItem("fanzzy-admin-roles", JSON.stringify(defaultAdminRoles));
     // These values are only read on mount; the defaults above provide the first render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1361,7 +1336,7 @@ function SettingsWorkspace({
     if (section === "Store profile") return profile.storeName ? "Configured" : "Needs details";
     if (section === "Shipping rules") return `${Object.values(shipping).filter(Boolean).length} active`;
     if (section === "Payment methods") return `${payments.online || payments.cod ? payments.provider + " ready" : "No methods active"}`;
-    return `${roles.filter((role) => role.name.trim()).length} configured`;
+    return "1 full access role";
   };
 
   return (
@@ -1416,7 +1391,7 @@ function SettingsWorkspace({
             <label>Payment provider<input value={payments.provider} onChange={(event) => setPayments((current) => ({ ...current, provider: event.target.value }))} /></label>
           </div>}
 
-          {selectedSection === "Admin roles" && <div className="settings-roles-form"><div className="settings-role-list">{roles.map((role, index) => <div className="settings-role-card" key={role.id}><div className="settings-role-row"><input value={role.name} aria-label={`${role.name} name`} onChange={(event) => setRoles((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item))} /><input value={role.title} aria-label={`${role.name} title`} onChange={(event) => setRoles((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, title: event.target.value } : item))} /><button aria-label={`Remove ${role.name}`} onClick={() => setRoles((current) => current.filter((_, itemIndex) => itemIndex !== index))}>×</button></div><div className="settings-permission-grid">{allAdminPermissions.map((permission) => <label key={permission}><input type="checkbox" checked={role.permissions.includes(permission)} onChange={(event) => setRoles((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, permissions: event.target.checked ? [...new Set([...item.permissions, permission])] : item.permissions.filter((itemPermission) => itemPermission !== permission) } : item))} /><span>{permission}</span></label>)}</div></div>)}</div><button className="module-secondary" onClick={() => setRoles((current) => [...current, { id: `role-${Date.now()}`, name: "New role", title: "Team member", permissions: ["Overview"] }])}>+ Add role</button></div>}
+          {selectedSection === "Admin roles" && <div className="settings-roles-form"><div className="settings-role-list"><div className="settings-role-card"><div className="settings-role-fixed"><div><strong>Vestano</strong><small>Super admin</small></div><span>Full access</span></div><p className="settings-role-access-copy">This is the only admin role. It can access every workspace section and all store settings.</p></div></div></div>}
 
           <div className="settings-modal-actions"><button className="module-primary" onClick={() => { saveSettings(); setSelectedSection(null); }}>Save changes</button><button className="module-secondary" onClick={() => setSelectedSection(null)}>Cancel</button></div>
         </div>

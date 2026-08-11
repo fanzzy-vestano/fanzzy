@@ -1064,6 +1064,56 @@
   text-transform: uppercase;
 }
 
+.admin-access-badge {
+  color: #d6b88a;
+  font-family: var(--mono);
+  font-size: 7px;
+  letter-spacing: .08em;
+  margin-left: auto;
+  text-transform: uppercase;
+}
+
+.settings-role-fixed {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  padding: 3px 2px;
+}
+
+.settings-role-fixed div {
+  display: grid;
+  gap: 4px;
+}
+
+.settings-role-fixed strong {
+  color: var(--wine);
+  font-family: var(--serif);
+  font-size: 18px;
+  font-weight: 500;
+}
+
+.settings-role-fixed small,
+.settings-role-fixed span {
+  color: var(--admin-muted);
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.settings-role-fixed span {
+  color: #668963;
+}
+
+.settings-role-access-copy {
+  border-top: 1px solid var(--admin-line);
+  color: var(--admin-muted);
+  font-size: 10px;
+  line-height: 1.6;
+  margin: 11px 0 0;
+  padding-top: 10px;
+}
+
 .marketing-list {
   display: grid;
 }
