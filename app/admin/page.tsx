@@ -4372,6 +4372,32 @@ function ProductLibraryWorkspace({
     }
     event.target.value = "";
   };
+  const exportCsv = () => {
+    const headers = ["name", "sku", "category", "stock", "price", "cost", "status", "image", "hoverImage"];
+    const escapeCsv = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
+    const rows = products.map((product) => [
+      product.name,
+      product.sku,
+      product.category,
+      product.stock,
+      product.price,
+      product.cost,
+      product.status,
+      product.image,
+      product.hoverImage || "",
+    ]);
+    const csv = [headers, ...rows].map((row) => row.map(escapeCsv).join(",")).join("\r\n");
+    const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `fanzzy-products-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    onNotify(`${products.length} product${products.length === 1 ? "" : "s"} exported`);
+  };
   return (
     <section className="panel module-workspace">
       <div className="module-workspace-head">
@@ -4395,6 +4421,9 @@ function ProductLibraryWorkspace({
             onClick={() => fileInputRef.current?.click()}
           >
             Import CSV ↗
+          </button>
+          <button className="module-secondary" onClick={exportCsv}>
+            Export CSV ↗
           </button>
           <button className="module-primary" onClick={openAddProduct}>
             + Add product
