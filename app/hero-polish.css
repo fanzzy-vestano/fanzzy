@@ -100,13 +100,13 @@
 
 .site-shell > #categories .category-showcase {
   align-items: start;
-  display: grid;
-  gap: 18px;
-  grid-template-columns: minmax(190px, .78fr) repeat(4, minmax(0, 1fr));
+  display: flex;
+  gap: 28px;
 }
 
 .site-shell > #categories .category-intro {
   align-self: start;
+  flex: 0 0 190px;
   padding-top: 62px;
 }
 
@@ -125,12 +125,27 @@
   margin-top: 30px;
 }
 
+.site-shell > #categories .category-carousel {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
 .site-shell > #categories .category-grid {
-  display: contents;
+  display: flex;
+  gap: 14px;
+  overflow-x: auto;
+  padding: 0 2px 14px;
+  scrollbar-width: none;
+}
+
+.site-shell > #categories .category-grid::-webkit-scrollbar {
+  display: none;
 }
 
 .site-shell > #categories .category-card {
   aspect-ratio: .68;
+  flex: 0 0 clamp(210px, 22vw, 300px);
   width: 100%;
 }
 
@@ -140,6 +155,26 @@
 
 .site-shell > #categories .category-card:nth-child(odd):hover {
   transform: translateY(32px) scale(1.01);
+}
+
+.category-carousel-controls {
+  display: flex;
+  gap: 7px;
+  margin-top: 32px;
+}
+
+.category-carousel-controls button {
+  background: transparent;
+  border: 1px solid var(--wine);
+  color: var(--wine);
+  font-size: 16px;
+  height: 34px;
+  width: 34px;
+}
+
+.category-carousel-controls button:hover {
+  background: var(--wine);
+  color: var(--paper);
 }
 
 .hero-note,
@@ -182,20 +217,22 @@
     margin-top: 22px;
   }
 
-  .site-shell > #categories .category-grid {
-    display: grid;
-    gap: 8px;
-    grid-template-columns: 1fr 1fr;
+  .site-shell > #categories .category-carousel {
     margin-top: 31px;
   }
 
   .site-shell > #categories .category-card {
     aspect-ratio: .75;
+    flex-basis: min(72vw, 280px);
   }
 
   .site-shell > #categories .category-card:nth-child(odd),
   .site-shell > #categories .category-card:nth-child(odd):hover {
     transform: none;
+  }
+
+  .category-carousel-controls {
+    margin-top: 22px;
   }
 
 }

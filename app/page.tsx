@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { fetchCatalogCategories, fetchCatalogProducts, fetchStoreSetting } from "../lib/supabase/catalog";
 
 type Product = {
@@ -125,6 +125,7 @@ export default function Home() {
   const [heroSlideIndex, setHeroSlideIndex] = useState(0);
   const [heroSlideDuration, setHeroSlideDuration] = useState(defaultHeroSlideDuration);
   const [deliveryCharge, setDeliveryCharge] = useState(defaultDeliveryCharge);
+  const categoryScrollerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const syncProducts = async () => {
@@ -433,6 +434,9 @@ export default function Home() {
       return Boolean(orderPhone) && (orderPhone.endsWith(lookup) || lookup.endsWith(orderPhone));
     });
   }, [orders, orderLookupPhone]);
+  const scrollCategories = (direction: number) => {
+    categoryScrollerRef.current?.scrollBy({ left: direction * Math.max(260, categoryScrollerRef.current.clientWidth * 0.72), behavior: "smooth" });
+  };
 
   return (
     <main className="site-shell" id="top">
@@ -467,7 +471,7 @@ export default function Home() {
 
       {heroSlides.length > 0 && <section className="hero hero-background" id="top"><div className="hero-slide-layer" key={heroSlides[heroSlideIndex]}><img src={heroSlides[heroSlideIndex]} alt="Fanzzy collection highlight" /></div></section>}
 
-      <section className="section-block" id="categories"><div className="category-showcase"><div className="category-intro"><h2>Find your <em>signature.</em></h2><a className="text-link" href={`${siteBasePath}/collections`}>View all categories <span>↗</span></a></div><div className="category-grid">{categories.map((category, index) => <button className={`category-card category-${index + 1}`} key={category.name} onClick={() => { setActiveCategory(category.name); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}><img src={category.image} alt="" /><span className="category-overlay" /><span className="category-info"><strong>{category.name}</strong></span></button>)}</div></div></section>
+      <section className="section-block" id="categories"><div className="category-showcase"><div className="category-intro"><h2>Find your <em>signature.</em></h2><a className="text-link" href={`${siteBasePath}/collections`}>View all categories <span>↗</span></a><div className="category-carousel-controls"><button onClick={() => scrollCategories(-1)} aria-label="Show previous categories">←</button><button onClick={() => scrollCategories(1)} aria-label="Show more categories">→</button></div></div><div className="category-carousel"><div className="category-grid" ref={categoryScrollerRef}>{categories.map((category, index) => <button className={`category-card category-${index + 1}`} key={category.name} onClick={() => { setActiveCategory(category.name); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}><img src={category.image} alt="" /><span className="category-overlay" /><span className="category-info"><strong>{category.name}</strong></span></button>)}</div></div></div></section>
 
       <section className="manifesto"><p className="eyebrow">THE FANZZY STANDARD</p><h2>Jewellery with a point of view.<br /><em>Made for your everyday extraordinary.</em></h2><p className="manifesto-copy">Fanzzy is a study in contrast — soft and sculptural, familiar and unexpected. Every piece is made in small batches with considered materials and a little bit of magic.</p></section>
 
