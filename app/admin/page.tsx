@@ -51,6 +51,7 @@ type OrderDateFilter =
   | "this-month"
   | "all-time"
   | "custom";
+type ReportView = "overview" | "category" | "item" | "top-selling" | "inventory" | "orders";
 type AdminPermission =
   | "Overview"
   | "Products"
@@ -392,6 +393,8 @@ export default function AdminPage() {
   const [active, setActive] = useState("Overview");
   const [adminRoles, setAdminRoles] = useState<AdminRole[]>(defaultAdminRoles);
   const [activeRoleId, setActiveRoleId] = useState("vestano");
+  const [reportsOpen, setReportsOpen] = useState(false);
+  const [reportView, setReportView] = useState<ReportView>("overview");
   const [query, setQuery] = useState("");
   const [toast, setToast] = useState("");
   const [dateRange, setDateRange] = useState<DateRange>("this-month");
@@ -552,7 +555,29 @@ export default function AdminPage() {
         </div>
         <p className="admin-label">Workspace</p>
         <nav className="admin-nav">
-          {visibleMenu.map((item) => (
+          {visibleMenu.map((item) => item.label === "Reports" ? (
+            <div className="admin-nav-group" key={item.label}>
+              <button
+                className={active === item.label ? "active" : ""}
+                onClick={() => { setActive("Reports"); setReportsOpen((current) => !current); }}
+                aria-expanded={reportsOpen}
+              >
+                <span className="nav-icon">{item.icon}</span>
+                {item.label}
+                <span className="nav-chevron">{reportsOpen ? "−" : "+"}</span>
+              </button>
+              {reportsOpen && <div className="admin-subnav">
+                {([
+                  ["overview", "All reports"],
+                  ["category", "Category report"],
+                  ["item", "Item report"],
+                  ["top-selling", "Top-selling item report"],
+                  ["inventory", "Inventory / aged report"],
+                  ["orders", "Order status report"],
+                ] as Array<[ReportView, string]>).map(([view, label]) => <button key={view} className={active === "Reports" && reportView === view ? "active" : ""} onClick={() => { setActive("Reports"); setReportView(view); setReportsOpen(true); }}>{label}</button>)}
+              </div>}
+            </div>
+          ) : (
             <button
               key={item.label}
               className={active === item.label ? "active" : ""}
@@ -608,7 +633,7 @@ export default function AdminPage() {
         </div>
         <AnnouncementPanel onNotify={notify} />
         {active !== "Overview" && (
-          <ModuleWorkspace module={active} onNotify={notify} />
+          <ModuleWorkspace module={active} onNotify={notify} reportView={reportView} />
         )}
         <div className="stats-grid">
           <Stat
@@ -1188,13 +1213,15 @@ const moduleContent: Record<
 function ModuleWorkspace({
   module,
   onNotify,
+  reportView = "overview",
 }: {
   module: string;
   onNotify: (message: string) => void;
+  reportView?: ReportView;
 }) {
   if (module === "Products")
     return <ProductLibraryWorkspace onNotify={onNotify} />;
-  if (module === "Reports") return <ReportsWorkspace onNotify={onNotify} />;
+  if (module === "Reports") return <ReportsWorkspace onNotify={onNotify} view={reportView} />;
   if (module === "Announcement") return <AnnouncementPanel onNotify={onNotify} module />;
   if (module === "Categories") return <CategoryWorkspace onNotify={onNotify} />;
   if (module === "Orders") return <OrdersWorkspace onNotify={onNotify} />;
@@ -1277,8 +1304,10 @@ const reportNameKey = (value: string) => value.trim().toLowerCase().replace(/[^a
 
 function ReportsWorkspace({
   onNotify,
+  view,
 }: {
   onNotify: (message: string) => void;
+  view: ReportView;
 }) {
   const [period, setPeriod] = useState<ReportPeriod>("this-month");
   const [fromDate, setFromDate] = useState("2026-08-01");
@@ -1403,6 +1432,10 @@ function ReportsWorkspace({
 
   const periodLabel = period === "this-month" ? "This month" : period === "last-month" ? "Last month" : period === "all-time" ? "All dates" : `${fromDate || "Start"} → ${toDate || "End"}`;
   const maxCategoryUnits = Math.max(1, report.categoryRows[0]?.units ?? 0);
+  const showProductReport = view === "overview" || view === "item" || view === "top-selling";
+  const showCategoryReport = view === "overview" || view === "category";
+  const showInventoryReport = view === "overview" || view === "inventory";
+  const showOrderReport = view === "overview" || view === "orders";
 
   return (
     <section className="panel module-workspace reports-workspace">
@@ -1433,24 +1466,24 @@ function ReportsWorkspace({
         <div className="report-kpi"><small>Stock value</small><strong>{formatAdminCurrency(report.stockValue)}</strong><span>Current catalog</span></div>
       </div>
       <div className="reports-grid">
-        <article className="report-card report-card-wide">
-          <div className="report-card-head"><div><p className="eyebrow">PRODUCT PERFORMANCE</p><h3>Most selling products</h3></div><span>Units sold</span></div>
+        {showProductReport && <article className="report-card report-card-wide">
+          <div className="report-card-head"><div><p className="eyebrow">PRODUCT PERFORMANCE</p><h3>{view === "top-selling" ? "Top-selling items" : "Item performance"}</h3></div><span>Units sold</span></div>
           {report.hasItemSales ? <div className="report-table">{report.topProducts.map((row, index) => <div className="report-row" key={row.product.sku}><b>{String(index + 1).padStart(2, "0")}</b><span><strong>{row.product.name}</strong><small>{row.product.category}</small></span><em>{row.units} units</em><strong>{formatAdminCurrency(row.revenue)}</strong></div>)}</div> : <div className="report-empty">Item-level sales will appear here after orders include products.</div>}
-        </article>
-        <article className="report-card">
+        </article>}
+        {showCategoryReport && <article className="report-card">
           <div className="report-card-head"><div><p className="eyebrow">CATEGORY PERFORMANCE</p><h3>Best-selling categories</h3></div></div>
           <div className="category-report-list">{report.categoryRows.map((category) => <div className="category-report-row" key={category.name}><div><strong>{category.name}</strong><span>{category.units} units · {formatAdminCurrency(category.revenue)}</span></div><div className="category-report-bar"><i style={{ width: `${Math.max(5, (category.units / maxCategoryUnits) * 100)}%` }} /></div></div>)}</div>
-        </article>
-        <article className="report-card">
+        </article>}
+        {showInventoryReport && <article className="report-card">
           <div className="report-card-head"><div><p className="eyebrow">INVENTORY HEALTH</p><h3>Slow / aged inventory</h3></div><span>Lowest movement</span></div>
           <div className="report-table">{report.agedProducts.map((row) => <div className="report-row aged-report-row" key={row.product.sku}><span><strong>{row.product.name}</strong><small>{row.units ? `${row.units} units sold` : "No recorded sales"}</small></span><em>{row.product.stock} in stock</em><strong>{formatAdminCurrency(parseReportMoney(row.product.price) * row.product.stock)}</strong></div>)}</div>
           <p className="report-help">Prioritise these products for a campaign, bundle, or clearance review.</p>
-        </article>
-        <article className="report-card">
+        </article>}
+        {showOrderReport && <article className="report-card">
           <div className="report-card-head"><div><p className="eyebrow">ORDER HEALTH</p><h3>Order status report</h3></div></div>
           <div className="status-report-list">{report.statuses.map((status) => <div key={status.name}><span>{status.name}</span><strong>{status.count}</strong></div>)}</div>
           <button className="report-link" onClick={() => onNotify("Open Orders to manage fulfilment")}>Manage orders ↗</button>
-        </article>
+        </article>}
       </div>
     </section>
   );
