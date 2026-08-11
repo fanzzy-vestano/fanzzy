@@ -61,6 +61,7 @@ type AdminPermission =
   | "Marketing"
   | "Homepage"
   | "Delivery charge"
+  | "Reports"
   | "Settings";
 type AdminRole = {
   id: string;
@@ -198,6 +199,7 @@ type OrderRecord = {
   total: string;
   customerName: string;
   phone: string;
+  items?: Array<{ name: string; quantity: number; price: string }>;
 };
 const adminOrders: OrderRecord[] = [
   {
@@ -207,6 +209,10 @@ const adminOrders: OrderRecord[] = [
     total: "₹4,860",
     customerName: "Customer 1048",
     phone: "",
+    items: [
+      { name: "Aurora Drop Earrings", quantity: 2, price: "₹1,290" },
+      { name: "Solstice Tennis Necklace", quantity: 1, price: "₹2,280" },
+    ],
   },
   {
     id: "#FZ-1047",
@@ -215,6 +221,7 @@ const adminOrders: OrderRecord[] = [
     total: "₹2,480",
     customerName: "Customer 1047",
     phone: "",
+    items: [{ name: "Solstice Tennis Necklace", quantity: 1, price: "₹2,480" }],
   },
   {
     id: "#FZ-1046",
@@ -223,6 +230,7 @@ const adminOrders: OrderRecord[] = [
     total: "₹1,290",
     customerName: "Customer 1046",
     phone: "",
+    items: [{ name: "Aurora Drop Earrings", quantity: 1, price: "₹1,290" }],
   },
   {
     id: "#FZ-1045",
@@ -231,6 +239,10 @@ const adminOrders: OrderRecord[] = [
     total: "₹3,120",
     customerName: "Customer 1045",
     phone: "",
+    items: [
+      { name: "Muse Sculpted Cuff", quantity: 1, price: "₹1,860" },
+      { name: "Orbital Pearl Ring", quantity: 1, price: "₹1,260" },
+    ],
   },
   {
     id: "#FZ-1044",
@@ -239,6 +251,7 @@ const adminOrders: OrderRecord[] = [
     total: "₹1,860",
     customerName: "Customer 1044",
     phone: "",
+    items: [{ name: "Muse Sculpted Cuff", quantity: 1, price: "₹1,860" }],
   },
 ];
 const siteBasePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
@@ -368,6 +381,7 @@ const menu = [
   { label: "Marketing", icon: "◈" },
   { label: "Homepage", icon: "⌂" },
   { label: "Delivery charge", icon: "₹" },
+  { label: "Reports", icon: "▥" },
 ];
 
 export default function AdminPage() {
@@ -1174,6 +1188,7 @@ function ModuleWorkspace({
 }) {
   if (module === "Products")
     return <ProductLibraryWorkspace onNotify={onNotify} />;
+  if (module === "Reports") return <ReportsWorkspace onNotify={onNotify} />;
   if (module === "Categories") return <CategoryWorkspace onNotify={onNotify} />;
   if (module === "Orders") return <OrdersWorkspace onNotify={onNotify} />;
   if (module === "Homepage") return <HomepageWorkspace onNotify={onNotify} />;
@@ -1234,6 +1249,201 @@ function ModuleWorkspace({
             <b>↗</b>
           </button>
         ))}
+      </div>
+    </section>
+  );
+}
+
+type ReportPeriod = "this-month" | "last-month" | "all-time" | "custom";
+type ProductReportRow = {
+  product: AdminProduct;
+  units: number;
+  revenue: number;
+};
+
+const parseReportMoney = (value: string | number) =>
+  typeof value === "number"
+    ? value
+    : Number(String(value).replace(/[^0-9.]/g, "")) || 0;
+
+const reportNameKey = (value: string) => value.trim().toLowerCase().replace(/[^a-z0-9]+/g, " ");
+
+function ReportsWorkspace({
+  onNotify,
+}: {
+  onNotify: (message: string) => void;
+}) {
+  const [period, setPeriod] = useState<ReportPeriod>("this-month");
+  const [fromDate, setFromDate] = useState("2026-08-01");
+  const [toDate, setToDate] = useState("2026-08-08");
+  const [orders, setOrders] = useState<OrderRecord[]>(adminOrders);
+  const [products, setProducts] = useState<AdminProduct[]>(adminProducts);
+
+  useEffect(() => {
+    let active = true;
+    const syncOrders = () => {
+      const stored = window.localStorage.getItem("fanzzy-orders");
+      if (!stored) return;
+      try {
+        const parsed = JSON.parse(stored) as OrderRecord[];
+        if (active && Array.isArray(parsed)) {
+          setOrders(parsed.filter((order) => order?.date && order?.total));
+        }
+      } catch {
+        window.localStorage.removeItem("fanzzy-orders");
+      }
+    };
+    const syncProducts = async () => {
+      const remote = await fetchCatalogProducts();
+      if (!active) return;
+      let next =
+        !remote.error && remote.data?.length
+          ? remote.data.map((product) => ({
+              name: product.name,
+              sku: product.sku,
+              category: product.category,
+              stock: product.stock,
+              price: formatAdminCurrency(product.price),
+              cost: formatAdminCurrency(product.cost ?? 0),
+              status: product.status,
+              image: product.image || adminProducts[0].image,
+              hoverImage: product.hoverImage || product.image || adminProducts[0].image,
+            }))
+          : adminProducts;
+      const stored = window.localStorage.getItem("fanzzy-products");
+      if (stored) {
+        try {
+          const parsed = JSON.parse(stored) as AdminProduct[];
+          if (Array.isArray(parsed)) {
+            const merged = new Map(next.map((product) => [product.sku, product]));
+            parsed.filter((product) => product?.name && product?.sku).forEach((product) => merged.set(product.sku, product));
+            next = Array.from(merged.values());
+          }
+        } catch {
+          window.localStorage.removeItem("fanzzy-products");
+        }
+      }
+      setProducts(next);
+    };
+    syncOrders();
+    void syncProducts();
+    window.addEventListener("storage", syncOrders);
+    window.addEventListener("storage", syncProducts);
+    window.addEventListener("fanzzy-orders-updated", syncOrders);
+    window.addEventListener("fanzzy-products-updated", syncProducts);
+    return () => {
+      active = false;
+      window.removeEventListener("storage", syncOrders);
+      window.removeEventListener("storage", syncProducts);
+      window.removeEventListener("fanzzy-orders-updated", syncOrders);
+      window.removeEventListener("fanzzy-products-updated", syncProducts);
+    };
+  }, []);
+
+  const filteredOrders = useMemo(() => {
+    let from = "0000-01-01";
+    let to = "9999-12-31";
+    if (period === "this-month") {
+      from = "2026-08-01";
+      to = "2026-08-31";
+    }
+    if (period === "last-month") {
+      from = "2026-07-01";
+      to = "2026-07-31";
+    }
+    if (period === "custom") {
+      from = fromDate || from;
+      to = toDate || to;
+    }
+    return orders.filter((order) => order.date >= from && order.date <= to);
+  }, [fromDate, orders, period, toDate]);
+
+  const report = useMemo(() => {
+    const productsByName = new Map(products.map((product) => [reportNameKey(product.name), product]));
+    const sales = new Map<string, ProductReportRow>();
+    products.forEach((product) => sales.set(product.sku, { product, units: 0, revenue: 0 }));
+    filteredOrders.forEach((order) => {
+      order.items?.forEach((item) => {
+        const match = productsByName.get(reportNameKey(item.name));
+        if (!match) return;
+        const row = sales.get(match.sku);
+        if (!row) return;
+        const units = Math.max(0, Number(item.quantity) || 0);
+        row.units += units;
+        row.revenue += parseReportMoney(item.price) * units;
+      });
+    });
+    const productRows = Array.from(sales.values());
+    const topProducts = [...productRows].filter((row) => row.units > 0).sort((a, b) => b.units - a.units || b.revenue - a.revenue).slice(0, 5);
+    const agedProducts = [...productRows].filter((row) => row.product.stock > 0).sort((a, b) => a.units - b.units || b.product.stock - a.product.stock).slice(0, 5);
+    const categories = new Map<string, { units: number; revenue: number }>();
+    productRows.forEach((row) => {
+      const current = categories.get(row.product.category) ?? { units: 0, revenue: 0 };
+      current.units += row.units;
+      current.revenue += row.revenue;
+      categories.set(row.product.category, current);
+    });
+    const categoryRows = Array.from(categories.entries()).map(([name, values]) => ({ name, ...values })).sort((a, b) => b.units - a.units || b.revenue - a.revenue);
+    const totalRevenue = filteredOrders.reduce((sum, order) => sum + parseReportMoney(order.total), 0);
+    const unitsSold = productRows.reduce((sum, row) => sum + row.units, 0);
+    const stockValue = products.reduce((sum, product) => sum + parseReportMoney(product.price) * Math.max(0, product.stock), 0);
+    const statuses = ["Delivered", "Processing", "Shipped", "Packed", "Cancelled"].map((status) => ({
+      name: status,
+      count: filteredOrders.filter((order) => order.status === status).length,
+    }));
+    return { topProducts, agedProducts, categoryRows, totalRevenue, unitsSold, stockValue, statuses, hasItemSales: unitsSold > 0 };
+  }, [filteredOrders, products]);
+
+  const periodLabel = period === "this-month" ? "This month" : period === "last-month" ? "Last month" : period === "all-time" ? "All dates" : `${fromDate || "Start"} → ${toDate || "End"}`;
+  const maxCategoryUnits = Math.max(1, report.categoryRows[0]?.units ?? 0);
+
+  return (
+    <section className="panel module-workspace reports-workspace">
+      <div className="module-workspace-head">
+        <div>
+          <p className="eyebrow">ANALYTICS</p>
+          <h2>Store reports</h2>
+          <p>See what sells, what is slowing down, and where your store is strongest.</p>
+        </div>
+        <div className="report-period-control">
+          <label>
+            Report period
+            <select value={period} onChange={(event) => setPeriod(event.target.value as ReportPeriod)}>
+              <option value="this-month">This month</option>
+              <option value="last-month">Last month</option>
+              <option value="all-time">All dates</option>
+              <option value="custom">Custom range</option>
+            </select>
+          </label>
+          {period === "custom" && <div className="report-date-fields"><label>Start<input type="date" value={fromDate} max={toDate || undefined} onChange={(event) => setFromDate(event.target.value)} /></label><label>End<input type="date" value={toDate} min={fromDate || undefined} onChange={(event) => setToDate(event.target.value)} /></label></div>}
+        </div>
+      </div>
+      <div className="module-summary"><span><i className="status-light" />{periodLabel}</span><span>{filteredOrders.length} orders analyzed</span></div>
+      <div className="report-kpi-grid">
+        <div className="report-kpi"><small>Revenue</small><strong>{formatAdminCurrency(report.totalRevenue)}</strong><span>{periodLabel}</span></div>
+        <div className="report-kpi"><small>Units sold</small><strong>{report.unitsSold}</strong><span>From order items</span></div>
+        <div className="report-kpi"><small>Orders</small><strong>{filteredOrders.length}</strong><span>Selected period</span></div>
+        <div className="report-kpi"><small>Stock value</small><strong>{formatAdminCurrency(report.stockValue)}</strong><span>Current catalog</span></div>
+      </div>
+      <div className="reports-grid">
+        <article className="report-card report-card-wide">
+          <div className="report-card-head"><div><p className="eyebrow">PRODUCT PERFORMANCE</p><h3>Most selling products</h3></div><span>Units sold</span></div>
+          {report.hasItemSales ? <div className="report-table">{report.topProducts.map((row, index) => <div className="report-row" key={row.product.sku}><b>{String(index + 1).padStart(2, "0")}</b><span><strong>{row.product.name}</strong><small>{row.product.category}</small></span><em>{row.units} units</em><strong>{formatAdminCurrency(row.revenue)}</strong></div>)}</div> : <div className="report-empty">Item-level sales will appear here after orders include products.</div>}
+        </article>
+        <article className="report-card">
+          <div className="report-card-head"><div><p className="eyebrow">CATEGORY PERFORMANCE</p><h3>Best-selling categories</h3></div></div>
+          <div className="category-report-list">{report.categoryRows.map((category) => <div className="category-report-row" key={category.name}><div><strong>{category.name}</strong><span>{category.units} units · {formatAdminCurrency(category.revenue)}</span></div><div className="category-report-bar"><i style={{ width: `${Math.max(5, (category.units / maxCategoryUnits) * 100)}%` }} /></div></div>)}</div>
+        </article>
+        <article className="report-card">
+          <div className="report-card-head"><div><p className="eyebrow">INVENTORY HEALTH</p><h3>Slow / aged inventory</h3></div><span>Lowest movement</span></div>
+          <div className="report-table">{report.agedProducts.map((row) => <div className="report-row aged-report-row" key={row.product.sku}><span><strong>{row.product.name}</strong><small>{row.units ? `${row.units} units sold` : "No recorded sales"}</small></span><em>{row.product.stock} in stock</em><strong>{formatAdminCurrency(parseReportMoney(row.product.price) * row.product.stock)}</strong></div>)}</div>
+          <p className="report-help">Prioritise these products for a campaign, bundle, or clearance review.</p>
+        </article>
+        <article className="report-card">
+          <div className="report-card-head"><div><p className="eyebrow">ORDER HEALTH</p><h3>Order status report</h3></div></div>
+          <div className="status-report-list">{report.statuses.map((status) => <div key={status.name}><span>{status.name}</span><strong>{status.count}</strong></div>)}</div>
+          <button className="report-link" onClick={() => onNotify("Open Orders to manage fulfilment")}>Manage orders ↗</button>
+        </article>
       </div>
     </section>
   );
