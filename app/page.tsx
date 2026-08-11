@@ -15,6 +15,18 @@ type Product = {
   tone: string;
 };
 type MarketingRecord = { kind: "Campaign" | "Coupon" | "Newsletter"; name: string; detail: string; status: "Active" | "Scheduled" | "Draft"; code?: string; discount?: string };
+type OrderStatus = "Processing" | "Packed" | "Shipped" | "Delivered" | "Cancelled";
+type CustomerOrder = {
+  id: string;
+  date: string;
+  status: OrderStatus;
+  total: string;
+  customerName: string;
+  phone: string;
+  email?: string;
+  address?: string;
+  items?: Array<{ name: string; quantity: number; price: string }>;
+};
 
 const defaultProducts: Product[] = [
   { id: "aurora", name: "Aurora Drop Earrings", category: "Earrings", price: 1290, compareAt: 1690, image: "https://images.unsplash.com/photo-1635767798638-3e25273a8236?auto=format&fit=crop&w=900&q=85", hoverImage: "https://images.unsplash.com/photo-1535632066927-ab7c9ab60908?auto=format&fit=crop&w=900&q=85", tag: "Bestseller", tone: "#d9c4bc" },
@@ -45,6 +57,8 @@ const defaultDeliveryCharge = { enabled: false, amount: 99 };
 const siteBasePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 const siteAsset = (name: string) => `${siteBasePath}/${name}`;
 const productTones = ["#d9c4bc", "#dad7ce", "#d0c2b0", "#e5ddd1"];
+const formatOrderDate = (value: string) => new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", year: "numeric" }).format(new Date(`${value}T00:00:00`));
+const phoneDigits = (value: string) => value.replace(/\D/g, "");
 
 function normalizeStoredProduct(value: unknown, index: number): Product | null {
   if (!value || typeof value !== "object") return null;
@@ -101,6 +115,9 @@ export default function Home() {
   const [wishlist, setWishlist] = useState<string[]>([]);
   const [cart, setCart] = useState<Record<string, number>>({});
   const [cartOpen, setCartOpen] = useState(false);
+  const [ordersOpen, setOrdersOpen] = useState(false);
+  const [orders, setOrders] = useState<CustomerOrder[]>([]);
+  const [orderLookupPhone, setOrderLookupPhone] = useState("");
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [checkoutForm, setCheckoutForm] = useState({ name: "", phone: "", email: "", address: "" });
   const [quickProduct, setQuickProduct] = useState<Product | null>(null);
@@ -183,6 +200,27 @@ export default function Home() {
       active = false;
       window.removeEventListener("storage", syncCategories);
       window.removeEventListener("fanzzy-categories-updated", syncCategories);
+    };
+  }, []);
+
+  useEffect(() => {
+    const syncOrders = () => {
+      try {
+        const stored = window.localStorage.getItem("fanzzy-orders");
+        const parsed = stored ? JSON.parse(stored) : [];
+        if (Array.isArray(parsed)) setOrders(parsed as CustomerOrder[]);
+      } catch {
+        setOrders([]);
+      }
+      const savedPhone = window.localStorage.getItem("fanzzy-customer-phone");
+      if (savedPhone) setOrderLookupPhone(savedPhone);
+    };
+    syncOrders();
+    window.addEventListener("storage", syncOrders);
+    window.addEventListener("fanzzy-orders-updated", syncOrders);
+    return () => {
+      window.removeEventListener("storage", syncOrders);
+      window.removeEventListener("fanzzy-orders-updated", syncOrders);
     };
   }, []);
 
@@ -356,7 +394,17 @@ export default function Home() {
     if (digits.length < 10) return announce("A valid WhatsApp number is mandatory");
     if (!checkoutForm.address.trim()) return announce("Delivery address is required");
     const orderId = `#FZ-${String(Date.now()).slice(-6)}`;
-    const newOrder = { id: orderId, date: new Date().toISOString().slice(0, 10), status: "Processing", total: formatINR(subtotal + deliveryTotal), customerName: name, phone: checkoutForm.phone.trim() };
+    const newOrder: CustomerOrder = {
+      id: orderId,
+      date: new Date().toISOString().slice(0, 10),
+      status: "Processing",
+      total: formatINR(subtotal + deliveryTotal),
+      customerName: name,
+      phone: checkoutForm.phone.trim(),
+      email: checkoutForm.email.trim(),
+      address: checkoutForm.address.trim(),
+      items: cartItems.map((product) => ({ name: product.name, quantity: cart[product.id] ?? 0, price: formatINR(product.price) })),
+    };
     let previousOrders: unknown[] = [];
     try {
       const stored = window.localStorage.getItem("fanzzy-orders");
@@ -366,12 +414,22 @@ export default function Home() {
       previousOrders = [];
     }
     window.localStorage.setItem("fanzzy-orders", JSON.stringify([newOrder, ...previousOrders]));
+    window.localStorage.setItem("fanzzy-customer-phone", checkoutForm.phone.trim());
     window.dispatchEvent(new Event("fanzzy-orders-updated"));
     setCart({});
     setCheckoutOpen(false);
     setCheckoutForm({ name: "", phone: "", email: "", address: "" });
     announce(`${orderId} placed successfully`);
   };
+
+  const visibleOrders = useMemo(() => {
+    const lookup = phoneDigits(orderLookupPhone);
+    if (!lookup) return orders;
+    return orders.filter((order) => {
+      const orderPhone = phoneDigits(order.phone);
+      return Boolean(orderPhone) && (orderPhone.endsWith(lookup) || lookup.endsWith(orderPhone));
+    });
+  }, [orders, orderLookupPhone]);
 
   return (
     <main className="site-shell">
@@ -383,6 +441,7 @@ export default function Home() {
         <div className="header-actions">
           <label className="navbar-search"><span aria-hidden="true">⌕</span><input readOnly placeholder="Search jewellery" onFocus={() => setSearchOpen(true)} aria-label="Open search" /></label>
           <button onClick={() => announce(`${wishlist.length} saved piece${wishlist.length === 1 ? "" : "s"}`)} aria-label="View wishlist">♡ <span className="action-label">Saved</span>{wishlist.length > 0 && <b>{wishlist.length}</b>}</button>
+          <button onClick={() => setOrdersOpen(true)} aria-label="View my orders">Orders {orders.length > 0 && <b>{orders.length}</b>}</button>
           <button onClick={() => setCartOpen(true)} aria-label="Open shopping cart">Cart <span className="bag-count">({cartCount.toString().padStart(2, "0")})</span></button>
         </div>
         <button className="mobile-menu" onClick={() => setMobileNavOpen((current) => !current)} aria-label={mobileNavOpen ? "Close menu" : "Open menu"} aria-expanded={mobileNavOpen}>{mobileNavOpen ? "×" : "☰"}</button>
@@ -398,6 +457,7 @@ export default function Home() {
         <div className="mobile-nav-actions">
           <button onClick={() => { setMobileNavOpen(false); setSearchOpen(true); }}>Search the collection <span>⌕</span></button>
           <button onClick={() => { setMobileNavOpen(false); announce(`${wishlist.length} saved piece${wishlist.length === 1 ? "" : "s"}`); }}>Saved pieces <span>♡</span></button>
+          <button onClick={() => { setMobileNavOpen(false); setOrdersOpen(true); }}>My orders <span>↗</span></button>
           <button onClick={() => { setMobileNavOpen(false); setCartOpen(true); }}>Your cart <span>({cartCount.toString().padStart(2, "0")})</span></button>
         </div>
       </div>}
@@ -423,6 +483,8 @@ export default function Home() {
       <button className="whatsapp-float" onClick={() => announce("We'll be in touch shortly")}>✦ <span>Chat with us</span></button>
 
       {searchOpen && <div className="overlay search-overlay" role="dialog" aria-modal="true" aria-label="Search"><div className="overlay-top"><span className="wordmark"><img src={siteAsset("fanzzy-mark.png")} alt="Fanzzy" className="brand-logo" /></span><button onClick={() => setSearchOpen(false)}>Close&nbsp; ×</button></div><div className="search-content"><p className="eyebrow">SEARCH THE COLLECTION</p><div className="large-search"><input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Try “gold hoops”" /><span>⌕</span></div>{search && <div className="search-results">{filteredProducts.length ? filteredProducts.map((product) => <button key={product.id} onClick={() => { setQuickProduct(product); setSearchOpen(false); }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(product.price)}</small></span><b>↗</b></button>) : <p className="muted">No pieces found. Try another search.</p>}</div>}{!search && <div className="search-suggestions"><span>Trending now</span><button onClick={() => setSearch("hoops")}>Hoops</button><button onClick={() => setSearch("pearl")}>Pearls</button><button onClick={() => setSearch("chain")}>Chains</button></div>}</div></div>}
+
+      {ordersOpen && <div className="drawer-backdrop" onClick={() => setOrdersOpen(false)}><aside className="orders-drawer" role="dialog" aria-modal="true" aria-labelledby="orders-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR FANZZY ACCOUNT</p><h2 id="orders-title">My orders</h2></div><button aria-label="Close orders" onClick={() => setOrdersOpen(false)}>×</button></div><div className="orders-intro"><p>Track your pieces, check delivery progress, and revisit every order in one place.</p><label>WhatsApp number used at checkout<input type="tel" value={orderLookupPhone} onChange={(event) => setOrderLookupPhone(event.target.value)} placeholder="+91 98765 43210" aria-label="WhatsApp number used at checkout" /></label></div>{visibleOrders.length ? <div className="customer-order-list">{visibleOrders.map((order) => <article className="customer-order-card" key={order.id}><div className="customer-order-head"><div><strong>{order.id}</strong><small>{formatOrderDate(order.date)} · {order.customerName}</small></div><span className={`customer-order-status ${order.status.toLowerCase()}`}>{order.status}</span></div>{order.items?.length ? <div className="customer-order-items">{order.items.map((item) => <div key={`${order.id}-${item.name}`}><span>{item.name} <b>× {item.quantity}</b></span><small>{item.price}</small></div>)}</div> : <p className="customer-order-items legacy-order">Order details are available in your confirmation.</p>}<div className="customer-order-total"><span>Total paid</span><strong>{order.total}</strong></div></article>)}</div> : <div className="orders-empty"><div>✦</div><h3>No orders found yet.</h3><p>Enter the WhatsApp number used at checkout, or start with a piece from the collection.</p><button className="button button-dark" onClick={() => { setOrdersOpen(false); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}>Shop the collection <span>↗</span></button></div>}</aside></div>}
 
       {cartOpen && <div className="drawer-backdrop" onClick={() => setCartOpen(false)}><aside className="cart-drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR CART</p><h2>{cartCount ? `${cartCount} piece${cartCount > 1 ? "s" : ""}` : "A little empty"}</h2></div><button onClick={() => setCartOpen(false)}>×</button></div>{cartItems.length ? <><div className="drawer-items">{cartItems.map((product) => <div className="drawer-item" key={product.id}><img src={product.image} alt="" /><div><strong>{product.name}</strong><small>{formatINR(product.price)}</small><div className="quantity"><button onClick={() => updateQuantity(product.id, -1)}>−</button><span>{cart[product.id]}</span><button onClick={() => updateQuantity(product.id, 1)}>+</button></div></div><b>{formatINR(product.price * (cart[product.id] ?? 0))}</b></div>)}</div><div className="drawer-footer"><div><span>Subtotal</span><strong>{formatINR(subtotal)}</strong></div><div><span>Delivery</span><strong>{deliveryCharge.enabled ? formatINR(deliveryTotal) : "Free"}</strong></div><div className="drawer-total"><span>Total</span><strong>{formatINR(subtotal + deliveryTotal)}</strong></div><p>{deliveryCharge.enabled ? "Delivery charge applied to this order." : "Complimentary shipping above ₹999."}</p><button className="button button-dark full-width" onClick={openCheckout}>Proceed to buy <span>↗</span></button></div></> : <div className="empty-bag"><div>✦</div><p>Your future favourites<br />belong here.</p><button className="text-link" onClick={() => setCartOpen(false)}>Continue shopping <span>↗</span></button></div>}</aside></div>}
 
