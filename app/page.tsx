@@ -436,7 +436,7 @@ export default function Home() {
 
   return (
     <main className="site-shell" id="top">
-      <div className="announcement"><strong>{announcementText}</strong><button onClick={() => announce("Announcement link selected")}>Explore now&nbsp; ↗</button></div>
+      <div className="announcement"><strong>{announcementText}</strong><button onClick={() => { const shop = document.getElementById("shop"); if (shop) shop.scrollIntoView({ behavior: "smooth" }); else window.location.assign(`${siteBasePath}/#shop`); }}>Explore now&nbsp; ↗</button></div>
 
       <header className="site-header">
         <a href="#top" className="wordmark" aria-label="fanZZy home"><img src={siteAsset("fanzzy-mark.png")} alt="fanZZy" className="brand-logo" /><span className="navbar-brand-name">fanZZy</span></a>
