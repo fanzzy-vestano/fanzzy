@@ -4543,6 +4543,9 @@ function ProductLibraryWorkspace({
               <span className="module-row-number">
                 {String(index + 1).padStart(2, "0")}
               </span>
+              <span className="product-row-thumb">
+                <img src={product.image} alt="" />
+              </span>
               <strong>{product.name}</strong>
               <small>
                 {product.stock === 0 ? "Draft" : `${product.stock} in stock`} ·{" "}
