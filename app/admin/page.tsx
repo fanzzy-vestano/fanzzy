@@ -3691,7 +3691,7 @@ function ProductLibraryWorkspace({
     const loadProducts = async () => {
       const remote = await fetchCatalogProducts();
       if (active && !remote.error && remote.data && remote.data.length) {
-        const mapped = remote.data.map((product) => ({
+        const mapped: AdminProduct[] = remote.data.map((product) => ({
           name: product.name,
           price: `₹${product.price.toLocaleString("en-IN")}`,
           cost: `₹${(product.cost ?? 0).toLocaleString("en-IN")}`,
@@ -3707,19 +3707,44 @@ function ProductLibraryWorkspace({
         const stored = window.localStorage.getItem("fanzzy-products");
         if (stored) {
           try {
-            const parsed = JSON.parse(stored) as Array<Partial<AdminProduct>>;
+            const parsed = JSON.parse(stored) as Array<
+              Omit<Partial<AdminProduct>, "price" | "cost"> & {
+                price?: number | string;
+                cost?: number | string;
+              }
+            >;
             if (Array.isArray(parsed)) {
-              localProducts = parsed.filter((product) => typeof product.name === "string" && product.name.trim()).map((product, index) => ({
-                name: product.name!.trim(),
-                price: typeof product.price === "number" ? `₹${product.price.toLocaleString("en-IN")}` : product.price || "₹0",
-                cost: typeof product.cost === "number" ? `₹${product.cost.toLocaleString("en-IN")}` : product.cost || "₹0",
-                sku: product.sku || `FZ-LOCAL-${String(index + 1).padStart(2, "0")}`,
-                category: product.category || "Uncategorised",
-                stock: product.stock ?? 0,
-                status: product.status ?? "Published",
-                image: product.image || adminProducts[0].image,
-                hoverImage: product.hoverImage || product.image || adminProducts[0].image,
-              }));
+              localProducts = parsed
+                .filter(
+                  (product) =>
+                    typeof product.name === "string" && product.name.trim(),
+                )
+                .map((product, index) => {
+                  const rawPrice = product.price;
+                  const rawCost = product.cost;
+                  return {
+                    name: product.name!.trim(),
+                    price:
+                      typeof rawPrice === "number"
+                        ? `₹${rawPrice.toLocaleString("en-IN")}`
+                        : rawPrice || "₹0",
+                    cost:
+                      typeof rawCost === "number"
+                        ? `₹${rawCost.toLocaleString("en-IN")}`
+                        : rawCost || "₹0",
+                    sku:
+                      product.sku ||
+                      `FZ-LOCAL-${String(index + 1).padStart(2, "0")}`,
+                    category: product.category || "Uncategorised",
+                    stock: product.stock ?? 0,
+                    status: product.status ?? "Published",
+                    image: product.image || adminProducts[0].image,
+                    hoverImage:
+                      product.hoverImage ||
+                      product.image ||
+                      adminProducts[0].image,
+                  };
+                });
             }
           } catch {
             window.localStorage.removeItem("fanzzy-products");
