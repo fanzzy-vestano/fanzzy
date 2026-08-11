@@ -62,6 +62,7 @@ type AdminPermission =
   | "Homepage"
   | "Delivery charge"
   | "Reports"
+  | "Announcement"
   | "Settings";
 type AdminRole = {
   id: string;
@@ -79,6 +80,8 @@ const allAdminPermissions: AdminPermission[] = [
   "Marketing",
   "Homepage",
   "Delivery charge",
+  "Reports",
+  "Announcement",
   "Settings",
 ];
 const defaultAdminRoles: AdminRole[] = [
@@ -382,6 +385,7 @@ const menu = [
   { label: "Homepage", icon: "⌂" },
   { label: "Delivery charge", icon: "₹" },
   { label: "Reports", icon: "▥" },
+  { label: "Announcement", icon: "▤" },
 ];
 
 export default function AdminPage() {
@@ -996,8 +1000,10 @@ function Task({
 
 function AnnouncementPanel({
   onNotify,
+  module = false,
 }: {
   onNotify: (message: string) => void;
+  module?: boolean;
 }) {
   const [text, setText] = useState(
     "Complimentary shipping on orders above ₹999",
@@ -1034,7 +1040,7 @@ function AnnouncementPanel({
   };
 
   return (
-    <section className="panel announcement-panel">
+    <section className={`panel announcement-panel${module ? " announcement-module" : ""}`}>
       <div>
         <p className="eyebrow">STOREFRONT CONTENT</p>
         <h2>Announcement bar</h2>
@@ -1189,6 +1195,7 @@ function ModuleWorkspace({
   if (module === "Products")
     return <ProductLibraryWorkspace onNotify={onNotify} />;
   if (module === "Reports") return <ReportsWorkspace onNotify={onNotify} />;
+  if (module === "Announcement") return <AnnouncementPanel onNotify={onNotify} module />;
   if (module === "Categories") return <CategoryWorkspace onNotify={onNotify} />;
   if (module === "Orders") return <OrdersWorkspace onNotify={onNotify} />;
   if (module === "Homepage") return <HomepageWorkspace onNotify={onNotify} />;

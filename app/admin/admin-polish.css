@@ -1807,7 +1807,7 @@
   }
 }
 
-.admin-content.module-active .announcement-panel,
+.admin-content.module-active .announcement-panel:not(.announcement-module),
 .admin-content.module-active .stats-grid,
 .admin-content.module-active .dashboard-grid,
 .admin-content.module-active .lower-grid {
