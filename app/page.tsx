@@ -15,6 +15,7 @@ type Product = {
   id: string;
   name: string;
   category: string;
+  stock: number;
   price: number;
   compareAt?: number;
   image: string;
@@ -86,6 +87,7 @@ function normalizeStoredProduct(value: unknown, index: number): Product | null {
   if (!name) return null;
   const rawPrice = raw.price;
   const price = typeof rawPrice === "number" ? rawPrice : Number(String(rawPrice ?? "").replace(/[^0-9.]/g, ""));
+  const stock = typeof raw.stock === "number" ? raw.stock : Number(raw.stock ?? 0);
   const image = typeof raw.image === "string" ? raw.image : "";
   const variants = Array.isArray(raw.variants)
     ? raw.variants
@@ -101,6 +103,7 @@ function normalizeStoredProduct(value: unknown, index: number): Product | null {
     id: idValue.toLowerCase().replace(/[^a-z0-9]+/g, "-") || `product-${index}`,
     name,
     category: typeof raw.category === "string" && raw.category ? raw.category : "Uncategorised",
+    stock: Number.isFinite(stock) ? stock : 0,
     price: Number.isFinite(price) ? price : 0,
     compareAt: typeof raw.compareAt === "number" ? raw.compareAt : undefined,
     image,
@@ -112,12 +115,14 @@ function normalizeStoredProduct(value: unknown, index: number): Product | null {
 }
 
 function ProductCard({ product, wished, onWishlist, onAdd, onQuickView }: { product: Product; wished: boolean; onWishlist: () => void; onAdd: () => void; onQuickView: () => void }) {
+  const isOutOfStock = product.stock <= 0;
   return (
     <article className="product-card">
       <div className="product-media" style={{ backgroundColor: product.tone }}>
         <img className="product-image primary-image" src={product.image} alt={product.name} />
         <img className="product-image hover-image" src={product.hoverImage} alt="" aria-hidden="true" />
         {product.tag && <span className="product-tag">{product.tag}</span>}
+        {isOutOfStock && <span className="product-tag stock-out-tag">Stock out</span>}
         <button className={`wishlist-button ${wished ? "is-wished" : ""}`} onClick={onWishlist} aria-label={wished ? `Remove ${product.name} from wishlist` : `Add ${product.name} to wishlist`}>{wished ? "♥" : "♡"}</button>
         <button className="quick-view" onClick={onQuickView}>Quick view <span>↗</span></button>
       </div>
@@ -126,7 +131,7 @@ function ProductCard({ product, wished, onWishlist, onAdd, onQuickView }: { prod
           <p className="eyebrow">{product.category}</p>
           <h3>{product.name}</h3>
         </div>
-        <button className="add-icon" onClick={onAdd} aria-label={`Add ${product.name} to cart`}>+</button>
+        <button className="add-icon" onClick={onAdd} disabled={isOutOfStock} aria-label={isOutOfStock ? `${product.name} is out of stock` : `Add ${product.name} to cart`}>{isOutOfStock ? "—" : "+"}</button>
       </div>
       {product.variants?.length ? <button className="product-variants-preview" onClick={onQuickView} aria-label={`View ${product.name} variants`}><span>{product.variants.length} colour / model option{product.variants.length === 1 ? "" : "s"}</span><span className="product-variant-thumbs">{product.variants.slice(0, 4).map((variant) => <img key={`${product.id}-${variant.name}`} src={variant.image || product.image} alt={variant.name} />)}</span><b>View ↗</b></button> : null}
       <div className="price-row"><span>{formatINR(product.price)}</span>{product.compareAt && <del>{formatINR(product.compareAt)}</del>}</div>
@@ -221,6 +226,7 @@ export default function Home() {
           id: product.sku,
           name: product.name,
           category: product.category,
+          stock: product.stock,
           price: product.price,
           image: product.image,
           hoverImage: product.hoverImage || product.image,
@@ -521,6 +527,7 @@ export default function Home() {
     announce(wishlist.includes(id) ? "Removed from wishlist" : "Saved to wishlist");
   };
   const addToCart = (product: Product) => {
+    if (product.stock <= 0) return announce(`${product.name} is out of stock`);
     setCart((current) => ({ ...current, [product.id]: (current[product.id] ?? 0) + 1 }));
     setCartOpen(true);
     announce(`${product.name} added to cart`);
@@ -741,7 +748,7 @@ export default function Home() {
 
       {checkoutOpen && <div className="drawer-backdrop checkout-backdrop" onClick={() => setCheckoutOpen(false)}><section className="checkout-modal" role="dialog" aria-modal="true" aria-labelledby="checkout-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">CHECKOUT</p><h2 id="checkout-title">Complete your order</h2></div><button aria-label="Close checkout" onClick={() => setCheckoutOpen(false)}>×</button></div><p className="checkout-intro">We’ll use your WhatsApp number to confirm your order and delivery updates.</p><div className="checkout-grid"><label>Customer name<input value={checkoutForm.name} onChange={(event) => setCheckoutForm((current) => ({ ...current, name: event.target.value }))} placeholder="Your full name" required /></label><label>WhatsApp number <span className="required-mark">Required</span><input type="tel" value={checkoutForm.phone} onChange={(event) => setCheckoutForm((current) => ({ ...current, phone: event.target.value }))} placeholder="+91 98765 43210" required /></label><label>Email address <span className="optional-mark">Optional</span><input type="email" value={checkoutForm.email} onChange={(event) => setCheckoutForm((current) => ({ ...current, email: event.target.value }))} placeholder="you@example.com" /></label><label className="checkout-wide">Delivery address<input value={checkoutForm.address} onChange={(event) => setCheckoutForm((current) => ({ ...current, address: event.target.value }))} placeholder="House number, street, city, pincode" required /></label><div className="checkout-coupon checkout-wide"><label htmlFor="checkout-coupon-code">Coupon code <span className="optional-mark">Optional</span></label><div className="coupon-entry"><input id="checkout-coupon-code" value={couponInput} onChange={(event) => { setCouponInput(event.target.value.toUpperCase()); setAppliedCoupon(null); }} placeholder="Enter coupon code" autoCapitalize="characters" /><button className="button button-light" type="button" onClick={applyCoupon}>Apply</button></div>{appliedCoupon && <p className="coupon-success">{appliedCoupon.code} applied · {appliedCoupon.discount} off</p>}</div></div>{bogoDiscount > 0 && <div className="checkout-total coupon-total"><span>Buy 1 Get 1 discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="checkout-total coupon-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div className="checkout-total"><span>Order total</span><strong>{formatINR(orderTotal)}</strong></div><div className="checkout-actions"><button className="button button-dark" onClick={submitCheckout}>Place order <span>↗</span></button><button className="save-text" onClick={() => setCheckoutOpen(false)}>Back to cart</button></div></section></div>}
 
-      {quickProduct && <div className="drawer-backdrop" onClick={() => setQuickProduct(null)}><div className="quick-modal" onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setQuickProduct(null)}>×</button><div className="quick-image"><img src={selectedVariant?.image || quickProduct.image} alt={selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name} /></div><div className="quick-copy"><p className="eyebrow">{quickProduct.category}</p><h2>{quickProduct.name}</h2><div className="price-row"><span>{formatINR(quickProduct.price)}</span>{quickProduct.compareAt && <del>{formatINR(quickProduct.compareAt)}</del>}</div>{quickProduct.variants?.length ? <div className="variant-picker"><span>Choose colour / series / model</span><div>{quickProduct.variants.map((variant, index) => <button key={`${quickProduct.id}-${variant.name || index}`} className={selectedVariant?.name === variant.name && selectedVariant?.image === variant.image ? "active" : ""} onClick={() => setSelectedVariant(variant)}><img src={variant.image || quickProduct.image} alt="" /><span>{variant.name || `Option ${index + 1}`}</span></button>)}</div></div> : null}<p>Designed to become part of your everyday ritual. Hand-finished in small batches with a soft, lasting glow.</p><div className="quick-actions"><button className="button button-dark" onClick={() => { addToCart(quickProduct); setQuickProduct(null); }}>Add to cart <span>↗</span></button><button className="save-text" onClick={() => toggleWishlist(quickProduct.id)}>{wishlist.includes(quickProduct.id) ? "♥ Saved" : "♡ Save for later"}</button></div></div></div></div>}
+      {quickProduct && <div className="drawer-backdrop" onClick={() => setQuickProduct(null)}><div className="quick-modal" onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setQuickProduct(null)}>×</button><div className="quick-image"><img src={selectedVariant?.image || quickProduct.image} alt={selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name} /></div><div className="quick-copy"><p className="eyebrow">{quickProduct.category}</p><h2>{quickProduct.name}</h2><div className="price-row"><span>{formatINR(quickProduct.price)}</span>{quickProduct.compareAt && <del>{formatINR(quickProduct.compareAt)}</del>}</div>{quickProduct.variants?.length ? <div className="variant-picker"><span>Choose colour / series / model</span><div>{quickProduct.variants.map((variant, index) => <button key={`${quickProduct.id}-${variant.name || index}`} className={selectedVariant?.name === variant.name && selectedVariant?.image === variant.image ? "active" : ""} onClick={() => setSelectedVariant(variant)}><img src={variant.image || quickProduct.image} alt="" /><span>{variant.name || `Option ${index + 1}`}</span></button>)}</div></div> : null}<p>Designed to become part of your everyday ritual. Hand-finished in small batches with a soft, lasting glow.</p><div className="quick-actions"><button className="button button-dark" disabled={quickProduct.stock <= 0} onClick={() => { addToCart(quickProduct); if (quickProduct.stock > 0) setQuickProduct(null); }}>{quickProduct.stock <= 0 ? "Stock out" : <>Add to cart <span>↗</span></>}</button><button className="save-text" onClick={() => toggleWishlist(quickProduct.id)}>{wishlist.includes(quickProduct.id) ? "♥ Saved" : "♡ Save for later"}</button></div></div></div></div>}
 
       {toast && <div className="toast">{toast}<span>✦</span></div>}
     </main>
