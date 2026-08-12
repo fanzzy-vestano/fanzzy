@@ -191,3 +191,4 @@ img { display: block; width: 100%; }
   .orders-drawer { border-radius: 22px 0 0 22px; max-width: none; padding: 26px 20px; }
   .customer-order-head { align-items: start; flex-direction: column; }
 }
+.variant-picker { margin: 23px 0 0; width: 100%; }.variant-picker > span { color: var(--wine); display: block; font-family: var(--mono); font-size: 8px; letter-spacing: .08em; margin-bottom: 10px; text-transform: uppercase; }.variant-picker > div { display: flex; flex-wrap: wrap; gap: 7px; }.variant-picker button { background: transparent; border: 1px solid #d9cbc4; color: var(--wine); font-family: var(--mono); font-size: 8px; padding: 9px 11px; text-transform: uppercase; }.variant-picker button.active, .variant-picker button:hover { background: var(--wine); border-color: var(--wine); color: #fff9f0; }

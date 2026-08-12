@@ -37,7 +37,9 @@ type AdminProduct = {
   gstRate?: number;
   markup?: number;
   costWithGst?: string;
+  variants?: ProductVariant[];
 };
+type ProductVariant = { name: string; image: string };
 type MarketingKind = "Campaign" | "Coupon" | "Newsletter";
 type MarketingStatus = "Active" | "Scheduled" | "Draft";
 type MarketingRecord = {
@@ -214,6 +216,7 @@ const persistCatalog = (catalog: AdminProduct[]) => {
     gstRate: product.gstRate || 0,
     markup: product.markup || 0,
     costWithGst: product.costWithGst || product.cost,
+    variants: product.variants || [],
     tag: product.status === "Draft" ? "Draft" : undefined,
     tone: tones[index % tones.length],
   }));
@@ -224,18 +227,15 @@ const persistCatalog = (catalog: AdminProduct[]) => {
     );
   } catch {
     // A large data URL must never crash the admin page when local storage is full.
-    const compactCatalog = storefrontCatalog.map((product) =>
-      product.image.startsWith("data:") ||
-      product.hoverImage.startsWith("data:")
-        ? {
-            ...product,
-            image: product.image.startsWith("data:") ? "" : product.image,
-            hoverImage: product.hoverImage.startsWith("data:")
-              ? ""
-              : product.hoverImage,
-          }
-        : product,
-    );
+    const compactCatalog = storefrontCatalog.map((product) => ({
+      ...product,
+      image: product.image.startsWith("data:") ? "" : product.image,
+      hoverImage: product.hoverImage.startsWith("data:") ? "" : product.hoverImage,
+      variants: product.variants.map((variant) => ({
+        ...variant,
+        image: variant.image.startsWith("data:") ? "" : variant.image,
+      })),
+    }));
     try {
       window.localStorage.setItem(
         "fanzzy-products",
@@ -261,6 +261,7 @@ const toCatalogProduct = (product: AdminProduct) => ({
   status: product.status,
   image: product.image,
   hoverImage: product.hoverImage || product.image,
+  variants: product.variants || [],
 });
 const saveProductBarcodes = async (catalog: AdminProduct[]) => {
   const barcodes = Object.fromEntries(
@@ -277,6 +278,14 @@ const saveProductPricing = async (catalog: AdminProduct[]) => {
       .map((product) => [product.sku, { gstRate: product.gstRate || 0, markup: product.markup || 0 }]),
   );
   await saveStoreSetting("productPricing", JSON.stringify(pricing));
+};
+const saveProductVariants = async (catalog: AdminProduct[]) => {
+  const variants = Object.fromEntries(
+    catalog
+      .filter((product) => product.sku && product.variants?.length)
+      .map((product) => [product.sku, product.variants]),
+  );
+  await saveStoreSetting("productVariants", JSON.stringify(variants));
 };
 const persistCategories = (
   categories: Array<{ name: string; pieces: number; image?: string }>,
@@ -3720,6 +3729,7 @@ function ProductLibraryWorkspace({
     markup: "",
     gstRate: "",
     costWithGst: "₹",
+    variants: [] as ProductVariant[],
   });
   const [newProductImage, setNewProductImage] = useState(
     adminPlaceholderImage,
@@ -3745,6 +3755,7 @@ function ProductLibraryWorkspace({
     markup: "",
     gstRate: "",
     costWithGst: "₹",
+    variants: [] as ProductVariant[],
   });
   useEffect(() => {
     let active = true;
@@ -3752,8 +3763,10 @@ function ProductLibraryWorkspace({
       const remote = await fetchCatalogProducts();
       const barcodeRemote = await fetchStoreSetting("productBarcodes");
       const pricingRemote = await fetchStoreSetting("productPricing");
+      const variantsRemote = await fetchStoreSetting("productVariants");
       let barcodeMap: Record<string, string> = {};
       let pricingMap: Record<string, { gstRate?: number; markup?: number }> = {};
+      let variantsMap: Record<string, ProductVariant[]> = {};
       if (barcodeRemote.value) {
         try {
           const parsed = JSON.parse(barcodeRemote.value) as Record<string, unknown>;
@@ -3774,6 +3787,14 @@ function ProductLibraryWorkspace({
           pricingMap = {};
         }
       }
+      if (variantsRemote.value) {
+        try {
+          const parsed = JSON.parse(variantsRemote.value) as Record<string, ProductVariant[]>;
+          if (parsed && typeof parsed === "object") variantsMap = parsed;
+        } catch {
+          variantsMap = {};
+        }
+      }
       if (active && !remote.error && remote.data && remote.data.length) {
         const mapped: AdminProduct[] = remote.data.filter((product) => !isDemoProduct(product)).map((product) => ({
           name: product.name,
@@ -3790,6 +3811,7 @@ function ProductLibraryWorkspace({
           gstRate: pricingMap[product.sku]?.gstRate || 0,
           markup: pricingMap[product.sku]?.markup || 0,
           costWithGst: calculatePricing(`₹${product.cost.toLocaleString("en-IN")}`, String(pricingMap[product.sku]?.gstRate || 0), String(pricingMap[product.sku]?.markup || 0)).costWithGst,
+          variants: variantsMap[product.sku] || [],
         }));
         let localProducts: AdminProduct[] = [];
         const stored = window.localStorage.getItem("fanzzy-products");
@@ -3835,6 +3857,7 @@ function ProductLibraryWorkspace({
                     gstRate: product.gstRate ?? pricingMap[product.sku]?.gstRate ?? 0,
                     markup: product.markup ?? pricingMap[product.sku]?.markup ?? 0,
                     costWithGst: product.costWithGst || calculatePricing(String(rawCost ?? "₹0"), String(product.gstRate ?? pricingMap[product.sku]?.gstRate ?? 0), String(product.markup ?? pricingMap[product.sku]?.markup ?? 0)).costWithGst,
+                    variants: product.variants || variantsMap[product.sku] || [],
                   };
                 });
             }
@@ -3933,6 +3956,7 @@ function ProductLibraryWorkspace({
                   gstRate: product.gstRate ?? pricingMap[product.sku]?.gstRate ?? 0,
                   markup: product.markup ?? pricingMap[product.sku]?.markup ?? 0,
                   costWithGst: product.costWithGst || calculatePricing(String(rawCost ?? "₹0"), String(product.gstRate ?? pricingMap[product.sku]?.gstRate ?? 0), String(product.markup ?? pricingMap[product.sku]?.markup ?? 0)).costWithGst,
+                  variants: product.variants || variantsMap[product.sku] || [],
                 };
               }),
           );
@@ -3974,6 +3998,7 @@ function ProductLibraryWorkspace({
       markup: "",
       gstRate: "",
       costWithGst: "₹",
+      variants: [],
     });
     setNewProductImage(adminPlaceholderImage);
     setNewProductFile(null);
@@ -4033,6 +4058,7 @@ function ProductLibraryWorkspace({
       gstRate: Number(newProduct.gstRate) || 0,
       markup: Number(newProduct.markup) || 0,
       costWithGst: newProduct.costWithGst,
+      variants: newProduct.variants,
     };
     const remoteError = await saveCatalogProduct(toCatalogProduct(product));
     setProducts((current) => {
@@ -4040,6 +4066,7 @@ function ProductLibraryWorkspace({
       persistCatalog(next);
       void saveProductBarcodes(next);
       void saveProductPricing(next);
+      void saveProductVariants(next);
       return next;
     });
     setNewProduct({
@@ -4053,6 +4080,7 @@ function ProductLibraryWorkspace({
       markup: "",
       gstRate: "",
       costWithGst: "₹",
+      variants: [],
     });
     setNewProductImage(adminPlaceholderImage);
     setNewProductFile(null);
@@ -4131,6 +4159,59 @@ function ProductLibraryWorkspace({
         reader.readAsDataURL(file);
       });
   };
+  const uploadVariantImage = async (
+    mode: "new" | "edit",
+    index: number,
+    file: File,
+  ) => {
+    let image = "";
+    try {
+      image = await makeLocalImage(file);
+    } catch {
+      image = URL.createObjectURL(file);
+    }
+    if (isSupabaseReady) {
+      const upload = await uploadStoreImage(file, "products");
+      if (upload.url && !upload.error) image = upload.url;
+    }
+    if (mode === "new") {
+      setNewProduct((current) => ({
+        ...current,
+        variants: current.variants.map((variant, variantIndex) =>
+          variantIndex === index ? { ...variant, image } : variant,
+        ),
+      }));
+    } else {
+      setEditValues((current) => ({
+        ...current,
+        variants: current.variants.map((variant, variantIndex) =>
+          variantIndex === index ? { ...variant, image } : variant,
+        ),
+      }));
+    }
+  };
+  const updateNewVariant = (
+    index: number,
+    field: keyof ProductVariant,
+    value: string,
+  ) =>
+    setNewProduct((current) => ({
+      ...current,
+      variants: current.variants.map((variant, variantIndex) =>
+        variantIndex === index ? { ...variant, [field]: value } : variant,
+      ),
+    }));
+  const updateEditVariant = (
+    index: number,
+    field: keyof ProductVariant,
+    value: string,
+  ) =>
+    setEditValues((current) => ({
+      ...current,
+      variants: current.variants.map((variant, variantIndex) =>
+        variantIndex === index ? { ...variant, [field]: value } : variant,
+      ),
+    }));
   const updateEditField = (field: keyof typeof editValues, value: string) =>
     setEditValues((current) => {
       const next = { ...current, [field]: value };
@@ -4160,6 +4241,7 @@ function ProductLibraryWorkspace({
         : "",
       gstRate: String(product.gstRate || 0),
       costWithGst: product.costWithGst || product.cost,
+      variants: product.variants || [],
     });
     setEditImageFile(null);
     setEditHoverFile(null);
@@ -4209,6 +4291,7 @@ function ProductLibraryWorkspace({
       gstRate: Number(editValues.gstRate) || 0,
       markup: Number(editValues.markup) || 0,
       costWithGst: editValues.costWithGst,
+      variants: editValues.variants,
     };
     const remoteError = await saveCatalogProduct(toCatalogProduct(updated));
     if (!remoteError && updated.sku !== selectedProduct.sku)
@@ -4220,6 +4303,7 @@ function ProductLibraryWorkspace({
       persistCatalog(next);
       void saveProductBarcodes(next);
       void saveProductPricing(next);
+      void saveProductVariants(next);
       return next;
     });
     setSelectedProduct(updated);
@@ -4238,6 +4322,7 @@ function ProductLibraryWorkspace({
       persistCatalog(next);
       void saveProductBarcodes(next);
       void saveProductPricing(next);
+      void saveProductVariants(next);
       return next;
     });
     if (selectedProduct?.sku === product.sku) setSelectedProduct(null);
@@ -4314,6 +4399,7 @@ function ProductLibraryWorkspace({
         persistCatalog(next);
         void saveProductBarcodes(next);
         void saveProductPricing(next);
+        void saveProductVariants(next);
         return next;
       });
       onNotify(
@@ -4427,6 +4513,72 @@ function ProductLibraryWorkspace({
                   onChange={uploadProductHoverImage}
                 />
               </label>
+            </div>
+            <div className="variant-editor">
+              <div className="variant-editor-heading">
+                <div>
+                  <p className="eyebrow">COLOUR / SERIES / MODEL VARIANTS</p>
+                  <small>Add a separate customer-selectable image for each variant.</small>
+                </div>
+                <button
+                  className="module-secondary variant-add"
+                  type="button"
+                  onClick={() =>
+                    setNewProduct((current) => ({
+                      ...current,
+                      variants: [...current.variants, { name: "", image: "" }],
+                    }))
+                  }
+                >
+                  + Add variant
+                </button>
+              </div>
+              {newProduct.variants.length ? (
+                <div className="variant-editor-list">
+                  {newProduct.variants.map((variant, index) => (
+                    <div className="variant-editor-row" key={`new-variant-${index}`}>
+                      <input
+                        value={variant.name}
+                        onChange={(event) => updateNewVariant(index, "name", event.target.value)}
+                        placeholder="e.g. Rose gold / Model 2"
+                        aria-label={`Variant ${index + 1} name`}
+                      />
+                      <input
+                        value={variant.image}
+                        onChange={(event) => updateNewVariant(index, "image", event.target.value)}
+                        placeholder="Image URL (optional)"
+                        aria-label={`Variant ${index + 1} image URL`}
+                      />
+                      <label className="variant-upload">
+                        Upload image
+                        <input
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp"
+                          onChange={(event) => {
+                            const file = event.target.files?.[0];
+                            if (file) void uploadVariantImage("new", index, file);
+                          }}
+                        />
+                      </label>
+                      <button
+                        className="variant-remove"
+                        type="button"
+                        onClick={() =>
+                          setNewProduct((current) => ({
+                            ...current,
+                            variants: current.variants.filter((_, variantIndex) => variantIndex !== index),
+                          }))
+                        }
+                        aria-label={`Remove variant ${index + 1}`}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="variant-empty">No variants added yet.</p>
+              )}
             </div>
             <div className="product-form-grid">
               <label>
@@ -4637,6 +4789,72 @@ function ProductLibraryWorkspace({
                 onChange={uploadEditHoverImage}
               />
             </label>
+          </div>
+          <div className="variant-editor">
+            <div className="variant-editor-heading">
+              <div>
+                <p className="eyebrow">COLOUR / SERIES / MODEL VARIANTS</p>
+                <small>Add a separate customer-selectable image for each variant.</small>
+              </div>
+              <button
+                className="module-secondary variant-add"
+                type="button"
+                onClick={() =>
+                  setEditValues((current) => ({
+                    ...current,
+                    variants: [...current.variants, { name: "", image: "" }],
+                  }))
+                }
+              >
+                + Add variant
+              </button>
+            </div>
+            {editValues.variants.length ? (
+              <div className="variant-editor-list">
+                {editValues.variants.map((variant, index) => (
+                  <div className="variant-editor-row" key={`edit-variant-${index}`}>
+                    <input
+                      value={variant.name}
+                      onChange={(event) => updateEditVariant(index, "name", event.target.value)}
+                      placeholder="e.g. Rose gold / Model 2"
+                      aria-label={`Variant ${index + 1} name`}
+                    />
+                    <input
+                      value={variant.image}
+                      onChange={(event) => updateEditVariant(index, "image", event.target.value)}
+                      placeholder="Image URL (optional)"
+                      aria-label={`Variant ${index + 1} image URL`}
+                    />
+                    <label className="variant-upload">
+                      Upload image
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp"
+                        onChange={(event) => {
+                          const file = event.target.files?.[0];
+                          if (file) void uploadVariantImage("edit", index, file);
+                        }}
+                      />
+                    </label>
+                    <button
+                      className="variant-remove"
+                      type="button"
+                      onClick={() =>
+                        setEditValues((current) => ({
+                          ...current,
+                          variants: current.variants.filter((_, variantIndex) => variantIndex !== index),
+                        }))
+                      }
+                      aria-label={`Remove variant ${index + 1}`}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="variant-empty">No variants added yet.</p>
+            )}
           </div>
           <div className="product-form-grid">
             <label>

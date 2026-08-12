@@ -20,7 +20,9 @@ type Product = {
   hoverImage: string;
   tag?: string;
   tone: string;
+  variants?: ProductVariant[];
 };
+type ProductVariant = { name: string; image: string };
 type MarketingRecord = { kind: "Campaign" | "Coupon" | "Newsletter"; name: string; detail: string; status: "Active" | "Scheduled" | "Draft"; code?: string; discount?: string };
 type OrderStatus = "Processing" | "Packed" | "Shipped" | "Delivered" | "Cancelled";
 type CustomerOrder = {
@@ -76,6 +78,15 @@ function normalizeStoredProduct(value: unknown, index: number): Product | null {
   const rawPrice = raw.price;
   const price = typeof rawPrice === "number" ? rawPrice : Number(String(rawPrice ?? "").replace(/[^0-9.]/g, ""));
   const image = typeof raw.image === "string" ? raw.image : "";
+  const variants = Array.isArray(raw.variants)
+    ? raw.variants
+        .filter((variant): variant is Record<string, unknown> => Boolean(variant && typeof variant === "object"))
+        .map((variant) => ({
+          name: typeof variant.name === "string" ? variant.name.trim() : "",
+          image: typeof variant.image === "string" ? variant.image : "",
+        }))
+        .filter((variant) => variant.name && variant.image)
+    : [];
   const idValue = typeof raw.id === "string" ? raw.id : typeof raw.sku === "string" ? raw.sku : `${name}-${index}`;
   return {
     id: idValue.toLowerCase().replace(/[^a-z0-9]+/g, "-") || `product-${index}`,
@@ -87,6 +98,7 @@ function normalizeStoredProduct(value: unknown, index: number): Product | null {
     hoverImage: typeof raw.hoverImage === "string" && raw.hoverImage ? raw.hoverImage : image,
     tag: typeof raw.tag === "string" ? raw.tag : undefined,
     tone: typeof raw.tone === "string" && raw.tone ? raw.tone : productTones[index % productTones.length],
+    variants,
   };
 }
 
@@ -136,6 +148,7 @@ export default function Home() {
   const [appliedCoupon, setAppliedCoupon] = useState<MarketingRecord | null>(null);
   const [marketingRecords, setMarketingRecords] = useState<MarketingRecord[]>([]);
   const [quickProduct, setQuickProduct] = useState<Product | null>(null);
+  const [selectedVariant, setSelectedVariant] = useState<ProductVariant | null>(null);
   const [toast, setToast] = useState("");
   const [email, setEmail] = useState("");
   const [subscribed, setSubscribed] = useState(false);
@@ -153,6 +166,16 @@ export default function Home() {
   useEffect(() => {
     const syncProducts = async () => {
       const remote = await fetchCatalogProducts();
+      const variantsRemote = await fetchStoreSetting("productVariants");
+      let variantsMap: Record<string, ProductVariant[]> = {};
+      if (variantsRemote.value) {
+        try {
+          const parsed = JSON.parse(variantsRemote.value) as Record<string, ProductVariant[]>;
+          if (parsed && typeof parsed === "object") variantsMap = parsed;
+        } catch {
+          variantsMap = {};
+        }
+      }
       const stored = window.localStorage.getItem("fanzzy-products");
       let localProducts: Product[] = [];
       if (stored) {
@@ -176,6 +199,7 @@ export default function Home() {
           tag: product.tag,
           tone: product.tone,
           compareAt: product.compareAt,
+          variants: variantsMap[product.sku] || product.variants,
         }, index)).filter((product): product is Product => product !== null);
         const merged = new Map(remoteProducts.map((product) => [product.id, product]));
         localProducts.forEach((product) => merged.set(product.id, product));
@@ -192,6 +216,10 @@ export default function Home() {
       window.removeEventListener("fanzzy-products-updated", syncProducts);
     };
   }, []);
+
+  useEffect(() => {
+    setSelectedVariant(quickProduct?.variants?.[0] ?? null);
+  }, [quickProduct]);
 
   useEffect(() => {
     let active = true;
@@ -659,7 +687,7 @@ export default function Home() {
 
       {checkoutOpen && <div className="drawer-backdrop checkout-backdrop" onClick={() => setCheckoutOpen(false)}><section className="checkout-modal" role="dialog" aria-modal="true" aria-labelledby="checkout-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">CHECKOUT</p><h2 id="checkout-title">Complete your order</h2></div><button aria-label="Close checkout" onClick={() => setCheckoutOpen(false)}>×</button></div><p className="checkout-intro">We’ll use your WhatsApp number to confirm your order and delivery updates.</p><div className="checkout-grid"><label>Customer name<input value={checkoutForm.name} onChange={(event) => setCheckoutForm((current) => ({ ...current, name: event.target.value }))} placeholder="Your full name" required /></label><label>WhatsApp number <span className="required-mark">Required</span><input type="tel" value={checkoutForm.phone} onChange={(event) => setCheckoutForm((current) => ({ ...current, phone: event.target.value }))} placeholder="+91 98765 43210" required /></label><label>Email address <span className="optional-mark">Optional</span><input type="email" value={checkoutForm.email} onChange={(event) => setCheckoutForm((current) => ({ ...current, email: event.target.value }))} placeholder="you@example.com" /></label><label className="checkout-wide">Delivery address<input value={checkoutForm.address} onChange={(event) => setCheckoutForm((current) => ({ ...current, address: event.target.value }))} placeholder="House number, street, city, pincode" required /></label><div className="checkout-coupon checkout-wide"><label htmlFor="checkout-coupon-code">Coupon code <span className="optional-mark">Optional</span></label><div className="coupon-entry"><input id="checkout-coupon-code" value={couponInput} onChange={(event) => { setCouponInput(event.target.value.toUpperCase()); setAppliedCoupon(null); }} placeholder="Enter coupon code" autoCapitalize="characters" /><button className="button button-light" type="button" onClick={applyCoupon}>Apply</button></div>{appliedCoupon && <p className="coupon-success">{appliedCoupon.code} applied · {appliedCoupon.discount} off</p>}</div></div>{couponDiscount > 0 && <div className="checkout-total coupon-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div className="checkout-total"><span>Order total</span><strong>{formatINR(orderTotal)}</strong></div><div className="checkout-actions"><button className="button button-dark" onClick={submitCheckout}>Place order <span>↗</span></button><button className="save-text" onClick={() => setCheckoutOpen(false)}>Back to cart</button></div></section></div>}
 
-      {quickProduct && <div className="drawer-backdrop" onClick={() => setQuickProduct(null)}><div className="quick-modal" onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setQuickProduct(null)}>×</button><div className="quick-image"><img src={quickProduct.image} alt={quickProduct.name} /></div><div className="quick-copy"><p className="eyebrow">{quickProduct.category}</p><h2>{quickProduct.name}</h2><div className="price-row"><span>{formatINR(quickProduct.price)}</span>{quickProduct.compareAt && <del>{formatINR(quickProduct.compareAt)}</del>}</div><p>Designed to become part of your everyday ritual. Hand-finished in small batches with a soft, lasting glow.</p><div className="quick-actions"><button className="button button-dark" onClick={() => { addToCart(quickProduct); setQuickProduct(null); }}>Add to cart <span>↗</span></button><button className="save-text" onClick={() => toggleWishlist(quickProduct.id)}>{wishlist.includes(quickProduct.id) ? "♥ Saved" : "♡ Save for later"}</button></div></div></div></div>}
+      {quickProduct && <div className="drawer-backdrop" onClick={() => setQuickProduct(null)}><div className="quick-modal" onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setQuickProduct(null)}>×</button><div className="quick-image"><img src={selectedVariant?.image || quickProduct.image} alt={selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name} /></div><div className="quick-copy"><p className="eyebrow">{quickProduct.category}</p><h2>{quickProduct.name}</h2><div className="price-row"><span>{formatINR(quickProduct.price)}</span>{quickProduct.compareAt && <del>{formatINR(quickProduct.compareAt)}</del>}</div>{quickProduct.variants?.length ? <div className="variant-picker"><span>Choose colour / series / model</span><div>{quickProduct.variants.map((variant) => <button key={`${quickProduct.id}-${variant.name}`} className={selectedVariant?.name === variant.name ? "active" : ""} onClick={() => setSelectedVariant(variant)}>{variant.name}</button>)}</div></div> : null}<p>Designed to become part of your everyday ritual. Hand-finished in small batches with a soft, lasting glow.</p><div className="quick-actions"><button className="button button-dark" onClick={() => { addToCart(quickProduct); setQuickProduct(null); }}>Add to cart <span>↗</span></button><button className="save-text" onClick={() => toggleWishlist(quickProduct.id)}>{wishlist.includes(quickProduct.id) ? "♥ Saved" : "♡ Save for later"}</button></div></div></div></div>}
 
       {toast && <div className="toast">{toast}<span>✦</span></div>}
     </main>

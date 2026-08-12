@@ -16,6 +16,7 @@ export type CatalogProduct = {
   tag?: string;
   tone?: string;
   barcode?: string;
+  variants?: Array<{ name: string; image: string }>;
 };
 
 export type CatalogCategory = {
@@ -38,6 +39,7 @@ const settingKeys = {
   newsletterSubscribers: "newsletter_subscribers",
   productBarcodes: "product_barcodes",
   productPricing: "product_pricing",
+  productVariants: "product_variants",
 } as const;
 
 const asError = (value: unknown) => value instanceof Error ? value : new Error(String(value || "Supabase request failed"));
