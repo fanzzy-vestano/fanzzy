@@ -637,7 +637,6 @@ export default function AdminPage() {
             </p>
           </div>
         </div>
-        <AnnouncementPanel onNotify={notify} />
         {active !== "Overview" && (
           <ModuleWorkspace module={active} onNotify={notify} reportView={reportView} />
         )}
