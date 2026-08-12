@@ -34,6 +34,9 @@ type AdminProduct = {
   image: string;
   hoverImage?: string;
   barcode?: string;
+  gstRate?: number;
+  markup?: number;
+  costWithGst?: string;
 };
 type MarketingKind = "Campaign" | "Coupon" | "Newsletter";
 type MarketingStatus = "Active" | "Scheduled" | "Draft";
@@ -285,6 +288,16 @@ const createSku = (
 };
 const parseMoney = (value: string) => Number(value.replace(/[^0-9.]/g, "")) || 0;
 const formatMoney = (value: number) => `₹${Math.round(value).toLocaleString("en-IN")}`;
+const calculatePricing = (costValue: string, gstValue: string, markupValue: string) => {
+  const cost = parseMoney(costValue);
+  const gst = Number(gstValue) || 0;
+  const markup = Number(markupValue) || 0;
+  const costWithGst = cost > 0 ? cost * (1 + gst / 100) : 0;
+  return {
+    costWithGst: costWithGst > 0 ? formatMoney(costWithGst) : "₹",
+    price: costWithGst > 0 ? formatMoney(costWithGst * (1 + markup / 100)) : "₹",
+  };
+};
 const makeLocalImage = (file: File) =>
   new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -332,6 +345,9 @@ const persistCatalog = (catalog: AdminProduct[]) => {
     image: product.image,
     hoverImage: product.hoverImage || product.image,
     barcode: product.barcode || "",
+    gstRate: product.gstRate || 0,
+    markup: product.markup || 0,
+    costWithGst: product.costWithGst || product.cost,
     tag: product.status === "Draft" ? "Draft" : undefined,
     tone: tones[index % tones.length],
   }));
@@ -387,6 +403,14 @@ const saveProductBarcodes = async (catalog: AdminProduct[]) => {
       .map((product) => [product.sku, product.barcode!.trim()]),
   );
   await saveStoreSetting("productBarcodes", JSON.stringify(barcodes));
+};
+const saveProductPricing = async (catalog: AdminProduct[]) => {
+  const pricing = Object.fromEntries(
+    catalog
+      .filter((product) => product.sku)
+      .map((product) => [product.sku, { gstRate: product.gstRate || 0, markup: product.markup || 0 }]),
+  );
+  await saveStoreSetting("productPricing", JSON.stringify(pricing));
 };
 const persistCategories = (
   categories: Array<{ name: string; pieces: number; image?: string }>,
@@ -4020,6 +4044,8 @@ function ProductLibraryWorkspace({
     hoverImage: "",
     barcode: "",
     markup: "",
+    gstRate: "",
+    costWithGst: "₹",
   });
   const [newProductImage, setNewProductImage] = useState(
     adminProducts[0].image,
@@ -4043,13 +4069,17 @@ function ProductLibraryWorkspace({
     sku: "",
     barcode: "",
     markup: "",
+    gstRate: "",
+    costWithGst: "₹",
   });
   useEffect(() => {
     let active = true;
     const loadProducts = async () => {
       const remote = await fetchCatalogProducts();
       const barcodeRemote = await fetchStoreSetting("productBarcodes");
+      const pricingRemote = await fetchStoreSetting("productPricing");
       let barcodeMap: Record<string, string> = {};
+      let pricingMap: Record<string, { gstRate?: number; markup?: number }> = {};
       if (barcodeRemote.value) {
         try {
           const parsed = JSON.parse(barcodeRemote.value) as Record<string, unknown>;
@@ -4060,6 +4090,14 @@ function ProductLibraryWorkspace({
           }
         } catch {
           barcodeMap = {};
+        }
+      }
+      if (pricingRemote.value) {
+        try {
+          const parsed = JSON.parse(pricingRemote.value) as Record<string, { gstRate?: number; markup?: number }>;
+          if (parsed && typeof parsed === "object") pricingMap = parsed;
+        } catch {
+          pricingMap = {};
         }
       }
       if (active && !remote.error && remote.data && remote.data.length) {
@@ -4075,6 +4113,9 @@ function ProductLibraryWorkspace({
           hoverImage:
             product.hoverImage || product.image || adminProducts[0].image,
           barcode: barcodeMap[product.sku] || product.barcode || "",
+          gstRate: pricingMap[product.sku]?.gstRate || 0,
+          markup: pricingMap[product.sku]?.markup || 0,
+          costWithGst: calculatePricing(`₹${product.cost.toLocaleString("en-IN")}`, String(pricingMap[product.sku]?.gstRate || 0), String(pricingMap[product.sku]?.markup || 0)).costWithGst,
         }));
         let localProducts: AdminProduct[] = [];
         const stored = window.localStorage.getItem("fanzzy-products");
@@ -4117,6 +4158,9 @@ function ProductLibraryWorkspace({
                       product.image ||
                       adminProducts[0].image,
                     barcode: product.barcode || barcodeMap[product.sku] || "",
+                    gstRate: product.gstRate ?? pricingMap[product.sku]?.gstRate ?? 0,
+                    markup: product.markup ?? pricingMap[product.sku]?.markup ?? 0,
+                    costWithGst: product.costWithGst || calculatePricing(String(rawCost ?? "₹0"), String(product.gstRate ?? pricingMap[product.sku]?.gstRate ?? 0), String(product.markup ?? pricingMap[product.sku]?.markup ?? 0)).costWithGst,
                   };
                 });
             }
@@ -4212,6 +4256,9 @@ function ProductLibraryWorkspace({
                     product.image ||
                     adminProducts[0].image,
                   barcode: product.barcode || barcodeMap[product.sku] || "",
+                  gstRate: product.gstRate ?? pricingMap[product.sku]?.gstRate ?? 0,
+                  markup: product.markup ?? pricingMap[product.sku]?.markup ?? 0,
+                  costWithGst: product.costWithGst || calculatePricing(String(rawCost ?? "₹0"), String(product.gstRate ?? pricingMap[product.sku]?.gstRate ?? 0), String(product.markup ?? pricingMap[product.sku]?.markup ?? 0)).costWithGst,
                 };
               }),
           );
@@ -4234,10 +4281,10 @@ function ProductLibraryWorkspace({
           ? { sku: createSku(value, current.category, products) }
           : {}),
       };
-      if (field === "cost" || field === "markup") {
-        const cost = parseMoney(field === "cost" ? value : next.cost);
-        const markup = Number(field === "markup" ? value : next.markup);
-        if (cost > 0 && Number.isFinite(markup)) next.price = formatMoney(cost * (1 + markup / 100));
+      if (field === "cost" || field === "gstRate" || field === "markup") {
+        const pricing = calculatePricing(next.cost, next.gstRate, next.markup);
+        next.costWithGst = pricing.costWithGst;
+        if (parseMoney(next.cost) > 0) next.price = pricing.price;
       }
       return next;
     });
@@ -4251,6 +4298,8 @@ function ProductLibraryWorkspace({
       sku: "",
       barcode: "",
       markup: "",
+      gstRate: "",
+      costWithGst: "₹",
     });
     setNewProductImage(adminProducts[0].image);
     setNewProductFile(null);
@@ -4307,12 +4356,16 @@ function ProductLibraryWorkspace({
       image: productImage,
       hoverImage: productHoverImage,
       barcode: newProduct.barcode.trim(),
+      gstRate: Number(newProduct.gstRate) || 0,
+      markup: Number(newProduct.markup) || 0,
+      costWithGst: newProduct.costWithGst,
     };
     const remoteError = await saveCatalogProduct(toCatalogProduct(product));
     setProducts((current) => {
       const next = [...current, product];
       persistCatalog(next);
       void saveProductBarcodes(next);
+      void saveProductPricing(next);
       return next;
     });
     setNewProduct({
@@ -4324,6 +4377,8 @@ function ProductLibraryWorkspace({
       sku: "",
       barcode: "",
       markup: "",
+      gstRate: "",
+      costWithGst: "₹",
     });
     setNewProductImage(adminProducts[0].image);
     setNewProductFile(null);
@@ -4405,10 +4460,10 @@ function ProductLibraryWorkspace({
   const updateEditField = (field: keyof typeof editValues, value: string) =>
     setEditValues((current) => {
       const next = { ...current, [field]: value };
-      if (field === "cost" || field === "markup") {
-        const cost = parseMoney(field === "cost" ? value : next.cost);
-        const markup = Number(field === "markup" ? value : next.markup);
-        if (cost > 0 && Number.isFinite(markup)) next.price = formatMoney(cost * (1 + markup / 100));
+      if (field === "cost" || field === "gstRate" || field === "markup") {
+        const pricing = calculatePricing(next.cost, next.gstRate, next.markup);
+        next.costWithGst = pricing.costWithGst;
+        if (parseMoney(next.cost) > 0) next.price = pricing.price;
       }
       return next;
     });
@@ -4429,6 +4484,8 @@ function ProductLibraryWorkspace({
       markup: parseMoney(product.cost) > 0
         ? String(Math.max(0, Math.round((parseMoney(product.price) / parseMoney(product.cost) - 1) * 100)))
         : "",
+      gstRate: String(product.gstRate || 0),
+      costWithGst: product.costWithGst || product.cost,
     });
     setEditImageFile(null);
     setEditHoverFile(null);
@@ -4475,6 +4532,9 @@ function ProductLibraryWorkspace({
       image,
       hoverImage,
       barcode: editValues.barcode.trim(),
+      gstRate: Number(editValues.gstRate) || 0,
+      markup: Number(editValues.markup) || 0,
+      costWithGst: editValues.costWithGst,
     };
     const remoteError = await saveCatalogProduct(toCatalogProduct(updated));
     if (!remoteError && updated.sku !== selectedProduct.sku)
@@ -4485,6 +4545,7 @@ function ProductLibraryWorkspace({
       );
       persistCatalog(next);
       void saveProductBarcodes(next);
+      void saveProductPricing(next);
       return next;
     });
     setSelectedProduct(updated);
@@ -4502,6 +4563,7 @@ function ProductLibraryWorkspace({
       const next = current.filter((item) => item.sku !== product.sku);
       persistCatalog(next);
       void saveProductBarcodes(next);
+      void saveProductPricing(next);
       return next;
     });
     if (selectedProduct?.sku === product.sku) setSelectedProduct(null);
@@ -4577,6 +4639,7 @@ function ProductLibraryWorkspace({
         const next = [...current, ...imported];
         persistCatalog(next);
         void saveProductBarcodes(next);
+        void saveProductPricing(next);
         return next;
       });
       onNotify(
@@ -4739,6 +4802,22 @@ function ProductLibraryWorkspace({
                     placeholder="₹0"
                     inputMode="decimal"
                   />
+                </label>
+                <label>
+                  GST %
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={newProduct.gstRate}
+                    onChange={(event) => updateField("gstRate", event.target.value)}
+                    placeholder="e.g. 5"
+                    inputMode="decimal"
+                  />
+                </label>
+                <label>
+                  Cost incl. GST
+                  <input value={newProduct.costWithGst} readOnly aria-label="Cost including GST" />
                 </label>
                 <label>
                   Markup %
@@ -4949,6 +5028,22 @@ function ProductLibraryWorkspace({
                     placeholder="₹0"
                     inputMode="decimal"
                   />
+                </label>
+                <label>
+                  GST %
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={editValues.gstRate}
+                    onChange={(event) => updateEditField("gstRate", event.target.value)}
+                    placeholder="e.g. 5"
+                    inputMode="decimal"
+                  />
+                </label>
+                <label>
+                  Cost incl. GST
+                  <input value={editValues.costWithGst} readOnly aria-label="Cost including GST" />
                 </label>
                 <label>
                   Markup %
