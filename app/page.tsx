@@ -126,6 +126,7 @@ function ProductCard({ product, wished, onWishlist, onAdd, onQuickView }: { prod
         </div>
         <button className="add-icon" onClick={onAdd} aria-label={`Add ${product.name} to cart`}>+</button>
       </div>
+      {product.variants?.length ? <button className="product-variants-preview" onClick={onQuickView} aria-label={`View ${product.name} variants`}><span>{product.variants.length} colour / model option{product.variants.length === 1 ? "" : "s"}</span><span className="product-variant-thumbs">{product.variants.slice(0, 4).map((variant) => <img key={`${product.id}-${variant.name}`} src={variant.image} alt={variant.name} />)}</span><b>View ↗</b></button> : null}
       <div className="price-row"><span>{formatINR(product.price)}</span>{product.compareAt && <del>{formatINR(product.compareAt)}</del>}</div>
     </article>
   );
