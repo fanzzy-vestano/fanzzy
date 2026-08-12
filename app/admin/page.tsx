@@ -3943,7 +3943,7 @@ function ProductLibraryWorkspace({
           barcode: barcodeMap[product.sku] || product.barcode || "",
           gstRate: pricingMap[product.sku]?.gstRate || 0,
           markup: pricingMap[product.sku]?.markup || 0,
-          costWithGst: calculatePricing(`₹${product.cost.toLocaleString("en-IN")}`, String(pricingMap[product.sku]?.gstRate || 0), String(pricingMap[product.sku]?.markup || 0)).costWithGst,
+          costWithGst: calculatePricing(`₹${(product.cost ?? 0).toLocaleString("en-IN")}`, String(pricingMap[product.sku]?.gstRate || 0), String(pricingMap[product.sku]?.markup || 0)).costWithGst,
           variants: variantsMap[product.sku] || localVariantsMap[product.sku] || [],
         }));
         // Supabase is the shared catalog. Never merge stale local records back
@@ -3973,6 +3973,10 @@ function ProductLibraryWorkspace({
               .map((product, index) => {
                 const rawPrice = product.price as number | string | undefined;
                 const rawCost = product.cost as number | string | undefined;
+                const sku =
+                  product.sku ||
+                  product.id?.toUpperCase() ||
+                  `FZ-IMP-${String(index + 1).padStart(2, "0")}`;
                 return {
                   name: product.name!.trim(),
                   price:
@@ -3983,10 +3987,7 @@ function ProductLibraryWorkspace({
                     typeof rawCost === "number"
                       ? `₹${rawCost.toLocaleString("en-IN")}`
                       : rawCost || "₹0",
-                  sku:
-                    product.sku ||
-                    product.id?.toUpperCase() ||
-                    `FZ-IMP-${String(index + 1).padStart(2, "0")}`,
+                  sku,
                   category: product.category || "Uncategorised",
                   stock: product.stock ?? 0,
                   status: product.status ?? "Published",
@@ -3995,11 +3996,11 @@ function ProductLibraryWorkspace({
                     product.hoverImage ||
                     product.image ||
                     adminPlaceholderImage,
-                  barcode: product.barcode || barcodeMap[product.sku] || "",
-                  gstRate: product.gstRate ?? pricingMap[product.sku]?.gstRate ?? 0,
-                  markup: product.markup ?? pricingMap[product.sku]?.markup ?? 0,
-                  costWithGst: product.costWithGst || calculatePricing(String(rawCost ?? "₹0"), String(product.gstRate ?? pricingMap[product.sku]?.gstRate ?? 0), String(product.markup ?? pricingMap[product.sku]?.markup ?? 0)).costWithGst,
-                  variants: product.variants || variantsMap[product.sku] || [],
+                  barcode: product.barcode || barcodeMap[sku] || "",
+                  gstRate: product.gstRate ?? pricingMap[sku]?.gstRate ?? 0,
+                  markup: product.markup ?? pricingMap[sku]?.markup ?? 0,
+                  costWithGst: product.costWithGst || calculatePricing(String(rawCost ?? "₹0"), String(product.gstRate ?? pricingMap[sku]?.gstRate ?? 0), String(product.markup ?? pricingMap[sku]?.markup ?? 0)).costWithGst,
+                  variants: product.variants || variantsMap[sku] || [],
                 };
               }),
           );
