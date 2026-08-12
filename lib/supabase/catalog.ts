@@ -30,6 +30,7 @@ const settingKeys = {
   heroSlides: "hero_slides",
   heroSlideDuration: "hero_slide_duration",
   deliveryCharge: "delivery_charge",
+  orders: "orders",
   marketingRecords: "marketing_records",
   collections: "collections",
   customers: "customers",
@@ -142,6 +143,21 @@ export async function saveStoreSetting(key: keyof typeof settingKeys, value: str
   if (!supabase) return new Error("Supabase is not configured");
   const { error } = await supabase.from("store_settings").upsert({ key: settingKeys[key], value, updated_at: new Date().toISOString() }, { onConflict: "key" });
   return error;
+}
+
+export async function fetchStoreOrders<T>() {
+  const remote = await fetchStoreSetting("orders");
+  if (remote.error || !remote.value) return { data: null as T[] | null, error: remote.error };
+  try {
+    const parsed: unknown = JSON.parse(remote.value);
+    return { data: Array.isArray(parsed) ? parsed as T[] : null, error: null };
+  } catch (error) {
+    return { data: null as T[] | null, error: asError(error) };
+  }
+}
+
+export async function saveStoreOrders(orders: unknown[]) {
+  return saveStoreSetting("orders", JSON.stringify(orders));
 }
 
 export async function uploadStoreImage(file: File, folder: "products" | "homepage" | "categories") {

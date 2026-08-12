@@ -6,6 +6,7 @@ import { Eye, Pencil, Trash2 } from "lucide-react";
 import {
   fetchCatalogCategories,
   fetchCatalogProducts,
+  fetchStoreOrders,
   fetchStoreSetting,
   isSupabaseReady,
   removeCatalogCategory,
@@ -13,6 +14,7 @@ import {
   renameCatalogCategory,
   saveCatalogCategory,
   saveCatalogProduct,
+  saveStoreOrders,
   saveStoreSetting,
   uploadStoreImage,
 } from "../../lib/supabase/catalog";
@@ -404,8 +406,8 @@ export default function AdminPage() {
   const [query, setQuery] = useState("");
   const [toast, setToast] = useState("");
   const [dateRange, setDateRange] = useState<DateRange>("this-month");
-  const [dashboardFromDate, setDashboardFromDate] = useState("2026-08-01");
-  const [dashboardToDate, setDashboardToDate] = useState("2026-08-08");
+  const [dashboardFromDate, setDashboardFromDate] = useState(() => `${new Date().toISOString().slice(0, 8)}01`);
+  const [dashboardToDate, setDashboardToDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [dashboardOrders, setDashboardOrders] = useState<OrderRecord[]>(adminOrders);
   const [productFilter, setProductFilter] = useState<ProductFilter>("all");
   const [categoryFilter, setCategoryFilter] = useState("All categories");
@@ -440,15 +442,20 @@ export default function AdminPage() {
   const visibleMenu = menu.filter((item) => canAccess(item.label));
 
   useEffect(() => {
-    const syncDashboardOrders = () => {
-      const stored = window.localStorage.getItem("fanzzy-orders");
-      if (!stored) return;
+    const syncDashboardOrders = async () => {
+      const remote = await fetchStoreOrders<OrderRecord>();
+      const merged = new Map<string, OrderRecord>();
+      remote.data?.forEach((order) => { if (order?.id) merged.set(order.id, order); });
       try {
-        const parsed = JSON.parse(stored) as OrderRecord[];
-        if (Array.isArray(parsed)) setDashboardOrders(parsed.filter((order) => order?.date && order?.total));
+        const stored = window.localStorage.getItem("fanzzy-orders");
+        const parsed = stored ? JSON.parse(stored) as OrderRecord[] : [];
+        if (Array.isArray(parsed)) parsed.forEach((order) => {
+          if (order?.id && !merged.has(order.id)) merged.set(order.id, order);
+        });
       } catch {
         window.localStorage.removeItem("fanzzy-orders");
       }
+      setDashboardOrders(Array.from(merged.values()).filter((order) => order?.date && order?.total));
     };
     syncDashboardOrders();
     window.addEventListener("storage", syncDashboardOrders);
@@ -1315,8 +1322,8 @@ function ReportsWorkspace({
   view: ReportView;
 }) {
   const [period, setPeriod] = useState<ReportPeriod>("this-month");
-  const [fromDate, setFromDate] = useState("2026-08-01");
-  const [toDate, setToDate] = useState("2026-08-08");
+  const [fromDate, setFromDate] = useState(() => `${new Date().toISOString().slice(0, 8)}01`);
+  const [toDate, setToDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [orders, setOrders] = useState<OrderRecord[]>(adminOrders);
   const [products, setProducts] = useState<AdminProduct[]>(adminProducts);
 
@@ -1381,12 +1388,13 @@ function ReportsWorkspace({
     };
   }, []);
 
+  const latestDate = new Date().toISOString().slice(0, 10);
   const filteredOrders = useMemo(() => {
     let from = "0000-01-01";
     let to = "9999-12-31";
     if (period === "this-month") {
-      from = "2026-08-01";
-      to = "2026-08-31";
+      from = `${latestDate.slice(0, 8)}01`;
+      to = latestDate;
     }
     if (period === "last-month") {
       from = "2026-07-01";
@@ -1397,7 +1405,7 @@ function ReportsWorkspace({
       to = toDate || to;
     }
     return orders.filter((order) => order.date >= from && order.date <= to);
-  }, [fromDate, orders, period, toDate]);
+  }, [fromDate, latestDate, orders, period, toDate]);
 
   const report = useMemo(() => {
     const productsByName = new Map(products.map((product) => [reportNameKey(product.name), product]));
@@ -2899,29 +2907,44 @@ function OrdersWorkspace({
 }) {
   const [orders, setOrders] = useState<OrderRecord[]>(adminOrders);
   const [filter, setFilter] = useState<OrderDateFilter>("this-month");
-  const [fromDate, setFromDate] = useState("2026-08-01");
-  const [toDate, setToDate] = useState("2026-08-08");
+  const [fromDate, setFromDate] = useState(() => `${new Date().toISOString().slice(0, 8)}01`);
+  const [toDate, setToDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [selectedOrder, setSelectedOrder] = useState<OrderRecord | null>(null);
   const [phone, setPhone] = useState("");
 
   useEffect(() => {
-    const stored = window.localStorage.getItem("fanzzy-orders");
-    if (!stored) return;
-    try {
-      const parsed = JSON.parse(stored) as OrderRecord[];
-      if (Array.isArray(parsed) && parsed.length) setOrders(parsed);
-    } catch {
-      window.localStorage.removeItem("fanzzy-orders");
-    }
+    const syncOrders = async () => {
+      const remote = await fetchStoreOrders<OrderRecord>();
+      const merged = new Map<string, OrderRecord>();
+      remote.data?.forEach((order) => { if (order?.id) merged.set(order.id, order); });
+      try {
+        const stored = window.localStorage.getItem("fanzzy-orders");
+        const parsed = stored ? JSON.parse(stored) as OrderRecord[] : [];
+        if (Array.isArray(parsed)) parsed.forEach((order) => {
+          if (order?.id && !merged.has(order.id)) merged.set(order.id, order);
+        });
+      } catch {
+        window.localStorage.removeItem("fanzzy-orders");
+      }
+      if (merged.size) setOrders(Array.from(merged.values()));
+    };
+    void syncOrders();
+    window.addEventListener("storage", syncOrders);
+    window.addEventListener("fanzzy-orders-updated", syncOrders);
+    return () => {
+      window.removeEventListener("storage", syncOrders);
+      window.removeEventListener("fanzzy-orders-updated", syncOrders);
+    };
   }, []);
 
-  const persistOrders = (next: OrderRecord[]) => {
+  const persistOrders = async (next: OrderRecord[]) => {
     setOrders(next);
     window.localStorage.setItem("fanzzy-orders", JSON.stringify(next));
+    await saveStoreOrders(next);
   };
 
   const filteredOrders = useMemo(() => {
-    const latestDate = "2026-08-08";
+    const latestDate = new Date().toISOString().slice(0, 10);
     const latest = new Date(`${latestDate}T00:00:00`);
     let from = "0000-01-01";
     let to = latestDate;

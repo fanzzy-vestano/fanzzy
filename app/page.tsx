@@ -4,7 +4,9 @@ import { type FormEvent, useEffect, useMemo, useState } from "react";
 import {
   fetchCatalogCategories,
   fetchCatalogProducts,
+  fetchStoreOrders,
   fetchStoreSetting,
+  saveStoreOrders,
   saveStoreSetting,
 } from "../lib/supabase/catalog";
 
@@ -232,14 +234,20 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    const syncOrders = () => {
+    const syncOrders = async () => {
+      const remote = await fetchStoreOrders<CustomerOrder>();
+      const merged = new Map<string, CustomerOrder>();
+      remote.data?.forEach((order) => { if (order?.id) merged.set(order.id, order); });
       try {
         const stored = window.localStorage.getItem("fanzzy-orders");
         const parsed = stored ? JSON.parse(stored) : [];
-        if (Array.isArray(parsed)) setOrders(parsed as CustomerOrder[]);
+        if (Array.isArray(parsed)) {
+          parsed.forEach((order) => { if (order?.id && !merged.has(order.id)) merged.set(order.id, order as CustomerOrder); });
+        }
       } catch {
         setOrders([]);
       }
+      setOrders(Array.from(merged.values()));
       const savedPhone = window.localStorage.getItem("fanzzy-customer-phone");
       if (savedPhone) setOrderLookupPhone(savedPhone);
     };
@@ -473,7 +481,7 @@ export default function Home() {
     setCouponInput(code);
     announce(`${code} applied`);
   };
-  const submitCheckout = () => {
+  const submitCheckout = async () => {
     const name = checkoutForm.name.trim();
     const digits = checkoutForm.phone.replace(/\D/g, "");
     if (!name) return announce("Customer name is required");
@@ -500,7 +508,17 @@ export default function Home() {
     } catch {
       previousOrders = [];
     }
-    window.localStorage.setItem("fanzzy-orders", JSON.stringify([newOrder, ...previousOrders]));
+    const remote = await fetchStoreOrders<CustomerOrder>();
+    const merged = new Map<string, CustomerOrder>();
+    remote.data?.forEach((order) => { if (order?.id) merged.set(order.id, order); });
+    previousOrders.forEach((order) => {
+      if (order && typeof order === "object" && "id" in order && typeof order.id === "string" && !merged.has(order.id)) {
+        merged.set(order.id, order as CustomerOrder);
+      }
+    });
+    const nextOrders = [newOrder, ...Array.from(merged.values()).filter((order) => order.id !== newOrder.id)];
+    await saveStoreOrders(nextOrders);
+    window.localStorage.setItem("fanzzy-orders", JSON.stringify(nextOrders));
     window.localStorage.setItem("fanzzy-customer-phone", checkoutForm.phone.trim());
     window.dispatchEvent(new Event("fanzzy-orders-updated"));
     setCart({});
