@@ -306,6 +306,12 @@ const makeLocalImage = (file: File) =>
     };
     reader.readAsDataURL(file);
   });
+
+const localImageToFile = async (source: string, name: string) => {
+  const response = await fetch(source);
+  const blob = await response.blob();
+  return new File([blob], name, { type: blob.type || "image/webp" });
+};
 const persistCatalog = (catalog: AdminProduct[]) => {
   if (typeof window === "undefined") return;
   const tones = ["#d9c4bc", "#dad7ce", "#d0c2b0", "#e5ddd1"];
@@ -4064,19 +4070,47 @@ function ProductLibraryWorkspace({
             window.localStorage.removeItem("fanzzy-products");
           }
         }
+        const syncedLocalProducts = isSupabaseReady
+          ? await Promise.all(
+              localProducts.map(async (product) => {
+                let syncedProduct = product;
+                try {
+                  if (
+                    product.image.startsWith("data:image/") ||
+                    product.image.startsWith("blob:")
+                  ) {
+                    const upload = await uploadStoreImage(
+                      await localImageToFile(product.image, `${product.sku}-image.webp`),
+                      "products",
+                    );
+                    if (upload.url && !upload.error)
+                      syncedProduct = { ...syncedProduct, image: upload.url };
+                  }
+                  if (
+                    syncedProduct.hoverImage?.startsWith("data:image/") ||
+                    syncedProduct.hoverImage?.startsWith("blob:")
+                  ) {
+                    const upload = await uploadStoreImage(
+                      await localImageToFile(
+                        syncedProduct.hoverImage,
+                        `${syncedProduct.sku}-hover.webp`,
+                      ),
+                      "products",
+                    );
+                    if (upload.url && !upload.error)
+                      syncedProduct = { ...syncedProduct, hoverImage: upload.url };
+                  }
+                  await saveCatalogProduct(toCatalogProduct(syncedProduct));
+                } catch {
+                  // Keep the local product visible if an old image cannot be repaired.
+                }
+                return syncedProduct;
+              }),
+            )
+          : localProducts;
         const merged = new Map(mapped.map((product) => [product.sku, product]));
-        localProducts.forEach((product) => merged.set(product.sku, product));
+        syncedLocalProducts.forEach((product) => merged.set(product.sku, product));
         const nextProducts = Array.from(merged.values());
-        // Products created before the shared Supabase catalog was available
-        // may still live only in this browser. Upload them during the first
-        // successful remote load so the storefront is consistent on every device.
-        if (isSupabaseReady && localProducts.length) {
-          await Promise.all(
-            localProducts.map((product) =>
-              saveCatalogProduct(toCatalogProduct(product)),
-            ),
-          );
-        }
         setProducts(nextProducts);
         persistCatalog(nextProducts);
         return;
