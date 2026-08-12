@@ -37,21 +37,18 @@ type CustomerOrder = {
 };
 type AssistantMessage = { role: "user" | "assistant"; text: string; productIds?: string[] };
 
-const defaultProducts: Product[] = [
-  { id: "aurora", name: "Aurora Drop Earrings", category: "Earrings", price: 1290, compareAt: 1690, image: "https://images.unsplash.com/photo-1635767798638-3e25273a8236?auto=format&fit=crop&w=900&q=85", hoverImage: "https://images.unsplash.com/photo-1535632066927-ab7c9ab60908?auto=format&fit=crop&w=900&q=85", tag: "Bestseller", tone: "#d9c4bc" },
-  { id: "solstice", name: "Solstice Tennis Necklace", category: "Necklaces", price: 2480, image: "https://images.unsplash.com/photo-1617038220319-276d3cfab638?auto=format&fit=crop&w=900&q=85", hoverImage: "https://images.unsplash.com/photo-1599643478518-a784e5dc4c8f?auto=format&fit=crop&w=900&q=85", tag: "New in", tone: "#dad7ce" },
-  { id: "muse", name: "Muse Sculpted Cuff", category: "Bracelets", price: 1860, compareAt: 2200, image: "https://images.unsplash.com/photo-1611652022419-a9419f74343d?auto=format&fit=crop&w=900&q=85", hoverImage: "https://images.unsplash.com/photo-1573408301185-9146fe634ad0?auto=format&fit=crop&w=900&q=85", tag: "Limited", tone: "#d0c2b0" },
-  { id: "orbital", name: "Orbital Pearl Ring", category: "Rings", price: 990, image: "https://images.unsplash.com/photo-1605100804763-247f67b3557e?auto=format&fit=crop&w=900&q=85", hoverImage: "https://images.unsplash.com/photo-1603561596112-0a132b757442?auto=format&fit=crop&w=900&q=85", tone: "#e5ddd1" },
-  { id: "lumen", name: "Lumen Layered Chain", category: "Necklaces", price: 1680, image: "https://images.unsplash.com/photo-1599643477877-530eb83abc8e?auto=format&fit=crop&w=900&q=85", hoverImage: "https://images.unsplash.com/photo-1611652022419-a9419f74343d?auto=format&fit=crop&w=900&q=85", tag: "Bestseller", tone: "#d7c4ae" },
-  { id: "halo", name: "Halo Pavé Hoops", category: "Earrings", price: 1120, compareAt: 1390, image: "https://images.unsplash.com/photo-1535632787350-4e68ef0ac584?auto=format&fit=crop&w=900&q=85", hoverImage: "https://images.unsplash.com/photo-1627293509201-cd7f7a7f8b7f?auto=format&fit=crop&w=900&q=85", tag: "Sale", tone: "#d9d3c7" },
-];
-
-const defaultCategories = [
-  { name: "Earrings", count: "42 pieces", image: "https://images.unsplash.com/photo-1635767798638-3e25273a8236?auto=format&fit=crop&w=700&q=85" },
-  { name: "Necklaces", count: "28 pieces", image: "https://images.unsplash.com/photo-1617038220319-276d3cfab638?auto=format&fit=crop&w=700&q=85" },
-  { name: "Bracelets", count: "18 pieces", image: "https://images.unsplash.com/photo-1611652022419-a9419f74343d?auto=format&fit=crop&w=700&q=85" },
-  { name: "Rings", count: "24 pieces", image: "https://images.unsplash.com/photo-1605100804763-247f67b3557e?auto=format&fit=crop&w=700&q=85" },
-];
+const defaultProducts: Product[] = [];
+const defaultCategories: Array<{ name: string; count: string; image: string }> = [];
+const demoProductNames = new Set([
+  "aurora drop earrings",
+  "solstice tennis necklace",
+  "muse sculpted cuff",
+  "orbital pearl ring",
+]);
+const isDemoProduct = (product: { name?: string; sku?: string }) =>
+  demoProductNames.has(String(product.name ?? "").trim().toLowerCase()) ||
+  /^LST-(AUR|SOL|MUS|ORB)-\d+$/i.test(String(product.sku ?? ""));
+const isDemoOrder = (order: { id?: string }) => /^#FZ-104[4-8]$/.test(String(order.id ?? ""));
 
 const formatINR = (value: number) => `₹${(Number.isFinite(value) ? value : 0).toLocaleString("en-IN")}`;
 const blockedHeroImage = "photo-1599643478518-a784e5dc4c8f";
@@ -63,7 +60,6 @@ const siteAsset = (name: string) => `${siteBasePath}/${name}`;
 const productTones = ["#d9c4bc", "#dad7ce", "#d0c2b0", "#e5ddd1"];
 const formatOrderDate = (value: string) => new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", year: "numeric" }).format(new Date(`${value}T00:00:00`));
 const phoneDigits = (value: string) => value.replace(/\D/g, "");
-const fallbackCoupon: MarketingRecord = { kind: "Coupon", name: "HELLOFANZZY", detail: "First order discount", status: "Active", code: "HELLOFANZZY", discount: "10% off" };
 const getCouponDiscount = (coupon: MarketingRecord, subtotal: number) => {
   const percent = coupon.discount?.match(/(\d+(?:\.\d+)?)\s*%/);
   if (percent) return Math.min(subtotal, Math.round((subtotal * Number(percent[1])) / 100));
@@ -75,12 +71,11 @@ const getCouponDiscount = (coupon: MarketingRecord, subtotal: number) => {
 function normalizeStoredProduct(value: unknown, index: number): Product | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as Record<string, unknown>;
-  const fallback = defaultProducts[index % defaultProducts.length];
   const name = typeof raw.name === "string" ? raw.name.trim() : "";
   if (!name) return null;
   const rawPrice = raw.price;
   const price = typeof rawPrice === "number" ? rawPrice : Number(String(rawPrice ?? "").replace(/[^0-9.]/g, ""));
-  const image = typeof raw.image === "string" && raw.image ? raw.image : fallback.image;
+  const image = typeof raw.image === "string" ? raw.image : "";
   const idValue = typeof raw.id === "string" ? raw.id : typeof raw.sku === "string" ? raw.sku : `${name}-${index}`;
   return {
     id: idValue.toLowerCase().replace(/[^a-z0-9]+/g, "-") || `product-${index}`,
@@ -164,14 +159,14 @@ export default function Home() {
         try {
           const parsed: unknown = JSON.parse(stored);
           if (Array.isArray(parsed)) {
-            localProducts = parsed.map(normalizeStoredProduct).filter((product): product is Product => product !== null);
+            localProducts = parsed.filter((product) => !isDemoProduct(product as { name?: string; sku?: string })).map(normalizeStoredProduct).filter((product): product is Product => product !== null);
           }
         } catch {
           window.localStorage.removeItem("fanzzy-products");
         }
       }
       if (!remote.error && remote.data && remote.data.length) {
-        const remoteProducts = remote.data.map((product, index) => normalizeStoredProduct({
+        const remoteProducts = remote.data.filter((product) => !isDemoProduct(product)).map((product, index) => normalizeStoredProduct({
           id: product.sku,
           name: product.name,
           category: product.category,
@@ -206,7 +201,7 @@ export default function Home() {
         setCategories(remote.data.map((category, index) => ({
           name: category.name,
           count: `${category.pieces} pieces`,
-          image: category.image || defaultCategories[index % defaultCategories.length].image,
+          image: category.image || "",
         })));
         return;
       }
@@ -217,7 +212,7 @@ export default function Home() {
         setCategories(parsed.filter((category) => category.name).map((category, index) => ({
           name: category.name!,
           count: `${category.pieces ?? 0} pieces`,
-          image: category.image || defaultCategories[index % defaultCategories.length].image,
+          image: category.image || "",
         })));
       } catch {
         window.localStorage.removeItem("fanzzy-categories");
@@ -237,12 +232,12 @@ export default function Home() {
     const syncOrders = async () => {
       const remote = await fetchStoreOrders<CustomerOrder>();
       const merged = new Map<string, CustomerOrder>();
-      remote.data?.forEach((order) => { if (order?.id) merged.set(order.id, order); });
+      remote.data?.forEach((order) => { if (order?.id && !isDemoOrder(order)) merged.set(order.id, order); });
       try {
         const stored = window.localStorage.getItem("fanzzy-orders");
         const parsed = stored ? JSON.parse(stored) : [];
         if (Array.isArray(parsed)) {
-          parsed.forEach((order) => { if (order?.id && !merged.has(order.id)) merged.set(order.id, order as CustomerOrder); });
+          parsed.forEach((order) => { if (order?.id && !isDemoOrder(order) && !merged.has(order.id)) merged.set(order.id, order as CustomerOrder); });
         }
       } catch {
         setOrders([]);
@@ -470,7 +465,7 @@ export default function Home() {
   const applyCoupon = () => {
     const code = couponInput.trim().toUpperCase();
     if (!code) return announce("Enter a coupon code");
-    const source = marketingRecords.length ? marketingRecords : [fallbackCoupon];
+    const source = marketingRecords;
     const coupon = source.find((record) => record.kind === "Coupon" && record.status === "Active" && record.code?.toUpperCase() === code);
     if (!coupon) {
       setAppliedCoupon(null);
@@ -641,7 +636,7 @@ export default function Home() {
 
       <section className="editorial" id="story"><div className="editorial-image"><img src="https://images.unsplash.com/photo-1515562141207-7a88fb7ce338?auto=format&fit=crop&w=1100&q=85" alt="Close-up of sculptural gold jewelry" /><span>THE ART OF<br /><em>ADORNMENT</em></span></div><div className="editorial-copy"><p className="eyebrow">A NOTE FROM THE STUDIO</p><h2>Less noise.<br /><em>More meaning.</em></h2><p>There is beauty in the in-between. The way a quiet chain layers with your favourite shirt. A ring that becomes part of your hand. Fanzzy is made for these small rituals — the ones that make a day feel like yours.</p><a className="button button-dark" href="#footer">Read our story <span>↗</span></a><div className="editorial-sign">F / 19<br /></div></div></section>
 
-      <section className="offer-banner"><div><p className="eyebrow light">{activeCampaign ? activeCampaign.kind === "Coupon" ? "EXCLUSIVE OFFER" : "SEASONAL EDIT" : "A LITTLE EXTRA"}</p><h2>{activeCampaign ? activeCampaign.name : "Your first piece"}<br /><em>{activeCampaign ? "is here." : "is on us."}</em></h2></div><div><p>{activeCampaign ? <>{activeCampaign.detail}{activeCampaign.discount && <> · <strong>{activeCampaign.discount}</strong></>}{activeCampaign.code && <> with code <strong>{activeCampaign.code}</strong></>}</> : <>Take 10% off your first order with code <strong>HELLOFANZZY</strong>.</>}</p>{activeCampaign?.code ? <button className="button button-light" onClick={() => { const code = activeCampaign.code ?? ""; navigator.clipboard?.writeText(code); announce(`Code copied: ${code}`); }}>Copy code <span>↗</span></button> : <button className="button button-light" onClick={() => { document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); announce("Seasonal edit opened"); }}>Explore the edit <span>↗</span></button>}</div></section>
+      <section className="offer-banner"><div><p className="eyebrow light">{activeCampaign ? activeCampaign.kind === "Coupon" ? "EXCLUSIVE OFFER" : "SEASONAL EDIT" : "THE FANZZY EDIT"}</p><h2>{activeCampaign ? activeCampaign.name : "Discover pieces"}<br /><em>{activeCampaign ? "is here." : "made for you."}</em></h2></div><div><p>{activeCampaign ? <>{activeCampaign.detail}{activeCampaign.discount && <> · <strong>{activeCampaign.discount}</strong></>}{activeCampaign.code && <> with code <strong>{activeCampaign.code}</strong></>}</> : <>Explore the latest pieces from Fanzzy.</>}</p>{activeCampaign?.code ? <button className="button button-light" onClick={() => { const code = activeCampaign.code ?? ""; navigator.clipboard?.writeText(code); announce(`Code copied: ${code}`); }}>Copy code <span>↗</span></button> : <button className="button button-light" onClick={() => { document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); announce("Collection opened"); }}>Explore the collection <span>↗</span></button>}</div></section>
 
       <section className="newsletter"><div><p className="eyebrow">THE FANZZY LETTER</p><h2>A little light<br /><em>in your inbox.</em></h2></div><form onSubmit={subscribeNewsletter}><p>New drops, studio notes, and 10% off your first order — no noise, promise.</p><div className="email-line"><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Your email address" aria-label="Your email address" required /><button aria-label="Subscribe to newsletter">↗</button></div>{(subscribed || newsletterMessage) && <span className="success-message">{newsletterMessage}</span>}</form></section>
 

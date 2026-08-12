@@ -95,107 +95,24 @@ const defaultAdminRoles: AdminRole[] = [
   { id: "vestano", name: "Vestano", title: "Super admin", permissions: allAdminPermissions },
 ];
 
-const adminProducts: AdminProduct[] = [
-  {
-    name: "Aurora Drop Earrings",
-    sku: "LST-AUR-01",
-    category: "Earrings",
-    stock: 24,
-    price: "₹1,290",
-    cost: "₹645",
-    status: "Published",
-    image:
-      "https://images.unsplash.com/photo-1635767798638-3e25273a8236?auto=format&fit=crop&w=200&q=80",
-  },
-  {
-    name: "Solstice Tennis Necklace",
-    sku: "LST-SOL-02",
-    category: "Necklaces",
-    stock: 8,
-    price: "₹2,480",
-    cost: "₹1,240",
-    status: "Low stock",
-    image:
-      "https://images.unsplash.com/photo-1617038220319-276d3cfab638?auto=format&fit=crop&w=200&q=80",
-  },
-  {
-    name: "Muse Sculpted Cuff",
-    sku: "LST-MUS-03",
-    category: "Bracelets",
-    stock: 0,
-    price: "₹1,860",
-    cost: "₹930",
-    status: "Draft",
-    image:
-      "https://images.unsplash.com/photo-1611652022419-a9419f74343d?auto=format&fit=crop&w=200&q=80",
-  },
-  {
-    name: "Orbital Pearl Ring",
-    sku: "LST-ORB-04",
-    category: "Rings",
-    stock: 41,
-    price: "₹990",
-    cost: "₹495",
-    status: "Published",
-    image:
-      "https://images.unsplash.com/photo-1605100804763-247f67b3557e?auto=format&fit=crop&w=200&q=80",
-  },
-];
-const defaultHeroImage =
-  "https://images.unsplash.com/photo-1599643478518-a784e5dc4c8f?auto=format&fit=crop&w=1200&q=90";
-const defaultCategoryImages: Record<string, string> = {
-  Earrings:
-    "https://images.unsplash.com/photo-1635767798638-3e25273a8236?auto=format&fit=crop&w=700&q=85",
-  Necklaces:
-    "https://images.unsplash.com/photo-1617038220319-276d3cfab638?auto=format&fit=crop&w=700&q=85",
-  Bracelets:
-    "https://images.unsplash.com/photo-1611652022419-a9419f74343d?auto=format&fit=crop&w=700&q=85",
-  Rings:
-    "https://images.unsplash.com/photo-1605100804763-247f67b3557e?auto=format&fit=crop&w=700&q=85",
-};
-const defaultHeroSlides = [
-  defaultHeroImage,
-  "https://images.unsplash.com/photo-1515562141207-7a88fb7ce338?auto=format&fit=crop&w=1800&q=90",
-  "https://images.unsplash.com/photo-1617038220319-276d3cfab638?auto=format&fit=crop&w=1800&q=90",
-  "https://images.unsplash.com/photo-1635767798638-3e25273a8236?auto=format&fit=crop&w=1800&q=90",
-];
+const adminProducts: AdminProduct[] = [];
+const adminPlaceholderImage = "";
+const demoProductNames = new Set([
+  "aurora drop earrings",
+  "solstice tennis necklace",
+  "muse sculpted cuff",
+  "orbital pearl ring",
+]);
+const isDemoProduct = (product: { name?: string; sku?: string }) =>
+  demoProductNames.has(String(product.name ?? "").trim().toLowerCase()) ||
+  /^LST-(AUR|SOL|MUS|ORB)-\d+$/i.test(String(product.sku ?? ""));
+const defaultHeroImage = "";
+const defaultCategoryImages: Record<string, string> = {};
+const defaultHeroSlides: string[] = [];
 const defaultHeroSlideDuration = 5.2;
 const defaultDeliveryCharge = { enabled: false, amount: 99 };
 const formatAdminCurrency = (value: number) => `₹${Math.max(0, Math.round(value)).toLocaleString("en-IN")}`;
-const defaultMarketingRecords: MarketingRecord[] = [
-  {
-    id: "august-welcome",
-    kind: "Campaign",
-    name: "August welcome offer",
-    detail: "First-order welcome promotion",
-    status: "Active",
-    discount: "10% off",
-  },
-  {
-    id: "hello-fanzzy",
-    kind: "Coupon",
-    name: "HELLOFANZZY",
-    detail: "First order discount",
-    status: "Active",
-    code: "HELLOFANZZY",
-    discount: "10% off",
-  },
-  {
-    id: "weekend-edit",
-    kind: "Campaign",
-    name: "Weekend edit",
-    detail: "Scheduled collection promotion",
-    status: "Scheduled",
-  },
-  {
-    id: "newsletter",
-    kind: "Newsletter",
-    name: "Newsletter",
-    detail: "Subscribers receiving Fanzzy updates",
-    status: "Active",
-    discount: "1,284 subscribers",
-  },
-];
+const defaultMarketingRecords: MarketingRecord[] = [];
 type OrderStatus =
   | "Processing"
   | "Packed"
@@ -211,59 +128,8 @@ type OrderRecord = {
   phone: string;
   items?: Array<{ name: string; quantity: number; price: string }>;
 };
-const adminOrders: OrderRecord[] = [
-  {
-    id: "#FZ-1048",
-    date: "2026-08-08",
-    status: "Processing",
-    total: "₹4,860",
-    customerName: "Customer 1048",
-    phone: "",
-    items: [
-      { name: "Aurora Drop Earrings", quantity: 2, price: "₹1,290" },
-      { name: "Solstice Tennis Necklace", quantity: 1, price: "₹2,280" },
-    ],
-  },
-  {
-    id: "#FZ-1047",
-    date: "2026-08-07",
-    status: "Packed",
-    total: "₹2,480",
-    customerName: "Customer 1047",
-    phone: "",
-    items: [{ name: "Solstice Tennis Necklace", quantity: 1, price: "₹2,480" }],
-  },
-  {
-    id: "#FZ-1046",
-    date: "2026-08-03",
-    status: "Shipped",
-    total: "₹1,290",
-    customerName: "Customer 1046",
-    phone: "",
-    items: [{ name: "Aurora Drop Earrings", quantity: 1, price: "₹1,290" }],
-  },
-  {
-    id: "#FZ-1045",
-    date: "2026-07-28",
-    status: "Delivered",
-    total: "₹3,120",
-    customerName: "Customer 1045",
-    phone: "",
-    items: [
-      { name: "Muse Sculpted Cuff", quantity: 1, price: "₹1,860" },
-      { name: "Orbital Pearl Ring", quantity: 1, price: "₹1,260" },
-    ],
-  },
-  {
-    id: "#FZ-1044",
-    date: "2026-07-14",
-    status: "Delivered",
-    total: "₹1,860",
-    customerName: "Customer 1044",
-    phone: "",
-    items: [{ name: "Muse Sculpted Cuff", quantity: 1, price: "₹1,860" }],
-  },
-];
+const adminOrders: OrderRecord[] = [];
+const isDemoOrder = (order: { id?: string }) => /^#FZ-104[4-8]$/.test(String(order.id ?? ""));
 const siteBasePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 const siteAsset = (name: string) => `${siteBasePath}/${name}`;
 const createSku = (
@@ -481,17 +347,17 @@ export default function AdminPage() {
     const syncDashboardOrders = async () => {
       const remote = await fetchStoreOrders<OrderRecord>();
       const merged = new Map<string, OrderRecord>();
-      remote.data?.forEach((order) => { if (order?.id) merged.set(order.id, order); });
+      remote.data?.forEach((order) => { if (order?.id && !isDemoOrder(order)) merged.set(order.id, order); });
       try {
         const stored = window.localStorage.getItem("fanzzy-orders");
         const parsed = stored ? JSON.parse(stored) as OrderRecord[] : [];
         if (Array.isArray(parsed)) parsed.forEach((order) => {
-          if (order?.id && !merged.has(order.id)) merged.set(order.id, order);
+          if (order?.id && !isDemoOrder(order) && !merged.has(order.id)) merged.set(order.id, order);
         });
       } catch {
         window.localStorage.removeItem("fanzzy-orders");
       }
-      setDashboardOrders(Array.from(merged.values()).filter((order) => order?.date && order?.total));
+      setDashboardOrders(Array.from(merged.values()).filter((order) => order?.date && order?.total && !isDemoOrder(order)));
     };
     syncDashboardOrders();
     window.addEventListener("storage", syncDashboardOrders);
@@ -520,50 +386,34 @@ export default function AdminPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeRoleId, adminRoles]);
 
-  const metrics = {
-    "this-month": {
-      revenue: "₹2,48,620",
-      orders: "184",
-      average: "₹1,351",
-      customers: "78",
-      growth: ["+18.4%", "+12.8%", "+6.2%", "+24.1%"],
-    },
-    "last-month": {
-      revenue: "₹2,09,980",
-      orders: "163",
-      average: "₹1,286",
-      customers: "63",
-      growth: ["+9.6%", "+8.1%", "+4.8%", "+18.2%"],
-    },
-    "all-time": {
-      revenue: "₹8,42,560",
-      orders: "612",
-      average: "₹1,377",
-      customers: "246",
-      growth: ["+21.7%", "+16.4%", "+7.1%", "+28.6%"],
-    },
-  }[dateRange === "custom" ? "this-month" : dateRange];
   const customDashboardOrders = dashboardOrders.filter((order) => {
     if (!dashboardFromDate && !dashboardToDate) return true;
     if (dashboardFromDate && order.date < dashboardFromDate) return false;
     if (dashboardToDate && order.date > dashboardToDate) return false;
     return true;
   });
-  const customRevenue = customDashboardOrders.reduce(
-    (total, order) => total + (Number(order.total.replace(/[^0-9.]/g, "")) || 0),
-    0,
-  );
-  const customCustomers = new Set(
-    customDashboardOrders.map((order) => order.phone || order.customerName || order.id),
-  ).size;
-  const customMetrics = {
-    revenue: formatAdminCurrency(customRevenue),
-    orders: String(customDashboardOrders.length),
-    average: formatAdminCurrency(customDashboardOrders.length ? customRevenue / customDashboardOrders.length : 0),
-    customers: String(customCustomers),
-    growth: ["Custom", "Custom", "Custom", "Custom"],
+  const currentDate = new Date().toISOString().slice(0, 10);
+  const monthStart = `${currentDate.slice(0, 8)}01`;
+  const previousMonth = new Date(`${monthStart}T00:00:00`);
+  previousMonth.setMonth(previousMonth.getMonth() - 1);
+  const previousMonthStart = previousMonth.toISOString().slice(0, 8) + "01";
+  const previousMonthEnd = `${monthStart}`;
+  const dashboardPeriodOrders = dateRange === "custom"
+    ? customDashboardOrders
+    : dashboardOrders.filter((order) => dateRange === "all-time"
+      || (dateRange === "this-month" && order.date >= monthStart && order.date <= currentDate)
+      || (dateRange === "last-month" && order.date >= previousMonthStart && order.date < previousMonthEnd));
+  const periodRevenue = dashboardPeriodOrders.reduce((total, order) => total + (Number(order.total.replace(/[^0-9.]/g, "")) || 0), 0);
+  const periodCustomers = new Set(dashboardPeriodOrders.map((order) => order.phone || order.customerName || order.id)).size;
+  const liveMetrics = {
+    revenue: formatAdminCurrency(periodRevenue),
+    orders: String(dashboardPeriodOrders.length),
+    average: formatAdminCurrency(dashboardPeriodOrders.length ? periodRevenue / dashboardPeriodOrders.length : 0),
+    customers: String(periodCustomers),
+    growth: ["—", "—", "—", "—"],
   };
-  const displayedMetrics = dateRange === "custom" ? customMetrics : metrics;
+  const displayedMetrics = liveMetrics;
+  const statusCount = (statuses: OrderStatus[]) => String(dashboardPeriodOrders.filter((order) => statuses.includes(order.status)).length);
   const dateLabels: Record<DateRange, string> = {
     "this-month": "This month",
     "last-month": "Last month",
@@ -740,9 +590,9 @@ export default function AdminPage() {
             </div>
             <div className="sales-chart">
               <div className="chart-y">
-                <span>₹3L</span>
-                <span>₹2L</span>
-                <span>₹1L</span>
+                <span>₹0</span>
+                <span>₹0</span>
+                <span>₹0</span>
                 <span>₹0</span>
               </div>
               <div className="chart-area">
@@ -757,26 +607,10 @@ export default function AdminPage() {
                   preserveAspectRatio="none"
                   aria-label="Revenue trend chart"
                 >
-                  <path
-                    d="M0,152 C50,130 57,150 97,127 S147,119 188,136 S241,74 283,93 S338,109 370,88 S430,57 464,76 S519,79 552,40 S605,62 640,24"
-                    fill="none"
-                    stroke="#4b1c2b"
-                    strokeWidth="3"
-                  />
-                  <path
-                    d="M0,165 C52,144 75,158 100,151 S145,139 188,148 S241,116 283,128 S332,130 370,119 S430,104 464,120 S519,112 552,91 S605,101 640,73"
-                    fill="none"
-                    stroke="#c9a875"
-                    strokeWidth="2"
-                    strokeDasharray="5 5"
-                  />
+                  {dashboardPeriodOrders.length > 0 && <path d="M0,152 L640,152" fill="none" stroke="#4b1c2b" strokeWidth="3" />}
                 </svg>
                 <div className="chart-x">
-                  <span>01 Aug</span>
-                  <span>07 Aug</span>
-                  <span>14 Aug</span>
-                  <span>21 Aug</span>
-                  <span>28 Aug</span>
+                  <span>{dashboardPeriodOrders.length ? dateLabels[dateRange] : "No sales data yet"}</span>
                 </div>
               </div>
             </div>
@@ -796,7 +630,7 @@ export default function AdminPage() {
             </div>
             <div className="order-ring">
               <div>
-                <strong>{metrics.orders}</strong>
+                <strong>{displayedMetrics.orders}</strong>
                 <span>Total orders</span>
               </div>
             </div>
@@ -805,52 +639,28 @@ export default function AdminPage() {
                 color="wine"
                 label="Delivered"
                 value={
-                    dateRange === "custom"
-                      ? String(customDashboardOrders.filter((order) => order.status === "Delivered").length)
-                      : dateRange === "this-month"
-                    ? "108"
-                    : dateRange === "last-month"
-                      ? "94"
-                      : "365"
+                    statusCount(["Delivered"])
                 }
               />
               <Status
                 color="gold"
                 label="Processing"
                 value={
-                    dateRange === "custom"
-                      ? String(customDashboardOrders.filter((order) => order.status === "Processing" || order.status === "Packed").length)
-                      : dateRange === "this-month"
-                    ? "34"
-                    : dateRange === "last-month"
-                      ? "29"
-                      : "117"
+                    statusCount(["Processing", "Packed"])
                 }
               />
               <Status
                 color="peach"
                 label="Shipped"
                 value={
-                    dateRange === "custom"
-                      ? String(customDashboardOrders.filter((order) => order.status === "Shipped").length)
-                      : dateRange === "this-month"
-                    ? "28"
-                    : dateRange === "last-month"
-                      ? "25"
-                      : "86"
+                    statusCount(["Shipped"])
                 }
               />
               <Status
                 color="lavender"
                 label="Pending"
                 value={
-                    dateRange === "custom"
-                      ? String(customDashboardOrders.filter((order) => order.status === "Processing").length)
-                      : dateRange === "this-month"
-                    ? "14"
-                    : dateRange === "last-month"
-                      ? "15"
-                      : "44"
+                    statusCount(["Processing"])
                 }
               />
             </div>
@@ -877,19 +687,19 @@ export default function AdminPage() {
                     className={productFilter === "all" ? "active" : ""}
                     onClick={() => setProductFilter("all")}
                   >
-                    All products <b>24</b>
+                    All products <b>{shownProducts.length}</b>
                   </button>
                   <button
                     className={productFilter === "low-stock" ? "active" : ""}
                     onClick={() => setProductFilter("low-stock")}
                   >
-                    Low stock <b>03</b>
+                    Low stock <b>{adminProducts.filter((product) => product.stock < 10 || product.status === "Low stock").length}</b>
                   </button>
                   <button
                     className={productFilter === "drafts" ? "active" : ""}
                     onClick={() => setProductFilter("drafts")}
                   >
-                    Drafts <b>02</b>
+                    Drafts <b>{adminProducts.filter((product) => product.status === "Draft").length}</b>
                   </button>
                 </div>
                 <select
@@ -961,39 +771,9 @@ export default function AdminPage() {
                 <p className="eyebrow">ATTENTION NEEDED</p>
                 <h2>Your to-do list</h2>
               </div>
-              <span className="task-count">4</span>
+              <span className="task-count">0</span>
             </div>
-            <Task
-              label="Review 3 low stock products"
-              tone="wine"
-              onClick={() => {
-                setProductFilter("low-stock");
-                setCategoryFilter("All categories");
-              }}
-            />
-            <Task
-              label="Pack today’s 12 orders"
-              tone="gold"
-              onClick={() => setActive("Orders")}
-            />
-            <Task
-              label="Approve 5 customer reviews"
-              tone="lavender"
-              onClick={() => notify("Reviews opened")}
-            />
-            <Task
-              label="Schedule August campaign"
-              tone="peach"
-              onClick={() => setActive("Marketing")}
-            />
-            <div className="campaign-card">
-              <span>✦</span>
-              <div>
-                <strong>Midnight Edit</strong>
-                <small>Campaign is live · 4 days left</small>
-              </div>
-              <button onClick={() => setActive("Marketing")}>↗</button>
-            </div>
+            <p className="empty-filter">No pending tasks.</p>
           </section>
         </div>
         <div className="admin-footer">
@@ -1154,12 +934,7 @@ const moduleContent: Record<
       "Create, edit, price, and organise every piece in your storefront.",
     primary: "Add product",
     secondary: "Import CSV",
-    rows: [
-      "Aurora Drop Earrings · 24 in stock",
-      "Solstice Tennis Necklace · 8 in stock",
-      "Muse Sculpted Cuff · Draft",
-      "Orbital Pearl Ring · 41 in stock",
-    ],
+    rows: [],
   },
   Categories: {
     eyebrow: "CATALOG",
@@ -1168,12 +943,7 @@ const moduleContent: Record<
       "Keep collections easy to browse with clear category structure.",
     primary: "Add category",
     secondary: "Reorder",
-    rows: [
-      "Earrings · 42 pieces",
-      "Necklaces · 28 pieces",
-      "Bracelets · 18 pieces",
-      "Rings · 24 pieces",
-    ],
+    rows: [],
   },
   Collections: {
     eyebrow: "MERCHANDISING",
@@ -1181,11 +951,7 @@ const moduleContent: Record<
     description: "Shape the edits customers see across the Fanzzy storefront.",
     primary: "New collection",
     secondary: "Manage featured",
-    rows: [
-      "Everyday Gold · 12 products",
-      "Occasion pieces · 18 products",
-      "Gifting · 9 products",
-    ],
+    rows: [],
   },
   Orders: {
     eyebrow: "OPERATIONS",
@@ -1194,12 +960,7 @@ const moduleContent: Record<
       "Review new orders, update fulfilment, and keep customers informed.",
     primary: "View pending",
     secondary: "Export orders",
-    rows: [
-      "#FZ-1048 · Processing · ₹4,860",
-      "#FZ-1047 · Packed · ₹2,480",
-      "#FZ-1046 · Shipped · ₹1,290",
-      "#FZ-1045 · Delivered · ₹3,120",
-    ],
+    rows: [],
   },
   Customers: {
     eyebrow: "RELATIONSHIPS",
@@ -1207,12 +968,7 @@ const moduleContent: Record<
     description: "Understand your community and support every order with care.",
     primary: "Add customer",
     secondary: "Export list",
-    rows: [
-      "Amrita Mehra · 12 orders · ₹28,400",
-      "Riya Sharma · 8 orders · ₹14,820",
-      "Nisha Kapoor · 5 orders · ₹9,610",
-      "Aarav Menon · 3 orders · ₹4,980",
-    ],
+    rows: [],
   },
   Marketing: {
     eyebrow: "GROWTH",
@@ -1221,12 +977,7 @@ const moduleContent: Record<
       "Manage campaigns, coupons, and the messages that bring customers back.",
     primary: "Create campaign",
     secondary: "New coupon",
-    rows: [
-      "August welcome offer · Active",
-      "HELLOFANZZY · 10% off",
-      "Weekend edit · Scheduled",
-      "Newsletter · 1,284 subscribers",
-    ],
+    rows: [],
   },
   Homepage: {
     eyebrow: "CONTENT",
@@ -1371,7 +1122,7 @@ function ReportsWorkspace({
       try {
         const parsed = JSON.parse(stored) as OrderRecord[];
         if (active && Array.isArray(parsed)) {
-          setOrders(parsed.filter((order) => order?.date && order?.total));
+          setOrders(parsed.filter((order) => order?.date && order?.total && !isDemoOrder(order)));
         }
       } catch {
         window.localStorage.removeItem("fanzzy-orders");
@@ -1382,7 +1133,7 @@ function ReportsWorkspace({
       if (!active) return;
       let next =
         !remote.error && remote.data?.length
-          ? remote.data.map((product) => ({
+          ? remote.data.filter((product) => !isDemoProduct(product)).map((product) => ({
               name: product.name,
               sku: product.sku,
               category: product.category,
@@ -1390,8 +1141,8 @@ function ReportsWorkspace({
               price: formatAdminCurrency(product.price),
               cost: formatAdminCurrency(product.cost ?? 0),
               status: product.status,
-              image: product.image || adminProducts[0].image,
-              hoverImage: product.hoverImage || product.image || adminProducts[0].image,
+              image: product.image || adminPlaceholderImage,
+              hoverImage: product.hoverImage || product.image || adminPlaceholderImage,
             }))
           : adminProducts;
       const stored = window.localStorage.getItem("fanzzy-products");
@@ -1400,7 +1151,7 @@ function ReportsWorkspace({
           const parsed = JSON.parse(stored) as AdminProduct[];
           if (Array.isArray(parsed)) {
             const merged = new Map(next.map((product) => [product.sku, product]));
-            parsed.filter((product) => product?.name && product?.sku).forEach((product) => merged.set(product.sku, product));
+            parsed.filter((product) => product?.name && product?.sku && !isDemoProduct(product)).forEach((product) => merged.set(product.sku, product));
             next = Array.from(merged.values());
           }
         } catch {
@@ -1711,32 +1462,7 @@ type CollectionRecord = {
   products: number;
   featured: boolean;
 };
-const defaultCollections: CollectionRecord[] = [
-  {
-    id: "everyday-gold",
-    name: "Everyday Gold",
-    detail: "Easy, polished pieces for every day.",
-    status: "Live",
-    products: 12,
-    featured: true,
-  },
-  {
-    id: "occasion-pieces",
-    name: "Occasion pieces",
-    detail: "Sculptural jewellery for memorable moments.",
-    status: "Live",
-    products: 18,
-    featured: false,
-  },
-  {
-    id: "gifting",
-    name: "Gifting",
-    detail: "Thoughtful pieces for someone special.",
-    status: "Live",
-    products: 9,
-    featured: false,
-  },
-];
+const defaultCollections: CollectionRecord[] = [];
 
 function CollectionsWorkspace({
   onNotify,
@@ -2138,52 +1864,7 @@ type CustomerRecord = {
   lastOrder: string;
   joined: string;
 };
-const defaultCustomers: CustomerRecord[] = [
-  {
-    id: "customer-amrita",
-    name: "Amrita Mehra",
-    phone: "+91 98765 43210",
-    email: "amrita@example.com",
-    address: "New Delhi, India",
-    orders: 12,
-    totalSpent: "₹28,400",
-    lastOrder: "#FZ-1048",
-    joined: "12 Jan 2025",
-  },
-  {
-    id: "customer-riya",
-    name: "Riya Sharma",
-    phone: "+91 98765 43211",
-    email: "riya@example.com",
-    address: "Mumbai, Maharashtra",
-    orders: 8,
-    totalSpent: "₹14,820",
-    lastOrder: "#FZ-1047",
-    joined: "04 Mar 2025",
-  },
-  {
-    id: "customer-nisha",
-    name: "Nisha Kapoor",
-    phone: "+91 98765 43212",
-    email: "nisha@example.com",
-    address: "Bengaluru, Karnataka",
-    orders: 5,
-    totalSpent: "₹9,610",
-    lastOrder: "#FZ-1046",
-    joined: "19 Jun 2025",
-  },
-  {
-    id: "customer-aarav",
-    name: "Aarav Menon",
-    phone: "+91 98765 43213",
-    email: "aarav@example.com",
-    address: "Kochi, Kerala",
-    orders: 3,
-    totalSpent: "₹4,980",
-    lastOrder: "#FZ-1045",
-    joined: "22 Aug 2025",
-  },
-];
+const defaultCustomers: CustomerRecord[] = [];
 
 function CustomersWorkspace({
   onNotify,
@@ -2952,12 +2633,12 @@ function OrdersWorkspace({
     const syncOrders = async () => {
       const remote = await fetchStoreOrders<OrderRecord>();
       const merged = new Map<string, OrderRecord>();
-      remote.data?.forEach((order) => { if (order?.id) merged.set(order.id, order); });
+      remote.data?.forEach((order) => { if (order?.id && !isDemoOrder(order)) merged.set(order.id, order); });
       try {
         const stored = window.localStorage.getItem("fanzzy-orders");
         const parsed = stored ? JSON.parse(stored) as OrderRecord[] : [];
         if (Array.isArray(parsed)) parsed.forEach((order) => {
-          if (order?.id && !merged.has(order.id)) merged.set(order.id, order);
+          if (order?.id && !isDemoOrder(order) && !merged.has(order.id)) merged.set(order.id, order);
         });
       } catch {
         window.localStorage.removeItem("fanzzy-orders");
@@ -3615,17 +3296,10 @@ function CategoryWorkspace({
 }: {
   onNotify: (message: string) => void;
 }) {
-  const [categories, setCategories] = useState([
-    { name: "Earrings", pieces: 42, image: defaultCategoryImages.Earrings },
-    { name: "Necklaces", pieces: 28, image: defaultCategoryImages.Necklaces },
-    { name: "Bracelets", pieces: 18, image: defaultCategoryImages.Bracelets },
-    { name: "Rings", pieces: 24, image: defaultCategoryImages.Rings },
-  ]);
+  const [categories, setCategories] = useState<Array<{ name: string; pieces: number; image: string }>>([]);
   const [isAdding, setIsAdding] = useState(false);
   const [name, setName] = useState("");
-  const [categoryImage, setCategoryImage] = useState(
-    defaultCategoryImages.Earrings,
-  );
+  const [categoryImage, setCategoryImage] = useState("");
   const [categoryFile, setCategoryFile] = useState<File | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<{
     name: string;
@@ -3647,7 +3321,7 @@ function CategoryWorkspace({
           image:
             category.image ||
             defaultCategoryImages[category.name] ||
-            defaultCategoryImages.Earrings,
+            "",
         }));
         setCategories(mapped);
         persistCategories(mapped);
@@ -3688,7 +3362,7 @@ function CategoryWorkspace({
     setCategories((current) => [...current, category]);
     persistCategories([...categories, category]);
     setName("");
-    setCategoryImage(defaultCategoryImages.Earrings);
+    setCategoryImage("");
     setCategoryFile(null);
     setIsAdding(false);
     onNotify(
@@ -3718,7 +3392,7 @@ function CategoryWorkspace({
     setEditImage(
       category.image ||
         defaultCategoryImages[category.name] ||
-        defaultCategoryImages.Earrings,
+        "",
     );
     setEditImageFile(null);
     setIsEditing(true);
@@ -3949,7 +3623,7 @@ function CategoryWorkspace({
               src={
                 editImage ||
                 defaultCategoryImages[selectedCategory.name] ||
-                defaultCategoryImages.Earrings
+                ""
               }
               alt="Category card preview"
             />
@@ -3992,7 +3666,7 @@ function CategoryWorkspace({
               src={
                 selectedCategory.image ||
                 defaultCategoryImages[selectedCategory.name] ||
-                defaultCategoryImages.Earrings
+                ""
               }
               alt={`${selectedCategory.name} category card`}
             />
@@ -4048,11 +3722,11 @@ function ProductLibraryWorkspace({
     costWithGst: "₹",
   });
   const [newProductImage, setNewProductImage] = useState(
-    adminProducts[0].image,
+    adminPlaceholderImage,
   );
   const [newProductFile, setNewProductFile] = useState<File | null>(null);
   const [newProductHoverImage, setNewProductHoverImage] = useState(
-    adminProducts[0].image,
+    adminPlaceholderImage,
   );
   const [newProductHoverFile, setNewProductHoverFile] = useState<File | null>(
     null,
@@ -4101,7 +3775,7 @@ function ProductLibraryWorkspace({
         }
       }
       if (active && !remote.error && remote.data && remote.data.length) {
-        const mapped: AdminProduct[] = remote.data.map((product) => ({
+        const mapped: AdminProduct[] = remote.data.filter((product) => !isDemoProduct(product)).map((product) => ({
           name: product.name,
           price: `₹${product.price.toLocaleString("en-IN")}`,
           cost: `₹${(product.cost ?? 0).toLocaleString("en-IN")}`,
@@ -4109,9 +3783,9 @@ function ProductLibraryWorkspace({
           category: product.category,
           stock: product.stock,
           status: product.status,
-          image: product.image || adminProducts[0].image,
+          image: product.image || adminPlaceholderImage,
           hoverImage:
-            product.hoverImage || product.image || adminProducts[0].image,
+            product.hoverImage || product.image || adminPlaceholderImage,
           barcode: barcodeMap[product.sku] || product.barcode || "",
           gstRate: pricingMap[product.sku]?.gstRate || 0,
           markup: pricingMap[product.sku]?.markup || 0,
@@ -4131,7 +3805,7 @@ function ProductLibraryWorkspace({
               localProducts = parsed
                 .filter(
                   (product) =>
-                    typeof product.name === "string" && product.name.trim(),
+                    typeof product.name === "string" && product.name.trim() && !isDemoProduct(product),
                 )
                 .map((product, index) => {
                   const rawPrice = product.price;
@@ -4152,11 +3826,11 @@ function ProductLibraryWorkspace({
                     category: product.category || "Uncategorised",
                     stock: product.stock ?? 0,
                     status: product.status ?? "Published",
-                    image: product.image || adminProducts[0].image,
+                    image: product.image || adminPlaceholderImage,
                     hoverImage:
                       product.hoverImage ||
                       product.image ||
-                      adminProducts[0].image,
+                      adminPlaceholderImage,
                     barcode: product.barcode || barcodeMap[product.sku] || "",
                     gstRate: product.gstRate ?? pricingMap[product.sku]?.gstRate ?? 0,
                     markup: product.markup ?? pricingMap[product.sku]?.markup ?? 0,
@@ -4228,7 +3902,7 @@ function ProductLibraryWorkspace({
             parsed
               .filter(
                 (product) =>
-                  typeof product.name === "string" && product.name.trim(),
+                  typeof product.name === "string" && product.name.trim() && !isDemoProduct(product),
               )
               .map((product, index) => {
                 const rawPrice = product.price as number | string | undefined;
@@ -4250,11 +3924,11 @@ function ProductLibraryWorkspace({
                   category: product.category || "Uncategorised",
                   stock: product.stock ?? 0,
                   status: product.status ?? "Published",
-                  image: product.image || adminProducts[0].image,
+                  image: product.image || adminPlaceholderImage,
                   hoverImage:
                     product.hoverImage ||
                     product.image ||
-                    adminProducts[0].image,
+                    adminPlaceholderImage,
                   barcode: product.barcode || barcodeMap[product.sku] || "",
                   gstRate: product.gstRate ?? pricingMap[product.sku]?.gstRate ?? 0,
                   markup: product.markup ?? pricingMap[product.sku]?.markup ?? 0,
@@ -4301,9 +3975,9 @@ function ProductLibraryWorkspace({
       gstRate: "",
       costWithGst: "₹",
     });
-    setNewProductImage(adminProducts[0].image);
+    setNewProductImage(adminPlaceholderImage);
     setNewProductFile(null);
-    setNewProductHoverImage(adminProducts[0].image);
+    setNewProductHoverImage(adminPlaceholderImage);
     setNewProductHoverFile(null);
     setSelectedProduct(null);
     setIsEditing(false);
@@ -4380,9 +4054,9 @@ function ProductLibraryWorkspace({
       gstRate: "",
       costWithGst: "₹",
     });
-    setNewProductImage(adminProducts[0].image);
+    setNewProductImage(adminPlaceholderImage);
     setNewProductFile(null);
-    setNewProductHoverImage(adminProducts[0].image);
+    setNewProductHoverImage(adminPlaceholderImage);
     setNewProductHoverFile(null);
     setIsAdding(false);
     onNotify(
@@ -4624,7 +4298,7 @@ function ProductLibraryWorkspace({
           stock,
           barcode: barcodeColumn >= 0 ? row[barcodeColumn]?.trim() || "" : "",
           status: stock > 0 ? "Published" : "Draft",
-          image: adminProducts[0].image,
+          image: adminPlaceholderImage,
         };
       })
       .filter((product): product is AdminProduct => product !== null);
