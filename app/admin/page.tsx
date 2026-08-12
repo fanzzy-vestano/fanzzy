@@ -3944,7 +3944,7 @@ function ProductLibraryWorkspace({
           gstRate: pricingMap[product.sku]?.gstRate || 0,
           markup: pricingMap[product.sku]?.markup || 0,
           costWithGst: calculatePricing(`₹${(product.cost ?? 0).toLocaleString("en-IN")}`, String(pricingMap[product.sku]?.gstRate || 0), String(pricingMap[product.sku]?.markup || 0)).costWithGst,
-          variants: variantsMap[product.sku] || localVariantsMap[product.sku] || [],
+          variants: variantsMap[product.sku]?.length ? variantsMap[product.sku] : localVariantsMap[product.sku] || [],
         }));
         // Supabase is the shared catalog. Never merge stale local records back
         // into it, otherwise a product deleted on one device can be resurrected
@@ -4000,7 +4000,7 @@ function ProductLibraryWorkspace({
                   gstRate: product.gstRate ?? pricingMap[sku]?.gstRate ?? 0,
                   markup: product.markup ?? pricingMap[sku]?.markup ?? 0,
                   costWithGst: product.costWithGst || calculatePricing(String(rawCost ?? "₹0"), String(product.gstRate ?? pricingMap[sku]?.gstRate ?? 0), String(product.markup ?? pricingMap[sku]?.markup ?? 0)).costWithGst,
-                  variants: product.variants || variantsMap[sku] || [],
+                  variants: product.variants?.length ? product.variants : variantsMap[sku]?.length ? variantsMap[sku] : localVariantsMap[sku] || [],
                 };
               }),
           );
