@@ -18,6 +18,7 @@ import {
   saveStoreSetting,
   uploadStoreImage,
 } from "../../lib/supabase/catalog";
+import { printOrderBill } from "../../lib/order-bill";
 import "../globals.css";
 import "../brand-polish.css";
 import "./admin.css";
@@ -130,6 +131,9 @@ type OrderRecord = {
   total: string;
   customerName: string;
   phone: string;
+  email?: string;
+  address?: string;
+  coupon?: string;
   items?: Array<{ name: string; quantity: number; price: string }>;
 };
 const adminOrders: OrderRecord[] = [];
@@ -2794,6 +2798,9 @@ function OrdersWorkspace({
     setSelectedOrder(order);
     setPhone(order.phone);
   };
+  const downloadBill = (order: OrderRecord) => {
+    if (!printOrderBill(order)) onNotify("Allow pop-ups to download the bill");
+  };
   const saveOrder = () => {
     if (!selectedOrder) return;
     const updated = { ...selectedOrder, phone: phone.trim() };
@@ -3003,6 +3010,9 @@ function OrdersWorkspace({
                 manually.
               </p>
               <div className="product-detail-actions">
+                <button className="module-secondary order-detail-bill" onClick={() => downloadBill(selectedOrder)}>
+                  Download bill ↗
+                </button>
                 <button className="module-primary" onClick={saveOrder}>
                   Save order
                 </button>
