@@ -4067,6 +4067,16 @@ function ProductLibraryWorkspace({
         const merged = new Map(mapped.map((product) => [product.sku, product]));
         localProducts.forEach((product) => merged.set(product.sku, product));
         const nextProducts = Array.from(merged.values());
+        // Products created before the shared Supabase catalog was available
+        // may still live only in this browser. Upload them during the first
+        // successful remote load so the storefront is consistent on every device.
+        if (isSupabaseReady && localProducts.length) {
+          await Promise.all(
+            localProducts.map((product) =>
+              saveCatalogProduct(toCatalogProduct(product)),
+            ),
+          );
+        }
         setProducts(nextProducts);
         persistCatalog(nextProducts);
         return;
