@@ -76,6 +76,7 @@ const isBogoCampaign = (campaign: MarketingRecord | null) => {
     `${campaign.name} ${campaign.detail} ${campaign.discount ?? ""}`,
   );
 };
+const localProductVariantsKey = "fanzzy-product-variants";
 
 function normalizeStoredProduct(value: unknown, index: number): Product | null {
   if (!value || typeof value !== "object") return null;
@@ -92,7 +93,7 @@ function normalizeStoredProduct(value: unknown, index: number): Product | null {
           name: typeof variant.name === "string" ? variant.name.trim() : "",
           image: typeof variant.image === "string" ? variant.image : "",
         }))
-        .filter((variant) => variant.name && variant.image)
+        .filter((variant) => variant.name || variant.image)
     : [];
   const idValue = typeof raw.id === "string" ? raw.id : typeof raw.sku === "string" ? raw.sku : `${name}-${index}`;
   return {
@@ -126,7 +127,7 @@ function ProductCard({ product, wished, onWishlist, onAdd, onQuickView }: { prod
         </div>
         <button className="add-icon" onClick={onAdd} aria-label={`Add ${product.name} to cart`}>+</button>
       </div>
-      {product.variants?.length ? <button className="product-variants-preview" onClick={onQuickView} aria-label={`View ${product.name} variants`}><span>{product.variants.length} colour / model option{product.variants.length === 1 ? "" : "s"}</span><span className="product-variant-thumbs">{product.variants.slice(0, 4).map((variant) => <img key={`${product.id}-${variant.name}`} src={variant.image} alt={variant.name} />)}</span><b>View ↗</b></button> : null}
+      {product.variants?.length ? <button className="product-variants-preview" onClick={onQuickView} aria-label={`View ${product.name} variants`}><span>{product.variants.length} colour / model option{product.variants.length === 1 ? "" : "s"}</span><span className="product-variant-thumbs">{product.variants.slice(0, 4).map((variant) => <img key={`${product.id}-${variant.name}`} src={variant.image || product.image} alt={variant.name} />)}</span><b>View ↗</b></button> : null}
       <div className="price-row"><span>{formatINR(product.price)}</span>{product.compareAt && <del>{formatINR(product.compareAt)}</del>}</div>
     </article>
   );
@@ -184,13 +185,30 @@ export default function Home() {
           variantsMap = {};
         }
       }
+      const localVariantsMap: Record<string, ProductVariant[]> = {};
+      const storedVariantCache = window.localStorage.getItem(localProductVariantsKey);
+      if (storedVariantCache) {
+        try {
+          const parsed = JSON.parse(storedVariantCache) as Record<string, ProductVariant[]>;
+          if (parsed && typeof parsed === "object") {
+            Object.entries(parsed).forEach(([key, variants]) => {
+              if (Array.isArray(variants) && variants.length) localVariantsMap[key] = variants;
+            });
+          }
+        } catch {
+          // Ignore malformed local variant cache.
+        }
+      }
       const stored = window.localStorage.getItem("fanzzy-products");
       let localProducts: Product[] = [];
       if (stored) {
         try {
           const parsed: unknown = JSON.parse(stored);
           if (Array.isArray(parsed)) {
-            localProducts = parsed.filter((product) => !isDemoProduct(product as { name?: string; sku?: string })).map(normalizeStoredProduct).filter((product): product is Product => product !== null);
+            localProducts = parsed.filter((product) => !isDemoProduct(product as { name?: string; sku?: string })).map(normalizeStoredProduct).filter((product): product is Product => product !== null).map((product) => ({
+              ...product,
+              variants: product.variants?.length ? product.variants : localVariantsMap[product.id] || [],
+            }));
           }
         } catch {
           window.localStorage.removeItem("fanzzy-products");
@@ -207,13 +225,13 @@ export default function Home() {
           tag: product.tag,
           tone: product.tone,
           compareAt: product.compareAt,
-          variants: variantsMap[product.sku] || product.variants,
+          variants: variantsMap[product.sku] || localVariantsMap[product.sku] || product.variants,
         }, index)).filter((product): product is Product => product !== null);
         const remoteWithLocalVariants = remoteProducts.map((product) => ({
           ...product,
           variants: product.variants?.length
             ? product.variants
-            : localProducts.find((localProduct) => localProduct.id === product.id)?.variants || [],
+            : localProducts.find((localProduct) => localProduct.id === product.id)?.variants || localVariantsMap[product.id] || [],
         }));
         // Supabase is the shared catalog. Local storage is only a fallback for
         // devices that are offline or when Supabase has not been configured.
@@ -715,7 +733,7 @@ export default function Home() {
 
       {checkoutOpen && <div className="drawer-backdrop checkout-backdrop" onClick={() => setCheckoutOpen(false)}><section className="checkout-modal" role="dialog" aria-modal="true" aria-labelledby="checkout-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">CHECKOUT</p><h2 id="checkout-title">Complete your order</h2></div><button aria-label="Close checkout" onClick={() => setCheckoutOpen(false)}>×</button></div><p className="checkout-intro">We’ll use your WhatsApp number to confirm your order and delivery updates.</p><div className="checkout-grid"><label>Customer name<input value={checkoutForm.name} onChange={(event) => setCheckoutForm((current) => ({ ...current, name: event.target.value }))} placeholder="Your full name" required /></label><label>WhatsApp number <span className="required-mark">Required</span><input type="tel" value={checkoutForm.phone} onChange={(event) => setCheckoutForm((current) => ({ ...current, phone: event.target.value }))} placeholder="+91 98765 43210" required /></label><label>Email address <span className="optional-mark">Optional</span><input type="email" value={checkoutForm.email} onChange={(event) => setCheckoutForm((current) => ({ ...current, email: event.target.value }))} placeholder="you@example.com" /></label><label className="checkout-wide">Delivery address<input value={checkoutForm.address} onChange={(event) => setCheckoutForm((current) => ({ ...current, address: event.target.value }))} placeholder="House number, street, city, pincode" required /></label><div className="checkout-coupon checkout-wide"><label htmlFor="checkout-coupon-code">Coupon code <span className="optional-mark">Optional</span></label><div className="coupon-entry"><input id="checkout-coupon-code" value={couponInput} onChange={(event) => { setCouponInput(event.target.value.toUpperCase()); setAppliedCoupon(null); }} placeholder="Enter coupon code" autoCapitalize="characters" /><button className="button button-light" type="button" onClick={applyCoupon}>Apply</button></div>{appliedCoupon && <p className="coupon-success">{appliedCoupon.code} applied · {appliedCoupon.discount} off</p>}</div></div>{bogoDiscount > 0 && <div className="checkout-total coupon-total"><span>Buy 1 Get 1 discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="checkout-total coupon-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div className="checkout-total"><span>Order total</span><strong>{formatINR(orderTotal)}</strong></div><div className="checkout-actions"><button className="button button-dark" onClick={submitCheckout}>Place order <span>↗</span></button><button className="save-text" onClick={() => setCheckoutOpen(false)}>Back to cart</button></div></section></div>}
 
-      {quickProduct && <div className="drawer-backdrop" onClick={() => setQuickProduct(null)}><div className="quick-modal" onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setQuickProduct(null)}>×</button><div className="quick-image"><img src={selectedVariant?.image || quickProduct.image} alt={selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name} /></div><div className="quick-copy"><p className="eyebrow">{quickProduct.category}</p><h2>{quickProduct.name}</h2><div className="price-row"><span>{formatINR(quickProduct.price)}</span>{quickProduct.compareAt && <del>{formatINR(quickProduct.compareAt)}</del>}</div>{quickProduct.variants?.length ? <div className="variant-picker"><span>Choose colour / series / model</span><div>{quickProduct.variants.map((variant) => <button key={`${quickProduct.id}-${variant.name}`} className={selectedVariant?.name === variant.name ? "active" : ""} onClick={() => setSelectedVariant(variant)}>{variant.name}</button>)}</div></div> : null}<p>Designed to become part of your everyday ritual. Hand-finished in small batches with a soft, lasting glow.</p><div className="quick-actions"><button className="button button-dark" onClick={() => { addToCart(quickProduct); setQuickProduct(null); }}>Add to cart <span>↗</span></button><button className="save-text" onClick={() => toggleWishlist(quickProduct.id)}>{wishlist.includes(quickProduct.id) ? "♥ Saved" : "♡ Save for later"}</button></div></div></div></div>}
+      {quickProduct && <div className="drawer-backdrop" onClick={() => setQuickProduct(null)}><div className="quick-modal" onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setQuickProduct(null)}>×</button><div className="quick-image"><img src={selectedVariant?.image || quickProduct.image} alt={selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name} /></div><div className="quick-copy"><p className="eyebrow">{quickProduct.category}</p><h2>{quickProduct.name}</h2><div className="price-row"><span>{formatINR(quickProduct.price)}</span>{quickProduct.compareAt && <del>{formatINR(quickProduct.compareAt)}</del>}</div>{quickProduct.variants?.length ? <div className="variant-picker"><span>Choose colour / series / model</span><div>{quickProduct.variants.map((variant, index) => <button key={`${quickProduct.id}-${variant.name || index}`} className={selectedVariant?.name === variant.name && selectedVariant?.image === variant.image ? "active" : ""} onClick={() => setSelectedVariant(variant)}><img src={variant.image || quickProduct.image} alt="" /><span>{variant.name || `Option ${index + 1}`}</span></button>)}</div></div> : null}<p>Designed to become part of your everyday ritual. Hand-finished in small batches with a soft, lasting glow.</p><div className="quick-actions"><button className="button button-dark" onClick={() => { addToCart(quickProduct); setQuickProduct(null); }}>Add to cart <span>↗</span></button><button className="save-text" onClick={() => toggleWishlist(quickProduct.id)}>{wishlist.includes(quickProduct.id) ? "♥ Saved" : "♡ Save for later"}</button></div></div></div></div>}
 
       {toast && <div className="toast">{toast}<span>✦</span></div>}
     </main>

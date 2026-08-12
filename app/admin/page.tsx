@@ -200,6 +200,7 @@ const localImageToFile = async (source: string, name: string) => {
   const blob = await response.blob();
   return new File([blob], name, { type: blob.type || "image/webp" });
 };
+const localProductVariantsKey = "fanzzy-product-variants";
 const persistCatalog = (catalog: AdminProduct[]) => {
   if (typeof window === "undefined") return;
   const tones = ["#d9c4bc", "#dad7ce", "#d0c2b0", "#e5ddd1"];
@@ -222,6 +223,19 @@ const persistCatalog = (catalog: AdminProduct[]) => {
     tag: product.status === "Draft" ? "Draft" : undefined,
     tone: tones[index % tones.length],
   }));
+  const localVariants = Object.fromEntries(
+    storefrontCatalog
+      .filter((product) => product.variants.length)
+      .flatMap((product) => [
+        [product.sku, product.variants],
+        [product.id, product.variants],
+      ]),
+  );
+  try {
+    window.localStorage.setItem(localProductVariantsKey, JSON.stringify(localVariants));
+  } catch {
+    // The main catalog persistence below still has its own compact fallback.
+  }
   try {
     window.localStorage.setItem(
       "fanzzy-products",
@@ -3878,6 +3892,19 @@ function ProductLibraryWorkspace({
         }
       }
       const localVariantsMap: Record<string, ProductVariant[]> = {};
+      const storedVariantCache = window.localStorage.getItem(localProductVariantsKey);
+      if (storedVariantCache) {
+        try {
+          const parsed = JSON.parse(storedVariantCache) as Record<string, ProductVariant[]>;
+          if (parsed && typeof parsed === "object") {
+            Object.entries(parsed).forEach(([key, variants]) => {
+              if (Array.isArray(variants) && variants.length) localVariantsMap[key] = variants;
+            });
+          }
+        } catch {
+          // Ignore malformed local variant cache.
+        }
+      }
       const storedCatalog = window.localStorage.getItem("fanzzy-products");
       if (storedCatalog) {
         try {
