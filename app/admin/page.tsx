@@ -283,6 +283,8 @@ const createSku = (
   }
   return sku;
 };
+const parseMoney = (value: string) => Number(value.replace(/[^0-9.]/g, "")) || 0;
+const formatMoney = (value: number) => `₹${Math.round(value).toLocaleString("en-IN")}`;
 const makeLocalImage = (file: File) =>
   new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -4017,6 +4019,7 @@ function ProductLibraryWorkspace({
     image: "",
     hoverImage: "",
     barcode: "",
+    markup: "",
   });
   const [newProductImage, setNewProductImage] = useState(
     adminProducts[0].image,
@@ -4039,6 +4042,7 @@ function ProductLibraryWorkspace({
     stock: "",
     sku: "",
     barcode: "",
+    markup: "",
   });
   useEffect(() => {
     let active = true;
@@ -4222,13 +4226,21 @@ function ProductLibraryWorkspace({
     };
   }, []);
   const updateField = (field: keyof typeof newProduct, value: string) =>
-    setNewProduct((current) => ({
-      ...current,
-      [field]: value,
-      ...(field === "name"
-        ? { sku: createSku(value, current.category, products) }
-        : {}),
-    }));
+    setNewProduct((current) => {
+      const next = {
+        ...current,
+        [field]: value,
+        ...(field === "name"
+          ? { sku: createSku(value, current.category, products) }
+          : {}),
+      };
+      if (field === "cost" || field === "markup") {
+        const cost = parseMoney(field === "cost" ? value : next.cost);
+        const markup = Number(field === "markup" ? value : next.markup);
+        if (cost > 0 && Number.isFinite(markup)) next.price = formatMoney(cost * (1 + markup / 100));
+      }
+      return next;
+    });
   const openAddProduct = () => {
     setNewProduct({
       name: "",
@@ -4238,6 +4250,7 @@ function ProductLibraryWorkspace({
       stock: "",
       sku: "",
       barcode: "",
+      markup: "",
     });
     setNewProductImage(adminProducts[0].image);
     setNewProductFile(null);
@@ -4310,6 +4323,7 @@ function ProductLibraryWorkspace({
       stock: "",
       sku: "",
       barcode: "",
+      markup: "",
     });
     setNewProductImage(adminProducts[0].image);
     setNewProductFile(null);
@@ -4388,6 +4402,16 @@ function ProductLibraryWorkspace({
         reader.readAsDataURL(file);
       });
   };
+  const updateEditField = (field: keyof typeof editValues, value: string) =>
+    setEditValues((current) => {
+      const next = { ...current, [field]: value };
+      if (field === "cost" || field === "markup") {
+        const cost = parseMoney(field === "cost" ? value : next.cost);
+        const markup = Number(field === "markup" ? value : next.markup);
+        if (cost > 0 && Number.isFinite(markup)) next.price = formatMoney(cost * (1 + markup / 100));
+      }
+      return next;
+    });
   const startEditing = (product: AdminProduct) => {
     setSelectedProduct(product);
     setIsAdding(false);
@@ -4402,6 +4426,9 @@ function ProductLibraryWorkspace({
       image: product.image,
       hoverImage: product.hoverImage || product.image,
       barcode: product.barcode || "",
+      markup: parseMoney(product.cost) > 0
+        ? String(Math.max(0, Math.round((parseMoney(product.price) / parseMoney(product.cost) - 1) * 100)))
+        : "",
     });
     setEditImageFile(null);
     setEditHoverFile(null);
@@ -4721,6 +4748,18 @@ function ProductLibraryWorkspace({
                   />
                 </label>
                 <label>
+                  Markup %
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={newProduct.markup}
+                    onChange={(event) => updateField("markup", event.target.value)}
+                    placeholder="e.g. 25"
+                    inputMode="decimal"
+                  />
+                </label>
+                <label>
                   Stock
                 <input
                   type="number"
@@ -4917,13 +4956,20 @@ function ProductLibraryWorkspace({
                   Cost price
                   <input
                     value={editValues.cost}
-                    onChange={(event) =>
-                      setEditValues((current) => ({
-                        ...current,
-                        cost: event.target.value,
-                      }))
-                    }
+                    onChange={(event) => updateEditField("cost", event.target.value)}
                     placeholder="₹0"
+                    inputMode="decimal"
+                  />
+                </label>
+                <label>
+                  Markup %
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={editValues.markup}
+                    onChange={(event) => updateEditField("markup", event.target.value)}
+                    placeholder="e.g. 25"
                     inputMode="decimal"
                   />
                 </label>
