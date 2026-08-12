@@ -33,6 +33,7 @@ type AdminProduct = {
   status: "Published" | "Draft" | "Low stock";
   image: string;
   hoverImage?: string;
+  barcode?: string;
 };
 type MarketingKind = "Campaign" | "Coupon" | "Newsletter";
 type MarketingStatus = "Active" | "Scheduled" | "Draft";
@@ -328,6 +329,7 @@ const persistCatalog = (catalog: AdminProduct[]) => {
     cost: Number(product.cost.replace(/[^0-9]/g, "")) || 0,
     image: product.image,
     hoverImage: product.hoverImage || product.image,
+    barcode: product.barcode || "",
     tag: product.status === "Draft" ? "Draft" : undefined,
     tone: tones[index % tones.length],
   }));
@@ -376,6 +378,14 @@ const toCatalogProduct = (product: AdminProduct) => ({
   image: product.image,
   hoverImage: product.hoverImage || product.image,
 });
+const saveProductBarcodes = async (catalog: AdminProduct[]) => {
+  const barcodes = Object.fromEntries(
+    catalog
+      .filter((product) => product.sku && product.barcode?.trim())
+      .map((product) => [product.sku, product.barcode!.trim()]),
+  );
+  await saveStoreSetting("productBarcodes", JSON.stringify(barcodes));
+};
 const persistCategories = (
   categories: Array<{ name: string; pieces: number; image?: string }>,
 ) => {
@@ -4006,6 +4016,7 @@ function ProductLibraryWorkspace({
     sku: "",
     image: "",
     hoverImage: "",
+    barcode: "",
   });
   const [newProductImage, setNewProductImage] = useState(
     adminProducts[0].image,
@@ -4027,11 +4038,26 @@ function ProductLibraryWorkspace({
     cost: "₹",
     stock: "",
     sku: "",
+    barcode: "",
   });
   useEffect(() => {
     let active = true;
     const loadProducts = async () => {
       const remote = await fetchCatalogProducts();
+      const barcodeRemote = await fetchStoreSetting("productBarcodes");
+      let barcodeMap: Record<string, string> = {};
+      if (barcodeRemote.value) {
+        try {
+          const parsed = JSON.parse(barcodeRemote.value) as Record<string, unknown>;
+          if (parsed && typeof parsed === "object") {
+            barcodeMap = Object.fromEntries(
+              Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+            );
+          }
+        } catch {
+          barcodeMap = {};
+        }
+      }
       if (active && !remote.error && remote.data && remote.data.length) {
         const mapped: AdminProduct[] = remote.data.map((product) => ({
           name: product.name,
@@ -4044,6 +4070,7 @@ function ProductLibraryWorkspace({
           image: product.image || adminProducts[0].image,
           hoverImage:
             product.hoverImage || product.image || adminProducts[0].image,
+          barcode: barcodeMap[product.sku] || product.barcode || "",
         }));
         let localProducts: AdminProduct[] = [];
         const stored = window.localStorage.getItem("fanzzy-products");
@@ -4085,6 +4112,7 @@ function ProductLibraryWorkspace({
                       product.hoverImage ||
                       product.image ||
                       adminProducts[0].image,
+                    barcode: product.barcode || barcodeMap[product.sku] || "",
                   };
                 });
             }
@@ -4179,6 +4207,7 @@ function ProductLibraryWorkspace({
                     product.hoverImage ||
                     product.image ||
                     adminProducts[0].image,
+                  barcode: product.barcode || barcodeMap[product.sku] || "",
                 };
               }),
           );
@@ -4208,6 +4237,7 @@ function ProductLibraryWorkspace({
       cost: "₹",
       stock: "",
       sku: "",
+      barcode: "",
     });
     setNewProductImage(adminProducts[0].image);
     setNewProductFile(null);
@@ -4263,11 +4293,13 @@ function ProductLibraryWorkspace({
       status: Number(newProduct.stock) > 0 ? "Published" : "Draft",
       image: productImage,
       hoverImage: productHoverImage,
+      barcode: newProduct.barcode.trim(),
     };
     const remoteError = await saveCatalogProduct(toCatalogProduct(product));
     setProducts((current) => {
       const next = [...current, product];
       persistCatalog(next);
+      void saveProductBarcodes(next);
       return next;
     });
     setNewProduct({
@@ -4277,6 +4309,7 @@ function ProductLibraryWorkspace({
       cost: "₹",
       stock: "",
       sku: "",
+      barcode: "",
     });
     setNewProductImage(adminProducts[0].image);
     setNewProductFile(null);
@@ -4368,6 +4401,7 @@ function ProductLibraryWorkspace({
       sku: product.sku,
       image: product.image,
       hoverImage: product.hoverImage || product.image,
+      barcode: product.barcode || "",
     });
     setEditImageFile(null);
     setEditHoverFile(null);
@@ -4413,6 +4447,7 @@ function ProductLibraryWorkspace({
       status: Number(editValues.stock) > 0 ? "Published" : "Draft",
       image,
       hoverImage,
+      barcode: editValues.barcode.trim(),
     };
     const remoteError = await saveCatalogProduct(toCatalogProduct(updated));
     if (!remoteError && updated.sku !== selectedProduct.sku)
@@ -4422,6 +4457,7 @@ function ProductLibraryWorkspace({
         product.sku === selectedProduct.sku ? updated : product,
       );
       persistCatalog(next);
+      void saveProductBarcodes(next);
       return next;
     });
     setSelectedProduct(updated);
@@ -4438,6 +4474,7 @@ function ProductLibraryWorkspace({
     setProducts((current) => {
       const next = current.filter((item) => item.sku !== product.sku);
       persistCatalog(next);
+      void saveProductBarcodes(next);
       return next;
     });
     if (selectedProduct?.sku === product.sku) setSelectedProduct(null);
@@ -4467,6 +4504,7 @@ function ProductLibraryWorkspace({
       "buying price",
     ]);
     const stockColumn = findColumn(["stock", "inventory", "quantity", "qty"]);
+    const barcodeColumn = findColumn(["barcode", "bar code", "ean", "upc"]);
     const imported = rows
       .map((row, index): AdminProduct | null => {
         const name = nameColumn >= 0 ? row[nameColumn]?.trim() : "";
@@ -4495,6 +4533,7 @@ function ProductLibraryWorkspace({
               ? row[costColumn].trim()
               : "₹0",
           stock,
+          barcode: barcodeColumn >= 0 ? row[barcodeColumn]?.trim() || "" : "",
           status: stock > 0 ? "Published" : "Draft",
           image: adminProducts[0].image,
         };
@@ -4510,6 +4549,7 @@ function ProductLibraryWorkspace({
       setProducts((current) => {
         const next = [...current, ...imported];
         persistCatalog(next);
+        void saveProductBarcodes(next);
         return next;
       });
       onNotify(
@@ -4521,11 +4561,12 @@ function ProductLibraryWorkspace({
     event.target.value = "";
   };
   const exportCsv = () => {
-    const headers = ["name", "sku", "category", "stock", "price", "cost", "status", "image", "hoverImage"];
+    const headers = ["name", "sku", "barcode", "category", "stock", "price", "cost", "status", "image", "hoverImage"];
     const escapeCsv = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
     const rows = products.map((product) => [
       product.name,
       product.sku,
+      product.barcode || "",
       product.category,
       product.stock,
       product.price,
@@ -4641,6 +4682,15 @@ function ProductLibraryWorkspace({
                 />
               </label>
               <label>
+                Barcode
+                <input
+                  value={newProduct.barcode}
+                  onChange={(event) => updateField("barcode", event.target.value)}
+                  placeholder="Scan or enter barcode"
+                  inputMode="numeric"
+                />
+              </label>
+              <label>
                 Category
                 <select
                   value={newProduct.category}
@@ -4726,7 +4776,7 @@ function ProductLibraryWorkspace({
               <strong>{product.name}</strong>
               <small>
                 {product.stock === 0 ? "Draft" : `${product.stock} in stock`} ·{" "}
-                {product.category}
+                {product.category}{product.barcode ? ` · Barcode ${product.barcode}` : ""}
               </small>
             </button>
             <div className="product-row-actions">
@@ -4818,6 +4868,20 @@ function ProductLibraryWorkspace({
                     sku: event.target.value,
                   }))
                 }
+              />
+            </label>
+            <label>
+              Barcode
+              <input
+                value={editValues.barcode}
+                onChange={(event) =>
+                  setEditValues((current) => ({
+                    ...current,
+                    barcode: event.target.value,
+                  }))
+                }
+                placeholder="Scan or enter barcode"
+                inputMode="numeric"
               />
             </label>
             <label>
@@ -4922,6 +4986,10 @@ function ProductLibraryWorkspace({
               <span>
                 <small>Status</small>
                 <strong>{selectedProduct.status}</strong>
+              </span>
+              <span>
+                <small>Barcode</small>
+                <strong>{selectedProduct.barcode || "Not added"}</strong>
               </span>
             </div>
             <div className="product-detail-actions">

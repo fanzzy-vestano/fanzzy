@@ -15,6 +15,7 @@ export type CatalogProduct = {
   compareAt?: number;
   tag?: string;
   tone?: string;
+  barcode?: string;
 };
 
 export type CatalogCategory = {
@@ -35,6 +36,7 @@ const settingKeys = {
   collections: "collections",
   customers: "customers",
   newsletterSubscribers: "newsletter_subscribers",
+  productBarcodes: "product_barcodes",
 } as const;
 
 const asError = (value: unknown) => value instanceof Error ? value : new Error(String(value || "Supabase request failed"));
@@ -54,6 +56,7 @@ const asProduct = (row: Record<string, unknown>): CatalogProduct => ({
   compareAt: row.compare_at == null ? undefined : Number(row.compare_at),
   tag: typeof row.tag === "string" ? row.tag : undefined,
   tone: typeof row.tone === "string" ? row.tone : undefined,
+  barcode: typeof row.barcode === "string" ? row.barcode : undefined,
 });
 
 const asCategory = (row: Record<string, unknown>): CatalogCategory => ({
