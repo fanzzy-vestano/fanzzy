@@ -4680,6 +4680,7 @@ function ProductLibraryWorkspace({
                     step="0.01"
                     value={newProduct.gstRate}
                     onChange={(event) => updateField("gstRate", event.target.value)}
+                    onWheel={(event) => event.currentTarget.blur()}
                     placeholder="e.g. 5"
                     inputMode="decimal"
                   />
@@ -4696,6 +4697,7 @@ function ProductLibraryWorkspace({
                     step="0.01"
                     value={newProduct.markup}
                     onChange={(event) => updateField("markup", event.target.value)}
+                    onWheel={(event) => event.currentTarget.blur()}
                     placeholder="e.g. 25"
                     inputMode="decimal"
                   />
@@ -4715,6 +4717,7 @@ function ProductLibraryWorkspace({
                   min="0"
                   value={newProduct.stock}
                   onChange={(event) => updateField("stock", event.target.value)}
+                  onWheel={(event) => event.currentTarget.blur()}
                   placeholder="0"
                 />
               </label>
@@ -4972,6 +4975,7 @@ function ProductLibraryWorkspace({
                     step="0.01"
                     value={editValues.gstRate}
                     onChange={(event) => updateEditField("gstRate", event.target.value)}
+                    onWheel={(event) => event.currentTarget.blur()}
                     placeholder="e.g. 5"
                     inputMode="decimal"
                   />
@@ -4988,6 +4992,7 @@ function ProductLibraryWorkspace({
                     step="0.01"
                     value={editValues.markup}
                     onChange={(event) => updateEditField("markup", event.target.value)}
+                    onWheel={(event) => event.currentTarget.blur()}
                     placeholder="e.g. 25"
                     inputMode="decimal"
                   />
@@ -5017,6 +5022,7 @@ function ProductLibraryWorkspace({
                     stock: event.target.value,
                   }))
                 }
+                onWheel={(event) => event.currentTarget.blur()}
               />
             </label>
           </div>
