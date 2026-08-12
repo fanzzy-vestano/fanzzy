@@ -122,7 +122,7 @@ function ProductCard({ product, wished, onWishlist, onAdd, onQuickView }: { prod
         <img className={`product-image primary-image ${isOutOfStock ? "stock-out-image" : ""}`} src={product.image} alt={product.name} />
         <img className={`product-image hover-image ${isOutOfStock ? "stock-out-image" : ""}`} src={product.hoverImage} alt="" aria-hidden="true" />
         {product.tag && <span className="product-tag">{product.tag}</span>}
-        {isOutOfStock && <span className="stock-out-overlay">Stock out</span>}
+        {isOutOfStock && <span className="stock-out-overlay">Sold out</span>}
         <button className={`wishlist-button ${wished ? "is-wished" : ""}`} onClick={onWishlist} aria-label={wished ? `Remove ${product.name} from wishlist` : `Add ${product.name} to wishlist`}>{wished ? "♥" : "♡"}</button>
         <button className="quick-view" onClick={onQuickView}>Quick view <span>↗</span></button>
       </div>
