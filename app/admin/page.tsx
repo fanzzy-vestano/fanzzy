@@ -4732,13 +4732,6 @@ function ProductLibraryWorkspace({
                 </select>
               </label>
                 <label>
-                  Price
-                  <input
-                    value={newProduct.price}
-                    onChange={(event) => updateField("price", event.target.value)}
-                  />
-                </label>
-                <label>
                   Cost price
                   <input
                     value={newProduct.cost}
@@ -4757,6 +4750,14 @@ function ProductLibraryWorkspace({
                     onChange={(event) => updateField("markup", event.target.value)}
                     placeholder="e.g. 25"
                     inputMode="decimal"
+                  />
+                </label>
+                <label>
+                  Selling price
+                  <input
+                    value={newProduct.price}
+                    onChange={(event) => updateField("price", event.target.value)}
+                    placeholder="Calculated from cost + markup"
                   />
                 </label>
                 <label>
@@ -4941,18 +4942,6 @@ function ProductLibraryWorkspace({
               </select>
             </label>
                 <label>
-                  Price
-                  <input
-                    value={editValues.price}
-                onChange={(event) =>
-                  setEditValues((current) => ({
-                    ...current,
-                    price: event.target.value,
-                  }))
-                    }
-                  />
-                </label>
-                <label>
                   Cost price
                   <input
                     value={editValues.cost}
@@ -4971,6 +4960,19 @@ function ProductLibraryWorkspace({
                     onChange={(event) => updateEditField("markup", event.target.value)}
                     placeholder="e.g. 25"
                     inputMode="decimal"
+                  />
+                </label>
+                <label>
+                  Selling price
+                  <input
+                    value={editValues.price}
+                    onChange={(event) =>
+                      setEditValues((current) => ({
+                        ...current,
+                        price: event.target.value,
+                      }))
+                    }
+                    placeholder="Calculated from cost + markup"
                   />
                 </label>
                 <label>
