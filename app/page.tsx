@@ -1,7 +1,12 @@
 ﻿"use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { fetchCatalogCategories, fetchCatalogProducts, fetchStoreSetting } from "../lib/supabase/catalog";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
+import {
+  fetchCatalogCategories,
+  fetchCatalogProducts,
+  fetchStoreSetting,
+  saveStoreSetting,
+} from "../lib/supabase/catalog";
 
 type Product = {
   id: string;
@@ -137,6 +142,7 @@ export default function Home() {
   const [toast, setToast] = useState("");
   const [email, setEmail] = useState("");
   const [subscribed, setSubscribed] = useState(false);
+  const [newsletterMessage, setNewsletterMessage] = useState("");
   const [announcementText, setAnnouncementText] = useState("Complimentary shipping on orders above ₹999");
   const [activeCampaign, setActiveCampaign] = useState<MarketingRecord | null>(null);
   const [heroSlides, setHeroSlides] = useState(initialHeroSlides);
@@ -392,6 +398,34 @@ export default function Home() {
   }, []);
 
   const announce = (message: string) => setToast(message);
+  const subscribeNewsletter = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail) return;
+    const remote = await fetchStoreSetting("newsletterSubscribers");
+    let subscribers: string[] = [];
+    if (remote.value) {
+      try {
+        const parsed = JSON.parse(remote.value) as unknown;
+        if (Array.isArray(parsed))
+          subscribers = parsed.filter((item): item is string => typeof item === "string");
+      } catch {
+        subscribers = [];
+      }
+    }
+    if (!subscribers.includes(normalizedEmail)) subscribers.push(normalizedEmail);
+    const saveError = await saveStoreSetting(
+      "newsletterSubscribers",
+      JSON.stringify(subscribers),
+    );
+    if (saveError) {
+      setNewsletterMessage("Please try again in a moment.");
+      return;
+    }
+    setEmail("");
+    setSubscribed(true);
+    setNewsletterMessage("You’re on the list. Welcome to Fanzzy.");
+  };
   const toggleWishlist = (id: string) => {
     setWishlist((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
     announce(wishlist.includes(id) ? "Removed from wishlist" : "Saved to wishlist");
@@ -580,7 +614,7 @@ export default function Home() {
 
       <section className="offer-banner"><div><p className="eyebrow light">{activeCampaign ? activeCampaign.kind === "Coupon" ? "EXCLUSIVE OFFER" : "SEASONAL EDIT" : "A LITTLE EXTRA"}</p><h2>{activeCampaign ? activeCampaign.name : "Your first piece"}<br /><em>{activeCampaign ? "is here." : "is on us."}</em></h2></div><div><p>{activeCampaign ? <>{activeCampaign.detail}{activeCampaign.discount && <> · <strong>{activeCampaign.discount}</strong></>}{activeCampaign.code && <> with code <strong>{activeCampaign.code}</strong></>}</> : <>Take 10% off your first order with code <strong>HELLOFANZZY</strong>.</>}</p>{activeCampaign?.code ? <button className="button button-light" onClick={() => { const code = activeCampaign.code ?? ""; navigator.clipboard?.writeText(code); announce(`Code copied: ${code}`); }}>Copy code <span>↗</span></button> : <button className="button button-light" onClick={() => { document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); announce("Seasonal edit opened"); }}>Explore the edit <span>↗</span></button>}</div></section>
 
-      <section className="newsletter"><div><p className="eyebrow">THE FANZZY LETTER</p><h2>A little light<br /><em>in your inbox.</em></h2></div><form onSubmit={(event) => { event.preventDefault(); if (email) setSubscribed(true); }}><p>New drops, studio notes, and 10% off your first order — no noise, promise.</p><div className="email-line"><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Your email address" aria-label="Your email address" required /><button aria-label="Subscribe to newsletter">↗</button></div>{subscribed && <span className="success-message">You’re on the list. Welcome to Fanzzy.</span>}</form></section>
+      <section className="newsletter"><div><p className="eyebrow">THE FANZZY LETTER</p><h2>A little light<br /><em>in your inbox.</em></h2></div><form onSubmit={subscribeNewsletter}><p>New drops, studio notes, and 10% off your first order — no noise, promise.</p><div className="email-line"><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Your email address" aria-label="Your email address" required /><button aria-label="Subscribe to newsletter">↗</button></div>{(subscribed || newsletterMessage) && <span className="success-message">{newsletterMessage}</span>}</form></section>
 
       <footer className="site-footer" id="footer"><div className="footer-brand"><a href="#top" className="wordmark wordmark-light"><img src={siteAsset("fanzzy-mark.png")} alt="Fanzzy" className="brand-logo" /></a><p>Quietly remarkable jewellery<br />for all your becoming.</p></div><div><p className="eyebrow light">Explore</p><a href="#shop">New arrivals</a><a href="#shop">Bestsellers</a><a href="#categories">Collections</a><a href="#shop">Gift cards</a></div><div><p className="eyebrow light">Need a hand?</p><a href="#footer">Contact us</a><a href="#footer">Shipping & returns</a><a href="#footer">Care guide</a><a href="#footer">FAQs</a></div><div><p className="eyebrow light">Follow along</p><a href="https://www.instagram.com/fanzzy.in/?hl=en" target="_blank" rel="noreferrer">Instagram ↗</a><a href="https://www.facebook.com/profile.php?id=61593401750910" target="_blank" rel="noreferrer">Facebook ↗</a><a href="https://www.pinterest.com/fanzzyv/" target="_blank" rel="noreferrer">Pinterest ↗</a><a href="#footer">WhatsApp ↗</a><p className="footer-small">Made with intention in India.<br />© Fanzzy 2024</p></div><div className="footer-bottom"><span>Privacy</span><span>Terms</span><span>Accessibility</span><span>India / INR ₹</span></div></footer>
 

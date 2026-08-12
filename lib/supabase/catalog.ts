@@ -33,6 +33,7 @@ const settingKeys = {
   marketingRecords: "marketing_records",
   collections: "collections",
   customers: "customers",
+  newsletterSubscribers: "newsletter_subscribers",
 } as const;
 
 const asError = (value: unknown) => value instanceof Error ? value : new Error(String(value || "Supabase request failed"));
