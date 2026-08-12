@@ -333,9 +333,13 @@ export default function Home() {
     });
   }, [activeCategory, products, search]);
 
-  const cartItems = products.filter((product) => cart[product.id]);
+  const cartItems = Object.entries(cart).flatMap(([cartKey, quantity]) => {
+    const productId = cartKey.split("::", 1)[0];
+    const product = products.find((item) => item.id === productId);
+    return product ? [{ ...product, cartKey, quantity, variant: cartVariants[cartKey] ?? null }] : [];
+  });
   const cartCount = Object.values(cart).reduce((sum, count) => sum + count, 0);
-  const subtotal = cartItems.reduce((sum, product) => sum + product.price * (cart[product.id] ?? 0), 0);
+  const subtotal = cartItems.reduce((sum, product) => sum + product.price * product.quantity, 0);
   const couponDiscount = appliedCoupon ? getCouponDiscount(appliedCoupon, subtotal) : 0;
   const bogoCampaign = isBogoCampaign(activeCampaign) ? activeCampaign : null;
   const bogoEligibleIds = bogoCampaign?.eligibleProductIds?.length
@@ -344,7 +348,7 @@ export default function Home() {
   const bogoPrices = bogoCampaign
     ? cartItems.flatMap((product) => {
         if (bogoEligibleIds && !bogoEligibleIds.has(product.id)) return [];
-        return Array.from({ length: cart[product.id] ?? 0 }, () => product.price);
+        return Array.from({ length: product.quantity }, () => product.price);
       }).sort((a, b) => a - b)
     : [];
   const bogoFreeCount = Math.floor(bogoPrices.length / 2);
@@ -533,24 +537,26 @@ export default function Home() {
       setQuickProduct(product);
       return;
     }
-    setCart((current) => ({ ...current, [product.id]: (current[product.id] ?? 0) + 1 }));
-    if (variant) setCartVariants((current) => ({ ...current, [product.id]: variant }));
+    const cartKey = variant ? `${product.id}::${variant.name || variant.image}` : product.id;
+    setCart((current) => ({ ...current, [cartKey]: (current[cartKey] ?? 0) + 1 }));
+    if (variant) setCartVariants((current) => ({ ...current, [cartKey]: variant }));
     setCartOpen(true);
     announce(`${product.name}${variant?.name ? ` · ${variant.name}` : ""} added to cart`);
   };
-  const updateQuantity = (id: string, delta: number) => {
-    const product = products.find((item) => item.id === id);
+  const updateQuantity = (cartKey: string, delta: number) => {
+    const productId = cartKey.split("::", 1)[0];
+    const product = products.find((item) => item.id === productId);
     if (delta > 0 && product && product.stock <= 0) return announce(`${product.name} is sold out`);
     setCart((current) => {
-      const next = Math.max(0, (current[id] ?? 0) + delta);
+      const next = Math.max(0, (current[cartKey] ?? 0) + delta);
       const updated = { ...current };
-      if (next === 0) delete updated[id]; else updated[id] = next;
+      if (next === 0) delete updated[cartKey]; else updated[cartKey] = next;
       return updated;
     });
-    if ((cart[id] ?? 0) + delta <= 0) {
+    if ((cart[cartKey] ?? 0) + delta <= 0) {
       setCartVariants((current) => {
         const updated = { ...current };
-        delete updated[id];
+        delete updated[cartKey];
         return updated;
       });
     }
@@ -593,7 +599,7 @@ export default function Home() {
       email: checkoutForm.email.trim(),
       address: checkoutForm.address.trim(),
       ...(appliedCoupon ? { coupon: appliedCoupon.code } : {}),
-      items: cartItems.map((product) => ({ name: `${product.name}${cartVariants[product.id]?.name ? ` · ${cartVariants[product.id]?.name}` : ""}`, quantity: cart[product.id] ?? 0, price: formatINR(product.price) })),
+      items: cartItems.map((product) => ({ name: `${product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}`, quantity: product.quantity, price: formatINR(product.price) })),
     };
     let previousOrders: unknown[] = [];
     try {
@@ -761,7 +767,7 @@ export default function Home() {
 
       {ordersOpen && <div className="drawer-backdrop" onClick={() => setOrdersOpen(false)}><aside className="orders-drawer" role="dialog" aria-modal="true" aria-labelledby="orders-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR FANZZY ACCOUNT</p><h2 id="orders-title">My orders</h2></div><button aria-label="Close orders" onClick={() => setOrdersOpen(false)}>×</button></div><div className="orders-intro"><p>Track your pieces, check delivery progress, and revisit every order in one place.</p><label>WhatsApp number used at checkout<input type="tel" value={orderLookupPhone} onChange={(event) => setOrderLookupPhone(event.target.value)} placeholder="+91 98765 43210" aria-label="WhatsApp number used at checkout" /></label></div>{visibleOrders.length ? <div className="customer-order-list">{visibleOrders.map((order) => <article className="customer-order-card" key={order.id}><div className="customer-order-head"><div><strong>{order.id}</strong><small>{formatOrderDate(order.date)} · {order.customerName}</small></div><span className={`customer-order-status ${order.status.toLowerCase()}`}>{order.status}</span></div>{order.items?.length ? <div className="customer-order-items">{order.items.map((item) => <div key={`${order.id}-${item.name}`}><span>{item.name} <b>× {item.quantity}</b></span><small>{item.price}</small></div>)}</div> : <p className="customer-order-items legacy-order">Order details are available in your confirmation.</p>}<div className="customer-order-total"><span>Total paid</span><strong>{order.total}</strong></div><button className="module-secondary customer-bill-button" onClick={() => downloadBill(order)}>Download bill ↗</button></article>)}</div> : <div className="orders-empty"><div>✦</div><h3>No orders found yet.</h3><p>Enter the WhatsApp number used at checkout, or start with a piece from the collection.</p><button className="button button-dark" onClick={() => { setOrdersOpen(false); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}>Shop the collection <span>↗</span></button></div>}</aside></div>}
 
-      {cartOpen && <div className="drawer-backdrop" onClick={() => setCartOpen(false)}><aside className="cart-drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR CART</p><h2>{cartCount ? `${cartCount} piece${cartCount > 1 ? "s" : ""}` : "A little empty"}</h2></div><button onClick={() => setCartOpen(false)}>×</button></div>{cartItems.length ? <><div className="drawer-items">{cartItems.map((product) => <div className="drawer-item" key={product.id}><img src={cartVariants[product.id]?.image || product.image} alt="" /><div><strong>{product.name}</strong>{cartVariants[product.id]?.name && <small className="cart-variant-name">{cartVariants[product.id]?.name}</small>}<small>{formatINR(product.price)}</small><div className="quantity"><button onClick={() => updateQuantity(product.id, -1)}>−</button><span>{cart[product.id]}</span><button onClick={() => updateQuantity(product.id, 1)}>+</button></div></div><b>{formatINR(product.price * (cart[product.id] ?? 0))}</b></div>)}</div><div className="drawer-footer"><div><span>Subtotal</span><strong>{formatINR(subtotal)}</strong></div>{bogoDiscount > 0 && <div className="offer-total"><span>Buy 1 Get 1 discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="offer-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div><span>Delivery</span><strong>{deliveryCharge.enabled ? formatINR(deliveryTotal) : "Free"}</strong></div><div className="drawer-total"><span>Total</span><strong>{formatINR(orderTotal)}</strong></div><p>{bogoDiscount > 0 ? "Buy 1 Get 1 applied to eligible products." : deliveryCharge.enabled ? "Delivery charge applied to this order." : "Complimentary shipping above ₹999."}</p><button className="button button-dark full-width" onClick={openCheckout}>Proceed to buy <span>↗</span></button></div></> : <div className="empty-bag"><div>✦</div><p>Your future favourites<br />belong here.</p><button className="text-link" onClick={() => setCartOpen(false)}>Continue shopping <span>↗</span></button></div>}</aside></div>}
+      {cartOpen && <div className="drawer-backdrop" onClick={() => setCartOpen(false)}><aside className="cart-drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR CART</p><h2>{cartCount ? `${cartCount} piece${cartCount > 1 ? "s" : ""}` : "A little empty"}</h2></div><button onClick={() => setCartOpen(false)}>×</button></div>{cartItems.length ? <><div className="drawer-items">{cartItems.map((product) => <div className="drawer-item" key={product.cartKey}><img src={product.variant?.image || product.image} alt="" /><div><strong>{product.name}</strong>{product.variant?.name && <small className="cart-variant-name">{product.variant.name}</small>}<small>{formatINR(product.price)}</small><div className="quantity"><button onClick={() => updateQuantity(product.cartKey, -1)}>−</button><span>{product.quantity}</span><button onClick={() => updateQuantity(product.cartKey, 1)}>+</button></div></div><b>{formatINR(product.price * product.quantity)}</b></div>)}</div><div className="drawer-footer"><div><span>Subtotal</span><strong>{formatINR(subtotal)}</strong></div>{bogoDiscount > 0 && <div className="offer-total"><span>Buy 1 Get 1 discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="offer-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div><span>Delivery</span><strong>{deliveryCharge.enabled ? formatINR(deliveryTotal) : "Free"}</strong></div><div className="drawer-total"><span>Total</span><strong>{formatINR(orderTotal)}</strong></div><p>{bogoDiscount > 0 ? "Buy 1 Get 1 applied to eligible products." : deliveryCharge.enabled ? "Delivery charge applied to this order." : "Complimentary shipping above ₹999."}</p><button className="button button-dark full-width" onClick={openCheckout}>Proceed to buy <span>↗</span></button></div></> : <div className="empty-bag"><div>✦</div><p>Your future favourites<br />belong here.</p><button className="text-link" onClick={() => setCartOpen(false)}>Continue shopping <span>↗</span></button></div>}</aside></div>}
 
       {checkoutOpen && <div className="drawer-backdrop checkout-backdrop" onClick={() => setCheckoutOpen(false)}><section className="checkout-modal" role="dialog" aria-modal="true" aria-labelledby="checkout-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">CHECKOUT</p><h2 id="checkout-title">Complete your order</h2></div><button aria-label="Close checkout" onClick={() => setCheckoutOpen(false)}>×</button></div><p className="checkout-intro">We’ll use your WhatsApp number to confirm your order and delivery updates.</p><div className="checkout-grid"><label>Customer name<input value={checkoutForm.name} onChange={(event) => setCheckoutForm((current) => ({ ...current, name: event.target.value }))} placeholder="Your full name" required /></label><label>WhatsApp number <span className="required-mark">Required</span><input type="tel" value={checkoutForm.phone} onChange={(event) => setCheckoutForm((current) => ({ ...current, phone: event.target.value }))} placeholder="+91 98765 43210" required /></label><label>Email address <span className="optional-mark">Optional</span><input type="email" value={checkoutForm.email} onChange={(event) => setCheckoutForm((current) => ({ ...current, email: event.target.value }))} placeholder="you@example.com" /></label><label className="checkout-wide">Delivery address<input value={checkoutForm.address} onChange={(event) => setCheckoutForm((current) => ({ ...current, address: event.target.value }))} placeholder="House number, street, city, pincode" required /></label><div className="checkout-coupon checkout-wide"><label htmlFor="checkout-coupon-code">Coupon code <span className="optional-mark">Optional</span></label><div className="coupon-entry"><input id="checkout-coupon-code" value={couponInput} onChange={(event) => { setCouponInput(event.target.value.toUpperCase()); setAppliedCoupon(null); }} placeholder="Enter coupon code" autoCapitalize="characters" /><button className="button button-light" type="button" onClick={applyCoupon}>Apply</button></div>{appliedCoupon && <p className="coupon-success">{appliedCoupon.code} applied · {appliedCoupon.discount} off</p>}</div></div>{bogoDiscount > 0 && <div className="checkout-total coupon-total"><span>Buy 1 Get 1 discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="checkout-total coupon-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div className="checkout-total"><span>Order total</span><strong>{formatINR(orderTotal)}</strong></div><div className="checkout-actions"><button className="button button-dark" onClick={submitCheckout}>Place order <span>↗</span></button><button className="save-text" onClick={() => setCheckoutOpen(false)}>Back to cart</button></div></section></div>}
 
