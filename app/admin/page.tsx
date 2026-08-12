@@ -50,6 +50,8 @@ type MarketingRecord = {
   status: MarketingStatus;
   code?: string;
   discount?: string;
+  offerType?: "bogo";
+  eligibleProductIds?: string[];
 };
 type DateRange = "this-month" | "last-month" | "all-time" | "custom";
 type ProductFilter = "all" | "low-stock" | "drafts";
@@ -1141,7 +1143,7 @@ function ReportsWorkspace({
       const remote = await fetchCatalogProducts();
       if (!active) return;
       let next =
-        !remote.error && remote.data?.length
+        !remote.error && remote.data !== null
           ? remote.data.filter((product) => !isDemoProduct(product)).map((product) => ({
               name: product.name,
               sku: product.sku,
@@ -1154,19 +1156,6 @@ function ReportsWorkspace({
               hoverImage: product.hoverImage || product.image || adminPlaceholderImage,
             }))
           : adminProducts;
-      const stored = window.localStorage.getItem("fanzzy-products");
-      if (stored) {
-        try {
-          const parsed = JSON.parse(stored) as AdminProduct[];
-          if (Array.isArray(parsed)) {
-            const merged = new Map(next.map((product) => [product.sku, product]));
-            parsed.filter((product) => product?.name && product?.sku && !isDemoProduct(product)).forEach((product) => merged.set(product.sku, product));
-            next = Array.from(merged.values());
-          }
-        } catch {
-          window.localStorage.removeItem("fanzzy-products");
-        }
-      }
       setProducts(next);
     };
     syncOrders();
@@ -2225,6 +2214,7 @@ function MarketingWorkspace({
 }: {
   onNotify: (message: string) => void;
 }) {
+  type MarketingProductOption = { id: string; name: string; category: string };
   const [records, setRecords] = useState<MarketingRecord[]>(
     defaultMarketingRecords,
   );
@@ -2238,7 +2228,10 @@ function MarketingWorkspace({
     status: "Draft" as MarketingStatus,
     code: "",
     discount: "",
+    offerType: "" as "" | "bogo",
+    eligibleProductIds: [] as string[],
   });
+  const [productOptions, setProductOptions] = useState<MarketingProductOption[]>([]);
 
   useEffect(() => {
     let active = true;
@@ -2261,6 +2254,45 @@ function MarketingWorkspace({
       }
     };
     void loadRecords();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const loadProductOptions = async () => {
+      const remote = await fetchCatalogProducts();
+      const remoteOptions = !remote.error && remote.data
+        ? remote.data
+            .filter((product) => !isDemoProduct(product))
+            .map((product) => ({
+              id: product.sku.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+              name: product.name,
+              category: product.category,
+            }))
+        : [];
+      const localOptions: MarketingProductOption[] = [];
+      const stored = window.localStorage.getItem("fanzzy-products");
+      if (stored) {
+        try {
+          const parsed = JSON.parse(stored) as Array<{ id?: string; sku?: string; name?: string; category?: string }>;
+          if (Array.isArray(parsed)) {
+            parsed.forEach((product) => {
+              if (!product.name || isDemoProduct(product)) return;
+              const id = String(product.id || product.sku || product.name).toLowerCase().replace(/[^a-z0-9]+/g, "-");
+              localOptions.push({ id, name: product.name, category: product.category || "Uncategorised" });
+            });
+          }
+        } catch {
+          // Ignore malformed local catalog data.
+        }
+      }
+      if (active) {
+        setProductOptions(remote.data !== null && !remote.error ? remoteOptions : localOptions);
+      }
+    };
+    void loadProductOptions();
     return () => {
       active = false;
     };
@@ -2294,6 +2326,8 @@ function MarketingWorkspace({
       status: kind === "Campaign" ? "Scheduled" : "Active",
       code: "",
       discount: kind === "Coupon" ? "10% off" : "",
+      offerType: "",
+      eligibleProductIds: [],
     });
     setFormOpen(true);
   };
@@ -2308,6 +2342,8 @@ function MarketingWorkspace({
       status: record.status,
       code: record.code ?? "",
       discount: record.discount ?? "",
+      offerType: record.offerType ?? "",
+      eligibleProductIds: record.eligibleProductIds ?? [],
     });
     setFormOpen(true);
   };
@@ -2334,6 +2370,10 @@ function MarketingWorkspace({
       status: form.status,
       ...(form.code.trim() ? { code: form.code.trim().toUpperCase() } : {}),
       ...(form.discount.trim() ? { discount: form.discount.trim() } : {}),
+      ...(form.offerType ? { offerType: form.offerType } : {}),
+      ...(form.offerType === "bogo" && form.eligibleProductIds.length
+        ? { eligibleProductIds: form.eligibleProductIds }
+        : {}),
     };
     const next = editingId
       ? records.map((item) => (item.id === editingId ? record : item))
@@ -2579,6 +2619,48 @@ function MarketingWorkspace({
                   placeholder="e.g. 15% off"
                 />
               </label>
+              {form.kind === "Campaign" && (
+                <label>
+                  Offer type
+                  <select
+                    value={form.offerType}
+                    onChange={(event) =>
+                      setForm((current) => ({
+                        ...current,
+                        offerType: event.target.value as "" | "bogo",
+                        discount: event.target.value === "bogo" && !current.discount ? "Buy one, get one free" : current.discount,
+                      }))
+                    }
+                  >
+                    <option value="">Standard promotion</option>
+                    <option value="bogo">Buy 1 Get 1</option>
+                  </select>
+                </label>
+              )}
+              {form.kind === "Campaign" && form.offerType === "bogo" && (
+                <div className="marketing-eligible-products marketing-form-wide">
+                  <span>Eligible products <small>Leave all unchecked to include every product.</small></span>
+                  <div className="eligible-product-list">
+                    {productOptions.length ? productOptions.map((product) => (
+                      <label key={product.id}>
+                        <input
+                          type="checkbox"
+                          checked={form.eligibleProductIds.includes(product.id)}
+                          onChange={(event) =>
+                            setForm((current) => ({
+                              ...current,
+                              eligibleProductIds: event.target.checked
+                                ? [...current.eligibleProductIds, product.id]
+                                : current.eligibleProductIds.filter((id) => id !== product.id),
+                            }))
+                          }
+                        />
+                        <span>{product.name}<small>{product.category}</small></span>
+                      </label>
+                    )) : <p className="variant-empty">Add products first to target specific items.</p>}
+                  </div>
+                </div>
+              )}
               <label className="marketing-form-wide">
                 Description
                 <input
@@ -3795,7 +3877,7 @@ function ProductLibraryWorkspace({
           variantsMap = {};
         }
       }
-      if (active && !remote.error && remote.data && remote.data.length) {
+      if (active && !remote.error && remote.data !== null) {
         const mapped: AdminProduct[] = remote.data.filter((product) => !isDemoProduct(product)).map((product) => ({
           name: product.name,
           price: `₹${product.price.toLocaleString("en-IN")}`,
@@ -3813,101 +3895,11 @@ function ProductLibraryWorkspace({
           costWithGst: calculatePricing(`₹${product.cost.toLocaleString("en-IN")}`, String(pricingMap[product.sku]?.gstRate || 0), String(pricingMap[product.sku]?.markup || 0)).costWithGst,
           variants: variantsMap[product.sku] || [],
         }));
-        let localProducts: AdminProduct[] = [];
-        const stored = window.localStorage.getItem("fanzzy-products");
-        if (stored) {
-          try {
-            const parsed = JSON.parse(stored) as Array<
-              Omit<Partial<AdminProduct>, "price" | "cost"> & {
-                price?: number | string;
-                cost?: number | string;
-              }
-            >;
-            if (Array.isArray(parsed)) {
-              localProducts = parsed
-                .filter(
-                  (product) =>
-                    typeof product.name === "string" && product.name.trim() && !isDemoProduct(product),
-                )
-                .map((product, index) => {
-                  const rawPrice = product.price;
-                  const rawCost = product.cost;
-                  return {
-                    name: product.name!.trim(),
-                    price:
-                      typeof rawPrice === "number"
-                        ? `₹${rawPrice.toLocaleString("en-IN")}`
-                        : rawPrice || "₹0",
-                    cost:
-                      typeof rawCost === "number"
-                        ? `₹${rawCost.toLocaleString("en-IN")}`
-                        : rawCost || "₹0",
-                    sku:
-                      product.sku ||
-                      `FZ-LOCAL-${String(index + 1).padStart(2, "0")}`,
-                    category: product.category || "Uncategorised",
-                    stock: product.stock ?? 0,
-                    status: product.status ?? "Published",
-                    image: product.image || adminPlaceholderImage,
-                    hoverImage:
-                      product.hoverImage ||
-                      product.image ||
-                      adminPlaceholderImage,
-                    barcode: product.barcode || barcodeMap[product.sku] || "",
-                    gstRate: product.gstRate ?? pricingMap[product.sku]?.gstRate ?? 0,
-                    markup: product.markup ?? pricingMap[product.sku]?.markup ?? 0,
-                    costWithGst: product.costWithGst || calculatePricing(String(rawCost ?? "₹0"), String(product.gstRate ?? pricingMap[product.sku]?.gstRate ?? 0), String(product.markup ?? pricingMap[product.sku]?.markup ?? 0)).costWithGst,
-                    variants: product.variants || variantsMap[product.sku] || [],
-                  };
-                });
-            }
-          } catch {
-            window.localStorage.removeItem("fanzzy-products");
-          }
-        }
-        const syncedLocalProducts = isSupabaseReady
-          ? await Promise.all(
-              localProducts.map(async (product) => {
-                let syncedProduct = product;
-                try {
-                  if (
-                    product.image.startsWith("data:image/") ||
-                    product.image.startsWith("blob:")
-                  ) {
-                    const upload = await uploadStoreImage(
-                      await localImageToFile(product.image, `${product.sku}-image.webp`),
-                      "products",
-                    );
-                    if (upload.url && !upload.error)
-                      syncedProduct = { ...syncedProduct, image: upload.url };
-                  }
-                  if (
-                    syncedProduct.hoverImage?.startsWith("data:image/") ||
-                    syncedProduct.hoverImage?.startsWith("blob:")
-                  ) {
-                    const upload = await uploadStoreImage(
-                      await localImageToFile(
-                        syncedProduct.hoverImage,
-                        `${syncedProduct.sku}-hover.webp`,
-                      ),
-                      "products",
-                    );
-                    if (upload.url && !upload.error)
-                      syncedProduct = { ...syncedProduct, hoverImage: upload.url };
-                  }
-                  await saveCatalogProduct(toCatalogProduct(syncedProduct));
-                } catch {
-                  // Keep the local product visible if an old image cannot be repaired.
-                }
-                return syncedProduct;
-              }),
-            )
-          : localProducts;
-        const merged = new Map(mapped.map((product) => [product.sku, product]));
-        syncedLocalProducts.forEach((product) => merged.set(product.sku, product));
-        const nextProducts = Array.from(merged.values());
-        setProducts(nextProducts);
-        persistCatalog(nextProducts);
+        // Supabase is the shared catalog. Never merge stale local records back
+        // into it, otherwise a product deleted on one device can be resurrected
+        // by an older localStorage snapshot on another device.
+        setProducts(mapped);
+        persistCatalog(mapped);
         return;
       }
       const stored = window.localStorage.getItem("fanzzy-products");
