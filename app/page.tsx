@@ -209,9 +209,15 @@ export default function Home() {
           compareAt: product.compareAt,
           variants: variantsMap[product.sku] || product.variants,
         }, index)).filter((product): product is Product => product !== null);
+        const remoteWithLocalVariants = remoteProducts.map((product) => ({
+          ...product,
+          variants: product.variants?.length
+            ? product.variants
+            : localProducts.find((localProduct) => localProduct.id === product.id)?.variants || [],
+        }));
         // Supabase is the shared catalog. Local storage is only a fallback for
         // devices that are offline or when Supabase has not been configured.
-        setProducts(remoteProducts);
+        setProducts(remoteWithLocalVariants);
         return;
       }
       if (localProducts.length) setProducts(localProducts);

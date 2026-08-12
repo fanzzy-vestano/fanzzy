@@ -3877,6 +3877,20 @@ function ProductLibraryWorkspace({
           variantsMap = {};
         }
       }
+      const localVariantsMap: Record<string, ProductVariant[]> = {};
+      const storedCatalog = window.localStorage.getItem("fanzzy-products");
+      if (storedCatalog) {
+        try {
+          const parsed = JSON.parse(storedCatalog) as Array<{ sku?: string; variants?: ProductVariant[] }>;
+          if (Array.isArray(parsed)) {
+            parsed.forEach((product) => {
+              if (product.sku && product.variants?.length) localVariantsMap[product.sku] = product.variants;
+            });
+          }
+        } catch {
+          // Ignore malformed local catalog data.
+        }
+      }
       if (active && !remote.error && remote.data !== null) {
         const mapped: AdminProduct[] = remote.data.filter((product) => !isDemoProduct(product)).map((product) => ({
           name: product.name,
@@ -3893,7 +3907,7 @@ function ProductLibraryWorkspace({
           gstRate: pricingMap[product.sku]?.gstRate || 0,
           markup: pricingMap[product.sku]?.markup || 0,
           costWithGst: calculatePricing(`₹${product.cost.toLocaleString("en-IN")}`, String(pricingMap[product.sku]?.gstRate || 0), String(pricingMap[product.sku]?.markup || 0)).costWithGst,
-          variants: variantsMap[product.sku] || [],
+          variants: variantsMap[product.sku] || localVariantsMap[product.sku] || [],
         }));
         // Supabase is the shared catalog. Never merge stale local records back
         // into it, otherwise a product deleted on one device can be resurrected
