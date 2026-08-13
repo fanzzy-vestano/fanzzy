@@ -263,6 +263,7 @@ export default function Home() {
   const [appliedCoupon, setAppliedCoupon] = useState<MarketingRecord | null>(null);
   const [marketingRecords, setMarketingRecords] = useState<MarketingRecord[]>([]);
   const [quickProduct, setQuickProduct] = useState<Product | null>(null);
+  const quickViewHistoryEntry = useRef(false);
   const [zoomedImage, setZoomedImage] = useState<{ src: string; alt: string; adjustments?: ImageAdjustments } | null>(null);
   const [selectedVariant, setSelectedVariant] = useState<ProductVariant | null>(null);
   const [toast, setToast] = useState("");
@@ -400,6 +401,26 @@ export default function Home() {
   useEffect(() => {
     setSelectedVariant(quickProduct?.variants?.[0] ?? null);
   }, [quickProduct]);
+
+  useEffect(() => {
+    if (!quickProduct) return;
+    // A same-page history entry lets the phone's Back button close only this
+    // quick view, retaining the customer's scroll position in the product grid.
+    window.history.pushState({ ...window.history.state, fanzzyQuickView: true }, "", window.location.href);
+    quickViewHistoryEntry.current = true;
+    const closeFromBackButton = () => {
+      quickViewHistoryEntry.current = false;
+      setQuickProduct(null);
+    };
+    window.addEventListener("popstate", closeFromBackButton);
+    return () => {
+      window.removeEventListener("popstate", closeFromBackButton);
+      if (quickViewHistoryEntry.current) {
+        quickViewHistoryEntry.current = false;
+        window.history.back();
+      }
+    };
+  }, [quickProduct?.id]);
 
   useEffect(() => {
     let active = true;
