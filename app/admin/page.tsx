@@ -4753,7 +4753,7 @@ function ProductLibraryWorkspace({
               <div className="variant-editor-heading">
                 <div>
                   <p className="eyebrow">COLOUR / SERIES / MODEL VARIANTS</p>
-                  <small>Add a separate customer-selectable image for each variant.</small>
+                  <small>Add a separate customer-selectable image for each variant. Drag its preview to adjust the position.</small>
                 </div>
                 <button
                   className="module-secondary variant-add"
@@ -5042,7 +5042,7 @@ function ProductLibraryWorkspace({
             <div className="variant-editor-heading">
               <div>
                 <p className="eyebrow">COLOUR / SERIES / MODEL VARIANTS</p>
-                <small>Add a separate customer-selectable image for each variant.</small>
+                <small>Add a separate customer-selectable image for each variant. Drag its preview to adjust the position.</small>
               </div>
               <button
                 className="module-secondary variant-add"
