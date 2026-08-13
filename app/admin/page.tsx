@@ -169,8 +169,8 @@ function ImageAdjustmentPreview({
         if (!start || start.pointerId !== event.pointerId) return;
         onChange({
           ...adjustments,
-          x: Math.min(50, Math.max(-50, start.x + (event.clientX - start.startX) / 2)),
-          y: Math.min(50, Math.max(-50, start.y + (event.clientY - start.startY) / 2)),
+          x: Math.min(50, Math.max(-50, start.x + (event.clientX - start.startX))),
+          y: Math.min(50, Math.max(-50, start.y + (event.clientY - start.startY))),
         });
       }}
       onPointerUp={() => { drag.current = null; }}
