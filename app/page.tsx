@@ -48,9 +48,31 @@ type CustomerOrder = {
   email?: string;
   address?: string;
   coupon?: string;
+  paymentStatus?: "paid";
+  razorpayOrderId?: string;
+  razorpayPaymentId?: string;
   items?: Array<{ name: string; quantity: number; price: string }>;
 };
 type AssistantMessage = { role: "user" | "assistant"; text: string; productIds?: string[] };
+type RazorpayCheckoutResponse = {
+  razorpay_order_id: string;
+  razorpay_payment_id: string;
+  razorpay_signature: string;
+};
+type RazorpayCheckoutOptions = {
+  key: string;
+  amount: number;
+  currency: string;
+  name: string;
+  description: string;
+  order_id: string;
+  prefill: { name: string; contact: string; email?: string };
+  notes: { address: string };
+  theme: { color: string };
+  handler: (response: RazorpayCheckoutResponse) => void;
+  modal: { ondismiss: () => void };
+};
+type RazorpayCheckout = { open: () => void };
 
 const defaultProducts: Product[] = [];
 const defaultCategories: Array<{ name: string; count: string; image: string }> = [];
@@ -66,6 +88,20 @@ const isDemoProduct = (product: { name?: string; sku?: string }) =>
 const isDemoOrder = (order: { id?: string }) => /^#FZ-104[4-8]$/.test(String(order.id ?? ""));
 
 const formatINR = (value: number) => `₹${(Number.isFinite(value) ? value : 0).toLocaleString("en-IN")}`;
+const loadRazorpayCheckout = () => new Promise<new (options: RazorpayCheckoutOptions) => RazorpayCheckout>((resolve, reject) => {
+  const existing = (window as Window & { Razorpay?: new (options: RazorpayCheckoutOptions) => RazorpayCheckout }).Razorpay;
+  if (existing) return resolve(existing);
+  const script = document.createElement("script");
+  script.src = "https://checkout.razorpay.com/v1/checkout.js";
+  script.async = true;
+  script.onload = () => {
+    const razorpay = (window as Window & { Razorpay?: new (options: RazorpayCheckoutOptions) => RazorpayCheckout }).Razorpay;
+    if (razorpay) resolve(razorpay);
+    else reject(new Error("Razorpay checkout did not load"));
+  };
+  script.onerror = () => reject(new Error("Razorpay checkout could not load"));
+  document.body.appendChild(script);
+});
 const blockedHeroImage = "photo-1599643478518-a784e5dc4c8f";
 const initialHeroSlides: string[] = [];
 const defaultHeroSlideDuration = 5.2;
@@ -213,6 +249,7 @@ export default function Home() {
     { role: "assistant", text: "Hi, I’m Fanzzy Assistant. I can help you find a piece, choose a gift, check an order, or answer care questions." },
   ]);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
+  const [isPaying, setIsPaying] = useState(false);
   const [authOpen, setAuthOpen] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
   const [authMessage, setAuthMessage] = useState("");
@@ -715,17 +752,24 @@ export default function Home() {
     setAuthOpen(false);
     setAuthMessage("");
   };
+  const continueAsGuest = () => {
+    window.localStorage.removeItem(checkoutAfterAuthKey);
+    setAuthLoading(false);
+    setAuthMessage("");
+    setAuthOpen(false);
+    setCartOpen(false);
+    setCheckoutOpen(true);
+  };
   const continueWithGoogle = async () => {
     if (!supabase) {
-      setAuthMessage("Google sign-in is not available right now. Please try again later.");
+      continueAsGuest();
       return;
     }
     setAuthLoading(true);
     setAuthMessage("");
     const googleEnabled = await isGoogleProviderEnabled();
     if (googleEnabled === false) {
-      setAuthLoading(false);
-      setAuthMessage("Google sign-in is not enabled for this store yet. Please enable Google under Supabase → Authentication → Providers.");
+      continueAsGuest();
       return;
     }
     const redirectTo = `${window.location.origin}${siteBasePath}/`;
@@ -738,10 +782,15 @@ export default function Home() {
       setAuthMessage("Google sign-in could not start. Please try again.");
     }
   };
-  const openCheckout = () => {
+  const openCheckout = async () => {
     if (!cartItems.length) return announce("Add a piece to your cart first");
     if (cartItems.some((product) => product.stock <= 0)) return announce("Remove sold out items before checkout");
     if (!authUser) {
+      const googleEnabled = await isGoogleProviderEnabled();
+      if (googleEnabled === false || !supabase) {
+        continueAsGuest();
+        return;
+      }
       window.localStorage.setItem(checkoutAfterAuthKey, "1");
       setCartOpen(false);
       setAuthMessage("");
@@ -765,26 +814,7 @@ export default function Home() {
     setCouponInput(code);
     announce(`${code} applied`);
   };
-  const submitCheckout = async () => {
-    if (cartItems.some((product) => product.stock <= 0)) return announce("Remove sold out items before placing the order");
-    const name = checkoutForm.name.trim();
-    const digits = checkoutForm.phone.replace(/\D/g, "");
-    if (!name) return announce("Customer name is required");
-    if (digits.length < 10) return announce("A valid WhatsApp number is mandatory");
-    if (!checkoutForm.address.trim()) return announce("Delivery address is required");
-    const orderId = `#FZ-${String(Date.now()).slice(-6)}`;
-    const newOrder: CustomerOrder = {
-      id: orderId,
-      date: new Date().toISOString().slice(0, 10),
-      status: "Processing",
-      total: formatINR(orderTotal),
-      customerName: name,
-      phone: checkoutForm.phone.trim(),
-      email: checkoutForm.email.trim(),
-      address: checkoutForm.address.trim(),
-      ...(appliedCoupon ? { coupon: appliedCoupon.code } : {}),
-      items: cartItems.map((product) => ({ name: `${product.billName || product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}`, quantity: product.quantity, price: formatINR(product.price) })),
-    };
+  const persistPaidOrder = async (newOrder: CustomerOrder) => {
     let previousOrders: unknown[] = [];
     try {
       const stored = window.localStorage.getItem("fanzzy-orders");
@@ -804,7 +834,7 @@ export default function Home() {
     const nextOrders = [newOrder, ...Array.from(merged.values()).filter((order) => order.id !== newOrder.id)];
     await saveStoreOrders(nextOrders);
     window.localStorage.setItem("fanzzy-orders", JSON.stringify(nextOrders));
-    window.localStorage.setItem("fanzzy-customer-phone", checkoutForm.phone.trim());
+    window.localStorage.setItem("fanzzy-customer-phone", newOrder.phone);
     window.dispatchEvent(new Event("fanzzy-orders-updated"));
     setOrderConfirmation(newOrder);
     setCart({});
@@ -813,7 +843,81 @@ export default function Home() {
     setCheckoutForm({ name: "", phone: "", email: "", address: "" });
     setCouponInput("");
     setAppliedCoupon(null);
-    announce(`${orderId} placed successfully`);
+    setIsPaying(false);
+    announce(`${newOrder.id} placed successfully`);
+  };
+  const submitCheckout = async () => {
+    if (isPaying) return;
+    if (cartItems.some((product) => product.stock <= 0)) return announce("Remove sold out items before placing the order");
+    const name = checkoutForm.name.trim();
+    const digits = checkoutForm.phone.replace(/\D/g, "");
+    if (!name) return announce("Customer name is required");
+    if (digits.length < 10) return announce("A valid WhatsApp number is mandatory");
+    if (!checkoutForm.address.trim()) return announce("Delivery address is required");
+
+    const orderToken = globalThis.crypto?.randomUUID?.().replace(/-/g, "").slice(-6).toUpperCase() || "000000";
+    const orderId = `#FZ-${orderToken}`;
+    const pendingOrder: CustomerOrder = {
+      id: orderId,
+      date: new Date().toISOString().slice(0, 10),
+      status: "Processing",
+      total: formatINR(orderTotal),
+      customerName: name,
+      phone: checkoutForm.phone.trim(),
+      email: checkoutForm.email.trim(),
+      address: checkoutForm.address.trim(),
+      ...(appliedCoupon ? { coupon: appliedCoupon.code } : {}),
+      items: cartItems.map((product) => ({ name: `${product.billName || product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}`, quantity: product.quantity, price: formatINR(product.price) })),
+    };
+
+    setIsPaying(true);
+    try {
+      const orderResponse = await fetch("/api/razorpay/order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ amount: Math.round(orderTotal * 100), receipt: orderId.replace("#", "") }),
+      });
+      const razorpayOrder = await orderResponse.json() as { id?: string; amount?: number; currency?: string; keyId?: string; error?: string };
+      if (!orderResponse.ok || !razorpayOrder.id || !razorpayOrder.keyId) throw new Error(razorpayOrder.error || "Razorpay order creation failed");
+      const Razorpay = await loadRazorpayCheckout();
+      const checkout = new Razorpay({
+        key: razorpayOrder.keyId,
+        amount: razorpayOrder.amount || Math.round(orderTotal * 100),
+        currency: razorpayOrder.currency || "INR",
+        name: "Fanzzy",
+        description: `Fanzzy order ${orderId}`,
+        order_id: razorpayOrder.id,
+        prefill: { name, contact: checkoutForm.phone.trim(), ...(checkoutForm.email.trim() ? { email: checkoutForm.email.trim() } : {}) },
+        notes: { address: checkoutForm.address.trim() },
+        theme: { color: "#4b1c2b" },
+        handler: (payment) => {
+          void (async () => {
+            try {
+              const verifyResponse = await fetch("/api/razorpay/verify", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  razorpayOrderId: payment.razorpay_order_id,
+                  razorpayPaymentId: payment.razorpay_payment_id,
+                  razorpaySignature: payment.razorpay_signature,
+                }),
+              });
+              const verification = await verifyResponse.json() as { verified?: boolean; error?: string };
+              if (!verifyResponse.ok || !verification.verified) throw new Error(verification.error || "Payment verification failed");
+              await persistPaidOrder({ ...pendingOrder, paymentStatus: "paid", razorpayOrderId: payment.razorpay_order_id, razorpayPaymentId: payment.razorpay_payment_id });
+            } catch (error) {
+              setIsPaying(false);
+              announce(error instanceof Error ? error.message : "Payment could not be verified");
+            }
+          })();
+        },
+        modal: { ondismiss: () => setIsPaying(false) },
+      });
+      checkout.open();
+    } catch (error) {
+      setIsPaying(false);
+      announce(error instanceof Error ? error.message : "Online payment could not start");
+    }
   };
   const downloadBill = (order: CustomerOrder) => {
     if (!printOrderBill(order)) announce("Allow pop-ups to download your bill");
@@ -954,7 +1058,7 @@ export default function Home() {
 
       {cartOpen && <div className="drawer-backdrop" onClick={() => setCartOpen(false)}><aside className="cart-drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR CART</p><h2>{cartCount ? `${cartCount} piece${cartCount > 1 ? "s" : ""}` : "A little empty"}</h2></div><button onClick={() => setCartOpen(false)}>×</button></div>{cartItems.length ? <><div className="drawer-items">{cartItems.map((product) => <div className="drawer-item" key={product.cartKey}><img src={product.variant?.image || product.image} alt="" style={imageAdjustmentStyle(product.variant?.adjustments || product.imageAdjustments)} /><div><strong>{product.name}</strong>{product.variant?.name && <small className="cart-variant-name">{product.variant.name}</small>}<small>{formatINR(product.price)}</small><div className="quantity"><button onClick={() => updateQuantity(product.cartKey, -1)} aria-label={`Decrease ${product.name} quantity`}>−</button><span>{product.quantity}</span><button onClick={() => updateQuantity(product.cartKey, 1)} aria-label={`Increase ${product.name} quantity`}>+</button></div></div><div className="cart-item-actions"><b>{formatINR(product.price * product.quantity)}</b><button className="cart-remove" onClick={() => removeFromCart(product.cartKey)} aria-label={`Remove ${product.name} from cart`}>Remove</button></div></div>)}</div><div className="drawer-footer"><div><span>Subtotal</span><strong>{formatINR(subtotal)}</strong></div>{bogoDiscount > 0 && <div className="offer-total"><span>Buy 1 Get 1 discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="offer-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div><span>Delivery</span><strong>{deliveryCharge.enabled ? formatINR(deliveryTotal) : "Free"}</strong></div><div className="drawer-total"><span>Total</span><strong>{formatINR(orderTotal)}</strong></div><p>{bogoDiscount > 0 ? "Buy 1 Get 1 applied to eligible products." : deliveryCharge.enabled ? "Delivery charge applied to this order." : "Complimentary shipping above ₹999."}</p><button className="button button-dark full-width" onClick={openCheckout}>Proceed to buy <span>↗</span></button></div></> : <div className="empty-bag"><div>✦</div><p>Your future favourites<br />belong here.</p><button className="text-link" onClick={() => setCartOpen(false)}>Continue shopping <span>↗</span></button></div>}</aside></div>}
 
-      {authOpen && <div className="drawer-backdrop auth-backdrop" onClick={closeAuth}><section className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close sign in" onClick={closeAuth}>×</button><p className="eyebrow">SECURE CHECKOUT</p><h2 id="auth-title">Sign in to continue.</h2><p className="auth-intro">Use your Google account to continue securely. We never ask for or see your Google password.</p><button className="google-sign-in" onClick={continueWithGoogle} disabled={authLoading}><span className="google-mark" aria-hidden="true">G</span>{authLoading ? "Connecting to Google…" : "Continue with Google"}<span aria-hidden="true">↗</span></button>{authMessage && <p className="auth-message" role="alert">{authMessage}</p>}<p className="auth-note">You’ll return here automatically to finish your order.</p></section></div>}
+      {authOpen && <div className="drawer-backdrop auth-backdrop" onClick={closeAuth}><section className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close sign in" onClick={closeAuth}>×</button><p className="eyebrow">SECURE CHECKOUT</p><h2 id="auth-title">Continue to checkout.</h2><p className="auth-intro">Sign in with Google for a faster checkout, or continue as a guest. We never ask for or see your Google password.</p><button className="google-sign-in" onClick={continueWithGoogle} disabled={authLoading}><span className="google-mark" aria-hidden="true">G</span>{authLoading ? "Connecting to Google…" : "Continue with Google"}<span aria-hidden="true">↗</span></button><button className="guest-checkout" onClick={continueAsGuest} disabled={authLoading}>Continue as guest <span aria-hidden="true">↗</span></button>{authMessage && <p className="auth-message" role="alert">{authMessage}</p>}<p className="auth-note">You can place and track your order using your WhatsApp number.</p></section></div>}
 
       {checkoutOpen && <div className="drawer-backdrop checkout-backdrop" onClick={() => setCheckoutOpen(false)}><section className="checkout-modal" role="dialog" aria-modal="true" aria-labelledby="checkout-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">CHECKOUT</p><h2 id="checkout-title">Complete your order</h2></div><button aria-label="Close checkout" onClick={() => setCheckoutOpen(false)}>×</button></div><p className="checkout-intro">We’ll use your WhatsApp number to confirm your order and delivery updates.</p><div className="checkout-grid"><label>Customer name<input value={checkoutForm.name} onChange={(event) => setCheckoutForm((current) => ({ ...current, name: event.target.value }))} placeholder="Your full name" required /></label><label>WhatsApp number <span className="required-mark">Required</span><input type="tel" value={checkoutForm.phone} onChange={(event) => setCheckoutForm((current) => ({ ...current, phone: event.target.value }))} placeholder="+91 98765 43210" required /></label><label>Email address <span className="optional-mark">Optional</span><input type="email" value={checkoutForm.email} onChange={(event) => setCheckoutForm((current) => ({ ...current, email: event.target.value }))} placeholder="you@example.com" /></label><label className="checkout-wide">Delivery address<input value={checkoutForm.address} onChange={(event) => setCheckoutForm((current) => ({ ...current, address: event.target.value }))} placeholder="House number, street, city, pincode" required /></label><div className="checkout-coupon checkout-wide"><label htmlFor="checkout-coupon-code">Coupon code <span className="optional-mark">Optional</span></label><div className="coupon-entry"><input id="checkout-coupon-code" value={couponInput} onChange={(event) => { setCouponInput(event.target.value.toUpperCase()); setAppliedCoupon(null); }} placeholder="Enter coupon code" autoCapitalize="characters" /><button className="button button-light" type="button" onClick={applyCoupon}>Apply</button></div>{appliedCoupon && <p className="coupon-success">{appliedCoupon.code} applied · {appliedCoupon.discount} off</p>}</div></div>{bogoDiscount > 0 && <div className="checkout-total coupon-total"><span>Buy 1 Get 1 discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="checkout-total coupon-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div className="checkout-total"><span>Order total</span><strong>{formatINR(orderTotal)}</strong></div><div className="checkout-actions"><button className="button button-dark" onClick={submitCheckout}>Place order <span>↗</span></button><button className="save-text" onClick={() => setCheckoutOpen(false)}>Back to cart</button></div></section></div>}
 
