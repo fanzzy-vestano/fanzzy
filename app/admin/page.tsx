@@ -39,8 +39,16 @@ type AdminProduct = {
   markup?: number;
   costWithGst?: string;
   variants?: ProductVariant[];
+  imageAdjustments?: ImageAdjustments;
+  hoverImageAdjustments?: ImageAdjustments;
 };
-type ProductVariant = { name: string; image: string };
+type ImageAdjustments = { zoom: number; x: number; y: number; rotate: number };
+type ProductVariant = { name: string; image: string; adjustments?: ImageAdjustments };
+type ProductImageAdjustments = {
+  image?: ImageAdjustments;
+  hoverImage?: ImageAdjustments;
+  variants?: ImageAdjustments[];
+};
 type MarketingKind = "Campaign" | "Coupon" | "Newsletter";
 type MarketingStatus = "Active" | "Scheduled" | "Draft";
 type MarketingRecord = {
@@ -118,6 +126,41 @@ const defaultHeroSlideDuration = 5.2;
 const defaultDeliveryCharge = { enabled: false, amount: 99 };
 const formatAdminCurrency = (value: number) => `₹${Math.max(0, Math.round(value)).toLocaleString("en-IN")}`;
 const defaultMarketingRecords: MarketingRecord[] = [];
+const defaultImageAdjustments: ImageAdjustments = { zoom: 1, x: 0, y: 0, rotate: 0 };
+const normalizeImageAdjustments = (value: unknown): ImageAdjustments => {
+  const source = value && typeof value === "object" ? value as Partial<ImageAdjustments> : {};
+  const numberOr = (candidate: unknown, fallback: number) =>
+    typeof candidate === "number" && Number.isFinite(candidate) ? candidate : fallback;
+  return {
+    zoom: Math.min(2, Math.max(1, numberOr(source.zoom, 1))),
+    x: Math.min(50, Math.max(-50, numberOr(source.x, 0))),
+    y: Math.min(50, Math.max(-50, numberOr(source.y, 0))),
+    rotate: Math.min(180, Math.max(-180, numberOr(source.rotate, 0))),
+  };
+};
+const imageTransformStyle = (adjustments: ImageAdjustments) => ({
+  objectPosition: `${50 + adjustments.x / 2}% ${50 + adjustments.y / 2}%`,
+  transform: `scale(${adjustments.zoom}) rotate(${adjustments.rotate}deg)`,
+});
+function ImageAdjustmentControls({
+  adjustments,
+  onChange,
+}: {
+  adjustments: ImageAdjustments;
+  onChange: (next: ImageAdjustments) => void;
+}) {
+  const update = (field: keyof ImageAdjustments, value: string) =>
+    onChange({ ...adjustments, [field]: Number(value) });
+  return (
+    <div className="image-adjustment-controls">
+      <label>Zoom <input type="range" min="1" max="2" step="0.05" value={adjustments.zoom} onChange={(event) => update("zoom", event.target.value)} /></label>
+      <label>Horizontal <input type="range" min="-50" max="50" value={adjustments.x} onChange={(event) => update("x", event.target.value)} /></label>
+      <label>Vertical <input type="range" min="-50" max="50" value={adjustments.y} onChange={(event) => update("y", event.target.value)} /></label>
+      <label>Rotate <input type="range" min="-180" max="180" value={adjustments.rotate} onChange={(event) => update("rotate", event.target.value)} /></label>
+      <button type="button" onClick={() => onChange(defaultImageAdjustments)}>Reset</button>
+    </div>
+  );
+}
 type OrderStatus =
   | "Processing"
   | "Packed"
@@ -224,6 +267,8 @@ const persistCatalog = (catalog: AdminProduct[]) => {
     markup: product.markup || 0,
     costWithGst: product.costWithGst || product.cost,
     variants: product.variants || [],
+    imageAdjustments: product.imageAdjustments || defaultImageAdjustments,
+    hoverImageAdjustments: product.hoverImageAdjustments || defaultImageAdjustments,
     tag: product.status === "Draft" ? "Draft" : undefined,
     tone: tones[index % tones.length],
   }));
@@ -282,6 +327,8 @@ const toCatalogProduct = (product: AdminProduct) => ({
   image: product.image,
   hoverImage: product.hoverImage || product.image,
   variants: product.variants || [],
+  imageAdjustments: product.imageAdjustments || defaultImageAdjustments,
+  hoverImageAdjustments: product.hoverImageAdjustments || defaultImageAdjustments,
 });
 const saveProductBarcodes = async (catalog: AdminProduct[]) => {
   const barcodes = Object.fromEntries(
@@ -306,6 +353,18 @@ const saveProductVariants = async (catalog: AdminProduct[]) => {
       .map((product) => [product.sku, product.variants]),
   );
   await saveStoreSetting("productVariants", JSON.stringify(variants));
+};
+const saveProductImageAdjustments = async (catalog: AdminProduct[]) => {
+  const adjustments = Object.fromEntries(
+    catalog
+      .filter((product) => product.sku)
+      .map((product) => [product.sku, {
+        image: normalizeImageAdjustments(product.imageAdjustments),
+        hoverImage: normalizeImageAdjustments(product.hoverImageAdjustments),
+        variants: (product.variants || []).map((variant) => normalizeImageAdjustments(variant.adjustments)),
+      }]),
+  );
+  await saveStoreSetting("productImageAdjustments", JSON.stringify(adjustments));
 };
 const persistCategories = (
   categories: Array<{ name: string; pieces: number; image?: string }>,
@@ -3847,8 +3906,12 @@ function ProductLibraryWorkspace({
   const [newProductHoverFile, setNewProductHoverFile] = useState<File | null>(
     null,
   );
+  const [newImageAdjustments, setNewImageAdjustments] = useState<ImageAdjustments>(defaultImageAdjustments);
+  const [newHoverAdjustments, setNewHoverAdjustments] = useState<ImageAdjustments>(defaultImageAdjustments);
   const [editImageFile, setEditImageFile] = useState<File | null>(null);
   const [editHoverFile, setEditHoverFile] = useState<File | null>(null);
+  const [editImageAdjustments, setEditImageAdjustments] = useState<ImageAdjustments>(defaultImageAdjustments);
+  const [editHoverAdjustments, setEditHoverAdjustments] = useState<ImageAdjustments>(defaultImageAdjustments);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [newProduct, setNewProduct] = useState({
     name: "",
@@ -3870,9 +3933,11 @@ function ProductLibraryWorkspace({
       const barcodeRemote = await fetchStoreSetting("productBarcodes");
       const pricingRemote = await fetchStoreSetting("productPricing");
       const variantsRemote = await fetchStoreSetting("productVariants");
+      const imageAdjustmentsRemote = await fetchStoreSetting("productImageAdjustments");
       let barcodeMap: Record<string, string> = {};
       let pricingMap: Record<string, { gstRate?: number; markup?: number }> = {};
       let variantsMap: Record<string, ProductVariant[]> = {};
+      let imageAdjustmentsMap: Record<string, ProductImageAdjustments> = {};
       if (barcodeRemote.value) {
         try {
           const parsed = JSON.parse(barcodeRemote.value) as Record<string, unknown>;
@@ -3899,6 +3964,14 @@ function ProductLibraryWorkspace({
           if (parsed && typeof parsed === "object") variantsMap = parsed;
         } catch {
           variantsMap = {};
+        }
+      }
+      if (imageAdjustmentsRemote.value) {
+        try {
+          const parsed = JSON.parse(imageAdjustmentsRemote.value) as Record<string, ProductImageAdjustments>;
+          if (parsed && typeof parsed === "object") imageAdjustmentsMap = parsed;
+        } catch {
+          imageAdjustmentsMap = {};
         }
       }
       const localVariantsMap: Record<string, ProductVariant[]> = {};
@@ -3929,7 +4002,10 @@ function ProductLibraryWorkspace({
         }
       }
       if (active && !remote.error && remote.data !== null) {
-        const mapped: AdminProduct[] = remote.data.filter((product) => !isDemoProduct(product)).map((product) => ({
+        const mapped: AdminProduct[] = remote.data.filter((product) => !isDemoProduct(product)).map((product) => {
+          const savedAdjustments = imageAdjustmentsMap[product.sku];
+          const variants = variantsMap[product.sku]?.length ? variantsMap[product.sku] : localVariantsMap[product.sku] || [];
+          return {
           name: product.name,
           price: `₹${product.price.toLocaleString("en-IN")}`,
           cost: `₹${(product.cost ?? 0).toLocaleString("en-IN")}`,
@@ -3944,8 +4020,14 @@ function ProductLibraryWorkspace({
           gstRate: pricingMap[product.sku]?.gstRate || 0,
           markup: pricingMap[product.sku]?.markup || 0,
           costWithGst: calculatePricing(`₹${(product.cost ?? 0).toLocaleString("en-IN")}`, String(pricingMap[product.sku]?.gstRate || 0), String(pricingMap[product.sku]?.markup || 0)).costWithGst,
-          variants: variantsMap[product.sku]?.length ? variantsMap[product.sku] : localVariantsMap[product.sku] || [],
-        }));
+          variants: variants.map((variant, index) => ({
+            ...variant,
+            adjustments: normalizeImageAdjustments(savedAdjustments?.variants?.[index] || variant.adjustments),
+          })),
+          imageAdjustments: normalizeImageAdjustments(savedAdjustments?.image),
+          hoverImageAdjustments: normalizeImageAdjustments(savedAdjustments?.hoverImage),
+        };
+        });
         // Supabase is the shared catalog. Never merge stale local records back
         // into it, otherwise a product deleted on one device can be resurrected
         // by an older localStorage snapshot on another device.
@@ -4048,6 +4130,8 @@ function ProductLibraryWorkspace({
     setNewProductFile(null);
     setNewProductHoverImage(adminPlaceholderImage);
     setNewProductHoverFile(null);
+    setNewImageAdjustments(defaultImageAdjustments);
+    setNewHoverAdjustments(defaultImageAdjustments);
     setSelectedProduct(null);
     setIsEditing(false);
     setIsAdding(true);
@@ -4103,6 +4187,8 @@ function ProductLibraryWorkspace({
       markup: Number(newProduct.markup) || 0,
       costWithGst: newProduct.costWithGst,
       variants: newProduct.variants,
+      imageAdjustments: newImageAdjustments,
+      hoverImageAdjustments: newHoverAdjustments,
     };
     const remoteError = await saveCatalogProduct(toCatalogProduct(product));
     setProducts((current) => {
@@ -4111,6 +4197,7 @@ function ProductLibraryWorkspace({
       void saveProductBarcodes(next);
       void saveProductPricing(next);
       void saveProductVariants(next);
+      void saveProductImageAdjustments(next);
       return next;
     });
     setNewProduct({
@@ -4130,6 +4217,8 @@ function ProductLibraryWorkspace({
     setNewProductFile(null);
     setNewProductHoverImage(adminPlaceholderImage);
     setNewProductHoverFile(null);
+    setNewImageAdjustments(defaultImageAdjustments);
+    setNewHoverAdjustments(defaultImageAdjustments);
     setIsAdding(false);
     onNotify(
       remoteError
@@ -4256,6 +4345,20 @@ function ProductLibraryWorkspace({
         variantIndex === index ? { ...variant, [field]: value } : variant,
       ),
     }));
+  const updateNewVariantAdjustments = (index: number, adjustments: ImageAdjustments) =>
+    setNewProduct((current) => ({
+      ...current,
+      variants: current.variants.map((variant, variantIndex) =>
+        variantIndex === index ? { ...variant, adjustments } : variant,
+      ),
+    }));
+  const updateEditVariantAdjustments = (index: number, adjustments: ImageAdjustments) =>
+    setEditValues((current) => ({
+      ...current,
+      variants: current.variants.map((variant, variantIndex) =>
+        variantIndex === index ? { ...variant, adjustments } : variant,
+      ),
+    }));
   const updateEditField = (field: keyof typeof editValues, value: string) =>
     setEditValues((current) => {
       const next = { ...current, [field]: value };
@@ -4287,6 +4390,8 @@ function ProductLibraryWorkspace({
       costWithGst: product.costWithGst || product.cost,
       variants: product.variants || [],
     });
+    setEditImageAdjustments(product.imageAdjustments || defaultImageAdjustments);
+    setEditHoverAdjustments(product.hoverImageAdjustments || defaultImageAdjustments);
     setEditImageFile(null);
     setEditHoverFile(null);
   };
@@ -4336,6 +4441,8 @@ function ProductLibraryWorkspace({
       markup: Number(editValues.markup) || 0,
       costWithGst: editValues.costWithGst,
       variants: editValues.variants,
+      imageAdjustments: editImageAdjustments,
+      hoverImageAdjustments: editHoverAdjustments,
     };
     const remoteError = await saveCatalogProduct(toCatalogProduct(updated));
     if (!remoteError && updated.sku !== selectedProduct.sku)
@@ -4348,6 +4455,7 @@ function ProductLibraryWorkspace({
       void saveProductBarcodes(next);
       void saveProductPricing(next);
       void saveProductVariants(next);
+      void saveProductImageAdjustments(next);
       return next;
     });
     setSelectedProduct(updated);
@@ -4367,6 +4475,7 @@ function ProductLibraryWorkspace({
       void saveProductBarcodes(next);
       void saveProductPricing(next);
       void saveProductVariants(next);
+      void saveProductImageAdjustments(next);
       return next;
     });
     if (selectedProduct?.sku === product.sku) setSelectedProduct(null);
@@ -4444,6 +4553,7 @@ function ProductLibraryWorkspace({
         void saveProductBarcodes(next);
         void saveProductPricing(next);
         void saveProductVariants(next);
+        void saveProductImageAdjustments(next);
         return next;
       });
       onNotify(
@@ -4535,7 +4645,7 @@ function ProductLibraryWorkspace({
             <p className="eyebrow">NEW PRODUCT</p>
             <h3 id="add-product-title">Add a product</h3>
             <div className="product-image-upload">
-              <img src={newProductImage} alt="Product preview" />
+              <img src={newProductImage} alt="Product preview" style={imageTransformStyle(newImageAdjustments)} />
               <label>
                 <strong>Upload product image</strong>
                 <small>JPG, PNG or WEBP · click to choose</small>
@@ -4545,9 +4655,10 @@ function ProductLibraryWorkspace({
                   onChange={uploadProductImage}
                 />
               </label>
+              <ImageAdjustmentControls adjustments={newImageAdjustments} onChange={setNewImageAdjustments} />
             </div>
             <div className="product-image-upload hover-image-upload">
-              <img src={newProductHoverImage} alt="Product hover preview" />
+              <img src={newProductHoverImage} alt="Product hover preview" style={imageTransformStyle(newHoverAdjustments)} />
               <label>
                 <strong>Upload hover image</strong>
                 <small>Shown when customers point at this product</small>
@@ -4557,6 +4668,7 @@ function ProductLibraryWorkspace({
                   onChange={uploadProductHoverImage}
                 />
               </label>
+              <ImageAdjustmentControls adjustments={newHoverAdjustments} onChange={setNewHoverAdjustments} />
             </div>
             <div className="variant-editor">
               <div className="variant-editor-heading">
@@ -4570,7 +4682,7 @@ function ProductLibraryWorkspace({
                   onClick={() =>
                     setNewProduct((current) => ({
                       ...current,
-                      variants: [...current.variants, { name: "", image: "" }],
+                      variants: [...current.variants, { name: "", image: "", adjustments: defaultImageAdjustments }],
                     }))
                   }
                 >
@@ -4587,12 +4699,13 @@ function ProductLibraryWorkspace({
                         placeholder="e.g. Rose gold / Model 2"
                         aria-label={`Variant ${index + 1} name`}
                       />
-                      <input
-                        value={variant.image}
+                        <input
+                          value={variant.image}
                         onChange={(event) => updateNewVariant(index, "image", event.target.value)}
                         placeholder="Image URL (optional)"
                         aria-label={`Variant ${index + 1} image URL`}
                       />
+                      <img className="variant-adjust-preview" src={variant.image || newProductImage} alt="" style={imageTransformStyle(variant.adjustments || defaultImageAdjustments)} />
                       <label className="variant-upload">
                         Upload image
                         <input
@@ -4617,6 +4730,10 @@ function ProductLibraryWorkspace({
                       >
                         ×
                       </button>
+                      <ImageAdjustmentControls
+                        adjustments={variant.adjustments || defaultImageAdjustments}
+                        onChange={(adjustments) => updateNewVariantAdjustments(index, adjustments)}
+                      />
                     </div>
                   ))}
                 </div>
@@ -4811,6 +4928,7 @@ function ProductLibraryWorkspace({
             <img
               src={editValues.image || selectedProduct.image}
               alt="Product main image preview"
+              style={imageTransformStyle(editImageAdjustments)}
             />
             <label>
               <strong>Upload main image</strong>
@@ -4821,11 +4939,13 @@ function ProductLibraryWorkspace({
                 onChange={uploadEditImage}
               />
             </label>
+            <ImageAdjustmentControls adjustments={editImageAdjustments} onChange={setEditImageAdjustments} />
           </div>
           <div className="product-image-upload hover-image-upload">
             <img
               src={editValues.hoverImage || selectedProduct.image}
               alt="Product hover preview"
+              style={imageTransformStyle(editHoverAdjustments)}
             />
             <label>
               <strong>Upload hover image</strong>
@@ -4836,6 +4956,7 @@ function ProductLibraryWorkspace({
                 onChange={uploadEditHoverImage}
               />
             </label>
+            <ImageAdjustmentControls adjustments={editHoverAdjustments} onChange={setEditHoverAdjustments} />
           </div>
           <div className="variant-editor">
             <div className="variant-editor-heading">
@@ -4849,7 +4970,7 @@ function ProductLibraryWorkspace({
                 onClick={() =>
                   setEditValues((current) => ({
                     ...current,
-                    variants: [...current.variants, { name: "", image: "" }],
+                      variants: [...current.variants, { name: "", image: "", adjustments: defaultImageAdjustments }],
                   }))
                 }
               >
@@ -4872,6 +4993,7 @@ function ProductLibraryWorkspace({
                       placeholder="Image URL (optional)"
                       aria-label={`Variant ${index + 1} image URL`}
                     />
+                    <img className="variant-adjust-preview" src={variant.image || editValues.image || selectedProduct.image} alt="" style={imageTransformStyle(variant.adjustments || defaultImageAdjustments)} />
                     <label className="variant-upload">
                       Upload image
                       <input
@@ -4896,6 +5018,10 @@ function ProductLibraryWorkspace({
                     >
                       ×
                     </button>
+                    <ImageAdjustmentControls
+                      adjustments={variant.adjustments || defaultImageAdjustments}
+                      onChange={(adjustments) => updateEditVariantAdjustments(index, adjustments)}
+                    />
                   </div>
                 ))}
               </div>
