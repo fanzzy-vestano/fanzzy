@@ -62,7 +62,7 @@ img { display: block; width: 100%; }
 .checkout-total span { color: var(--muted); font-size: 12px; }
 .checkout-total strong { color: var(--wine); font-family: var(--mono); font-size: 13px; font-weight: 400; }
 .checkout-actions { align-items: center; display: flex; gap: 20px; margin-top: 22px; }
-@media (max-width: 640px) { .checkout-backdrop { padding: 12px; }.checkout-modal { padding: 25px 20px; }.checkout-modal .drawer-header h2 { font-size: 31px; }.checkout-grid { grid-template-columns: 1fr; }.checkout-wide { grid-column: auto; }.checkout-actions { align-items: stretch; flex-direction: column; gap: 12px; } }
+@media (max-width: 640px) { .checkout-backdrop { align-items: flex-start; overflow-y: auto; padding: 12px; }.checkout-modal { margin: auto 0; max-height: calc(100dvh - 24px); overscroll-behavior: contain; padding: 25px 20px max(32px, env(safe-area-inset-bottom)); }.checkout-modal .drawer-header h2 { font-size: 31px; }.checkout-grid { grid-template-columns: 1fr; }.checkout-wide { grid-column: auto; }.checkout-actions { align-items: stretch; flex-direction: column; gap: 12px; } }
 
 .auth-backdrop { align-items: center; display: flex; justify-content: center; padding: 24px; }
 .auth-modal { background: var(--paper); border-radius: 22px; max-width: 460px; padding: 54px 46px 42px; position: relative; width: 100%; }
