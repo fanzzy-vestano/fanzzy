@@ -258,6 +258,7 @@ export default function Home() {
   const [authPhone, setAuthPhone] = useState("");
   const [authOtp, setAuthOtp] = useState("");
   const [otpSent, setOtpSent] = useState(false);
+  const [authJustVerified, setAuthJustVerified] = useState(false);
   const [authUser, setAuthUser] = useState<CustomerAuthUser | null>(null);
   const [checkoutForm, setCheckoutForm] = useState({ name: "", phone: "", email: "", address: "" });
   const [couponInput, setCouponInput] = useState("");
@@ -578,6 +579,7 @@ export default function Home() {
   useEffect(() => {
     if (!authUser) return;
     const timeout = window.setTimeout(() => {
+      if (authJustVerified) setAuthJustVerified(false);
       if (window.localStorage.getItem(checkoutAfterAuthKey) === "1" && cartItems.length) {
         window.localStorage.removeItem(checkoutAfterAuthKey);
         setAuthOpen(false);
@@ -588,9 +590,9 @@ export default function Home() {
         setAuthOpen(false);
         setOrdersOpen(true);
       }
-    }, 0);
+    }, authJustVerified ? 1400 : 0);
     return () => window.clearTimeout(timeout);
-  }, [authUser, cartItems.length]);
+  }, [authUser, authJustVerified, cartItems.length]);
 
   useEffect(() => {
     if (!toast) return;
@@ -794,6 +796,7 @@ export default function Home() {
     setAuthMessage("");
     setAuthOtp("");
     setOtpSent(false);
+    setAuthJustVerified(false);
   };
   const signOut = async () => {
     await fetch("/api/customer-auth/sign-out", { method: "POST" });
@@ -846,7 +849,8 @@ export default function Home() {
     setCheckoutForm((current) => ({ ...current, phone: current.phone || result.user!.phone }));
     setAuthOtp("");
     setOtpSent(false);
-    announce("Signed in successfully");
+    setAuthJustVerified(true);
+    setAuthMessage("Login successful. Welcome to Fanzzy.");
   };
   const requestVoiceOtp = async () => {
     setAuthLoading(true);
