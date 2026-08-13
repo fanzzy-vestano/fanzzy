@@ -35,6 +35,7 @@ type AdminProduct = {
   image: string;
   hoverImage?: string;
   barcode?: string;
+  hsnCode?: string;
   gstRate?: number;
   markup?: number;
   costWithGst?: string;
@@ -263,6 +264,7 @@ const persistCatalog = (catalog: AdminProduct[]) => {
     image: product.image,
     hoverImage: product.hoverImage || product.image,
     barcode: product.barcode || "",
+    hsnCode: product.hsnCode || "",
     gstRate: product.gstRate || 0,
     markup: product.markup || 0,
     costWithGst: product.costWithGst || product.cost,
@@ -337,6 +339,14 @@ const saveProductBarcodes = async (catalog: AdminProduct[]) => {
       .map((product) => [product.sku, product.barcode!.trim()]),
   );
   await saveStoreSetting("productBarcodes", JSON.stringify(barcodes));
+};
+const saveProductHsnCodes = async (catalog: AdminProduct[]) => {
+  const hsnCodes = Object.fromEntries(
+    catalog
+      .filter((product) => product.sku && product.hsnCode?.trim())
+      .map((product) => [product.sku, product.hsnCode!.trim()]),
+  );
+  await saveStoreSetting("productHsnCodes", JSON.stringify(hsnCodes));
 };
 const saveProductPricing = async (catalog: AdminProduct[]) => {
   const pricing = Object.fromEntries(
@@ -3891,6 +3901,7 @@ function ProductLibraryWorkspace({
     image: "",
     hoverImage: "",
     barcode: "",
+    hsnCode: "",
     markup: "",
     gstRate: "",
     costWithGst: "₹",
@@ -3921,6 +3932,7 @@ function ProductLibraryWorkspace({
     stock: "",
     sku: "",
     barcode: "",
+    hsnCode: "",
     markup: "",
     gstRate: "",
     costWithGst: "₹",
@@ -3931,10 +3943,12 @@ function ProductLibraryWorkspace({
     const loadProducts = async () => {
       const remote = await fetchCatalogProducts();
       const barcodeRemote = await fetchStoreSetting("productBarcodes");
+      const hsnCodeRemote = await fetchStoreSetting("productHsnCodes");
       const pricingRemote = await fetchStoreSetting("productPricing");
       const variantsRemote = await fetchStoreSetting("productVariants");
       const imageAdjustmentsRemote = await fetchStoreSetting("productImageAdjustments");
       let barcodeMap: Record<string, string> = {};
+      let hsnCodeMap: Record<string, string> = {};
       let pricingMap: Record<string, { gstRate?: number; markup?: number }> = {};
       let variantsMap: Record<string, ProductVariant[]> = {};
       let imageAdjustmentsMap: Record<string, ProductImageAdjustments> = {};
@@ -3948,6 +3962,18 @@ function ProductLibraryWorkspace({
           }
         } catch {
           barcodeMap = {};
+        }
+      }
+      if (hsnCodeRemote.value) {
+        try {
+          const parsed = JSON.parse(hsnCodeRemote.value) as Record<string, unknown>;
+          if (parsed && typeof parsed === "object") {
+            hsnCodeMap = Object.fromEntries(
+              Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+            );
+          }
+        } catch {
+          hsnCodeMap = {};
         }
       }
       if (pricingRemote.value) {
@@ -4017,6 +4043,7 @@ function ProductLibraryWorkspace({
           hoverImage:
             product.hoverImage || product.image || adminPlaceholderImage,
           barcode: barcodeMap[product.sku] || product.barcode || "",
+          hsnCode: hsnCodeMap[product.sku] || "",
           gstRate: pricingMap[product.sku]?.gstRate || 0,
           markup: pricingMap[product.sku]?.markup || 0,
           costWithGst: calculatePricing(`₹${(product.cost ?? 0).toLocaleString("en-IN")}`, String(pricingMap[product.sku]?.gstRate || 0), String(pricingMap[product.sku]?.markup || 0)).costWithGst,
@@ -4079,6 +4106,7 @@ function ProductLibraryWorkspace({
                     product.image ||
                     adminPlaceholderImage,
                   barcode: product.barcode || barcodeMap[sku] || "",
+                  hsnCode: product.hsnCode || hsnCodeMap[sku] || "",
                   gstRate: product.gstRate ?? pricingMap[sku]?.gstRate ?? 0,
                   markup: product.markup ?? pricingMap[sku]?.markup ?? 0,
                   costWithGst: product.costWithGst || calculatePricing(String(rawCost ?? "₹0"), String(product.gstRate ?? pricingMap[sku]?.gstRate ?? 0), String(product.markup ?? pricingMap[sku]?.markup ?? 0)).costWithGst,
@@ -4121,6 +4149,7 @@ function ProductLibraryWorkspace({
       stock: "",
       sku: "",
       barcode: "",
+      hsnCode: "",
       markup: "",
       gstRate: "",
       costWithGst: "₹",
@@ -4183,6 +4212,7 @@ function ProductLibraryWorkspace({
       image: productImage,
       hoverImage: productHoverImage,
       barcode: newProduct.barcode.trim(),
+      hsnCode: newProduct.hsnCode.trim(),
       gstRate: Number(newProduct.gstRate) || 0,
       markup: Number(newProduct.markup) || 0,
       costWithGst: newProduct.costWithGst,
@@ -4195,6 +4225,7 @@ function ProductLibraryWorkspace({
       const next = [...current, product];
       persistCatalog(next);
       void saveProductBarcodes(next);
+      void saveProductHsnCodes(next);
       void saveProductPricing(next);
       void saveProductVariants(next);
       void saveProductImageAdjustments(next);
@@ -4208,6 +4239,7 @@ function ProductLibraryWorkspace({
       stock: "",
       sku: "",
       barcode: "",
+      hsnCode: "",
       markup: "",
       gstRate: "",
       costWithGst: "₹",
@@ -4383,6 +4415,7 @@ function ProductLibraryWorkspace({
       image: product.image,
       hoverImage: product.hoverImage || product.image,
       barcode: product.barcode || "",
+      hsnCode: product.hsnCode || "",
       markup: parseMoney(product.cost) > 0
         ? String(Math.max(0, Math.round((parseMoney(product.price) / parseMoney(product.cost) - 1) * 100)))
         : "",
@@ -4437,6 +4470,7 @@ function ProductLibraryWorkspace({
       image,
       hoverImage,
       barcode: editValues.barcode.trim(),
+      hsnCode: editValues.hsnCode.trim(),
       gstRate: Number(editValues.gstRate) || 0,
       markup: Number(editValues.markup) || 0,
       costWithGst: editValues.costWithGst,
@@ -4453,6 +4487,7 @@ function ProductLibraryWorkspace({
       );
       persistCatalog(next);
       void saveProductBarcodes(next);
+      void saveProductHsnCodes(next);
       void saveProductPricing(next);
       void saveProductVariants(next);
       void saveProductImageAdjustments(next);
@@ -4473,6 +4508,7 @@ function ProductLibraryWorkspace({
       const next = current.filter((item) => item.sku !== product.sku);
       persistCatalog(next);
       void saveProductBarcodes(next);
+      void saveProductHsnCodes(next);
       void saveProductPricing(next);
       void saveProductVariants(next);
       void saveProductImageAdjustments(next);
@@ -4506,6 +4542,7 @@ function ProductLibraryWorkspace({
     ]);
     const stockColumn = findColumn(["stock", "inventory", "quantity", "qty"]);
     const barcodeColumn = findColumn(["barcode", "bar code", "ean", "upc"]);
+    const hsnCodeColumn = findColumn(["hsn", "hsn code", "hsncode"]);
     const imported = rows
       .map((row, index): AdminProduct | null => {
         const name = nameColumn >= 0 ? row[nameColumn]?.trim() : "";
@@ -4535,6 +4572,7 @@ function ProductLibraryWorkspace({
               : "₹0",
           stock,
           barcode: barcodeColumn >= 0 ? row[barcodeColumn]?.trim() || "" : "",
+          hsnCode: hsnCodeColumn >= 0 ? row[hsnCodeColumn]?.trim() || "" : "",
           status: stock > 0 ? "Published" : "Draft",
           image: adminPlaceholderImage,
         };
@@ -4551,6 +4589,7 @@ function ProductLibraryWorkspace({
         const next = [...current, ...imported];
         persistCatalog(next);
         void saveProductBarcodes(next);
+        void saveProductHsnCodes(next);
         void saveProductPricing(next);
         void saveProductVariants(next);
         void saveProductImageAdjustments(next);
@@ -4565,12 +4604,13 @@ function ProductLibraryWorkspace({
     event.target.value = "";
   };
   const exportCsv = () => {
-    const headers = ["name", "sku", "barcode", "category", "stock", "price", "cost", "status", "image", "hoverImage"];
+    const headers = ["name", "sku", "barcode", "hsnCode", "category", "stock", "price", "cost", "status", "image", "hoverImage"];
     const escapeCsv = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
     const rows = products.map((product) => [
       product.name,
       product.sku,
       product.barcode || "",
+      product.hsnCode || "",
       product.category,
       product.stock,
       product.price,
@@ -4764,6 +4804,15 @@ function ProductLibraryWorkspace({
                   value={newProduct.barcode}
                   onChange={(event) => updateField("barcode", event.target.value)}
                   placeholder="Scan or enter barcode"
+                  inputMode="numeric"
+                />
+              </label>
+              <label>
+                HSN code
+                <input
+                  value={newProduct.hsnCode}
+                  onChange={(event) => updateField("hsnCode", event.target.value)}
+                  placeholder="e.g. 7117"
                   inputMode="numeric"
                 />
               </label>
@@ -5054,9 +5103,9 @@ function ProductLibraryWorkspace({
                 }
               />
             </label>
-            <label>
-              Barcode
-              <input
+              <label>
+                Barcode
+                <input
                 value={editValues.barcode}
                 onChange={(event) =>
                   setEditValues((current) => ({
@@ -5065,9 +5114,23 @@ function ProductLibraryWorkspace({
                   }))
                 }
                 placeholder="Scan or enter barcode"
-                inputMode="numeric"
-              />
-            </label>
+                  inputMode="numeric"
+                />
+              </label>
+              <label>
+                HSN code
+                <input
+                  value={editValues.hsnCode}
+                  onChange={(event) =>
+                    setEditValues((current) => ({
+                      ...current,
+                      hsnCode: event.target.value,
+                    }))
+                  }
+                  placeholder="e.g. 7117"
+                  inputMode="numeric"
+                />
+              </label>
             <label>
               Category
               <select
@@ -5201,6 +5264,10 @@ function ProductLibraryWorkspace({
               <span>
                 <small>Barcode</small>
                 <strong>{selectedProduct.barcode || "Not added"}</strong>
+              </span>
+              <span>
+                <small>HSN code</small>
+                <strong>{selectedProduct.hsnCode || "Not added"}</strong>
               </span>
             </div>
             <div className="product-detail-actions">
