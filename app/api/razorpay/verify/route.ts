@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { finalizeRazorpayPayment, type RazorpayPayment } from "../../../../lib/razorpay-payment-sync";
 
 type VerifyPaymentRequest = {
   razorpayOrderId?: unknown;
@@ -37,6 +38,19 @@ export async function POST(request: Request) {
   const received = Buffer.from(receivedSignature, "utf8");
   const valid = expected.length === received.length && timingSafeEqual(expected, received);
   if (!valid) return json({ error: "Payment verification failed" }, 400);
+
+  try {
+    const paymentResponse = await fetch(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}`, {
+      headers: { Authorization: `Basic ${Buffer.from(`${process.env.RAZORPAY_KEY_ID || ""}:${keySecret}`).toString("base64")}` },
+    });
+    const payment = await paymentResponse.json() as RazorpayPayment & { error?: { description?: string } };
+    if (!paymentResponse.ok || payment.order_id !== orderId) {
+      return json({ error: payment.error?.description || "Razorpay payment could not be confirmed" }, 502);
+    }
+    await finalizeRazorpayPayment(payment);
+  } catch (error) {
+    return json({ error: error instanceof Error ? error.message : "Could not save the confirmed payment" }, 502);
+  }
 
   return json({ verified: true, razorpayOrderId: orderId, razorpayPaymentId: paymentId });
 }
