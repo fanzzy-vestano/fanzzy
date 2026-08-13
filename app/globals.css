@@ -175,6 +175,20 @@ img { display: block; width: 100%; }
 }
 
 .orders-drawer { background: var(--paper); border-radius: 22px 0 0 22px; display: flex; flex-direction: column; height: 100%; margin-left: auto; max-width: 620px; overflow-y: auto; padding: 36px; width: 100%; }
+.profile-button { color: var(--wine) !important; }
+.profile-content { display: flex; flex: 1; flex-direction: column; padding: 38px 4px; }
+.profile-avatar { align-items: center; background: var(--wine); border-radius: 50%; color: #fff8ef; display: flex; font-family: var(--serif); font-size: 30px; height: 68px; justify-content: center; margin-bottom: 30px; width: 68px; }
+.profile-content .eyebrow { margin-bottom: 10px; }
+.profile-content h3 { font-family: var(--serif); font-size: 30px; font-weight: 500; letter-spacing: -.05em; margin: 0; }
+.profile-details { border-bottom: 1px solid var(--line); border-top: 1px solid var(--line); display: grid; gap: 17px; margin: 28px 0; padding: 20px 0; }
+.profile-details div { display: grid; gap: 5px; }
+.profile-details dt { color: var(--muted); font-family: var(--mono); font-size: 8px; letter-spacing: .1em; text-transform: uppercase; }
+.profile-details dd { color: var(--wine); font-size: 12px; margin: 0; overflow-wrap: anywhere; }
+.profile-sign-out { background: transparent; border-bottom: 1px solid currentColor; color: var(--muted); font-family: var(--mono); font-size: 9px; letter-spacing: .1em; margin: 22px auto 0; padding: 0 0 4px; text-transform: uppercase; }
+.profile-sign-out:hover { color: var(--wine); }
+.profile-signed-out > p:not(.eyebrow) { color: var(--muted); font-size: 12px; line-height: 1.8; margin: 22px 0 28px; max-width: 310px; }
+.low-stock-badge { background: #fff2e2; border: 1px solid #c98b5b; color: #8e432a; font-family: var(--mono); font-size: 8px; left: 13px; letter-spacing: .08em; padding: 7px 9px; position: absolute; text-transform: uppercase; top: 13px; z-index: 1; }
+.low-stock-badge.with-tag { top: 42px; }
 .orders-intro { border-bottom: 1px solid var(--line); padding: 22px 0 24px; }
 .orders-intro > p { color: var(--muted); font-size: 12px; line-height: 1.7; margin: 0 0 20px; max-width: 410px; }
 .orders-intro label { color: var(--wine); display: grid; font-family: var(--mono); font-size: 8px; gap: 8px; letter-spacing: .1em; text-transform: uppercase; }

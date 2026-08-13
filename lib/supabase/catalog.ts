@@ -102,6 +102,44 @@ export async function saveCatalogProduct(product: CatalogProduct) {
   }
 }
 
+export async function decrementCatalogStock(lines: Array<{ sku: string; quantity: number }>) {
+  const client = supabase;
+  if (!client) return { data: null, error: new Error("Supabase is not configured") };
+  const quantities = new Map<string, number>();
+  lines.forEach(({ sku, quantity }) => {
+    const normalizedSku = sku.trim();
+    if (!normalizedSku || !Number.isFinite(quantity) || quantity <= 0) return;
+    quantities.set(normalizedSku, (quantities.get(normalizedSku) ?? 0) + Math.floor(quantity));
+  });
+  if (!quantities.size) return { data: [] as CatalogProduct[], error: null };
+
+  const currentProducts = await Promise.all(
+    Array.from(quantities.keys()).map(async (sku) => {
+      const result = await client.from("products").select("*").eq("sku", sku).maybeSingle();
+      return { sku, data: result.data ? asProduct(result.data as Record<string, unknown>) : null, error: result.error };
+    }),
+  );
+  const invalidLine = currentProducts.find(({ sku, data, error }) => error || !data || data.stock < (quantities.get(sku) ?? 0));
+  if (invalidLine) {
+    return { data: null, error: invalidLine.error || new Error("One or more items are no longer available") };
+  }
+
+  const updates = await Promise.all(currentProducts.map(async ({ sku, data }) => {
+    const stock = Math.max(0, data!.stock - (quantities.get(sku) ?? 0));
+    const result = await client.from("products")
+      .update({ stock, updated_at: new Date().toISOString() })
+      .eq("sku", sku)
+      .select("*")
+      .single();
+    return { data: result.data ? asProduct(result.data as Record<string, unknown>) : null, error: result.error };
+  }));
+  const failedUpdate = updates.find(({ error, data }) => error || !data);
+  return {
+    data: updates.flatMap(({ data }) => data ? [data] : []),
+    error: failedUpdate?.error || null,
+  };
+}
+
 export async function removeCatalogProduct(sku: string) {
   if (!supabase) return new Error("Supabase is not configured");
   const { error } = await supabase.from("products").delete().eq("sku", sku);

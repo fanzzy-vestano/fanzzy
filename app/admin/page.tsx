@@ -62,6 +62,8 @@ type MarketingRecord = {
   code?: string;
   discount?: string;
   offerType?: "bogo";
+  buyQuantity?: number;
+  getQuantity?: number;
   eligibleProductIds?: string[];
 };
 type DateRange = "this-month" | "last-month" | "all-time" | "custom";
@@ -2365,6 +2367,8 @@ function MarketingWorkspace({
     code: "",
     discount: "",
     offerType: "" as "" | "bogo",
+    buyQuantity: 1,
+    getQuantity: 1,
     eligibleProductIds: [] as string[],
   });
   const [productOptions, setProductOptions] = useState<MarketingProductOption[]>([]);
@@ -2463,6 +2467,8 @@ function MarketingWorkspace({
       code: "",
       discount: kind === "Coupon" ? "10% off" : "",
       offerType: "",
+      buyQuantity: 1,
+      getQuantity: 1,
       eligibleProductIds: [],
     });
     setFormOpen(true);
@@ -2479,6 +2485,8 @@ function MarketingWorkspace({
       code: record.code ?? "",
       discount: record.discount ?? "",
       offerType: record.offerType ?? "",
+      buyQuantity: Math.min(3, Math.max(1, Number(record.buyQuantity) || 1)),
+      getQuantity: Math.min(3, Math.max(1, Number(record.getQuantity) || 1)),
       eligibleProductIds: record.eligibleProductIds ?? [],
     });
     setFormOpen(true);
@@ -2507,6 +2515,7 @@ function MarketingWorkspace({
       ...(form.code.trim() ? { code: form.code.trim().toUpperCase() } : {}),
       ...(form.discount.trim() ? { discount: form.discount.trim() } : {}),
       ...(form.offerType ? { offerType: form.offerType } : {}),
+      ...(form.offerType === "bogo" ? { buyQuantity: form.buyQuantity, getQuantity: form.getQuantity } : {}),
       ...(form.offerType === "bogo" && form.eligibleProductIds.length
         ? { eligibleProductIds: form.eligibleProductIds }
         : {}),
@@ -2764,18 +2773,36 @@ function MarketingWorkspace({
                       setForm((current) => ({
                         ...current,
                         offerType: event.target.value as "" | "bogo",
-                        discount: event.target.value === "bogo" && !current.discount ? "Buy one, get one free" : current.discount,
+                        discount: event.target.value === "bogo" && !current.discount ? "Buy 1, get 1 free" : current.discount,
                       }))
                     }
                   >
                     <option value="">Standard promotion</option>
-                    <option value="bogo">Buy 1 Get 1</option>
+                    <option value="bogo">Buy X Get Y product offer</option>
                   </select>
                 </label>
               )}
               {form.kind === "Campaign" && form.offerType === "bogo" && (
-                <div className="marketing-eligible-products marketing-form-wide">
-                  <span>Eligible products <small>Leave all unchecked to include every product.</small></span>
+                <>
+                  <label>
+                    Customer buys
+                    <select value={form.buyQuantity} onChange={(event) => setForm((current) => ({ ...current, buyQuantity: Number(event.target.value) }))}>
+                      <option value={1}>1 product</option>
+                      <option value={2}>2 products</option>
+                      <option value={3}>3 products</option>
+                    </select>
+                  </label>
+                  <label>
+                    Customer gets free
+                    <select value={form.getQuantity} onChange={(event) => setForm((current) => ({ ...current, getQuantity: Number(event.target.value) }))}>
+                      <option value={1}>1 product</option>
+                      <option value={2}>2 products</option>
+                      <option value={3}>3 products</option>
+                    </select>
+                  </label>
+                  <div className="marketing-eligible-products marketing-form-wide">
+                  <span>Connect products to this offer <small>Leave none selected to include every product.</small></span>
+                  <div className="marketing-product-actions"><button type="button" onClick={() => setForm((current) => ({ ...current, eligibleProductIds: productOptions.map((product) => product.id) }))}>Select all</button><button type="button" onClick={() => setForm((current) => ({ ...current, eligibleProductIds: [] }))}>All products</button></div>
                   <div className="eligible-product-list">
                     {productOptions.length ? productOptions.map((product) => (
                       <label key={product.id}>
@@ -2796,6 +2823,7 @@ function MarketingWorkspace({
                     )) : <p className="variant-empty">Add products first to target specific items.</p>}
                   </div>
                 </div>
+                </>
               )}
               <label className="marketing-form-wide">
                 Description
