@@ -229,6 +229,9 @@ type OrderRecord = {
 };
 const adminOrders: OrderRecord[] = [];
 const isDemoOrder = (order: { id?: string }) => /^#FZ-104[4-8]$/.test(String(order.id ?? ""));
+// Orders are operational only after the Razorpay signature has been verified.
+// Pending checkout records are deliberately kept out of every Admin view.
+const hasConfirmedPayment = (order: Pick<OrderRecord, "paymentStatus">) => order.paymentStatus === "paid";
 const siteBasePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 const siteAsset = (name: string) => `${siteBasePath}/${name}`;
 const createSku = (
@@ -511,7 +514,7 @@ export default function AdminPage() {
       } catch {
         window.localStorage.removeItem("fanzzy-orders");
       }
-      setDashboardOrders(Array.from(merged.values()).filter((order) => order?.date && order?.total && !isDemoOrder(order)));
+      setDashboardOrders(Array.from(merged.values()).filter((order) => order?.date && order?.total && !isDemoOrder(order) && hasConfirmedPayment(order)));
     };
     syncDashboardOrders();
     window.addEventListener("storage", syncDashboardOrders);
@@ -1276,7 +1279,7 @@ function ReportsWorkspace({
       try {
         const parsed = JSON.parse(stored) as OrderRecord[];
         if (active && Array.isArray(parsed)) {
-          setOrders(parsed.filter((order) => order?.date && order?.total && !isDemoOrder(order)));
+          setOrders(parsed.filter((order) => order?.date && order?.total && !isDemoOrder(order) && hasConfirmedPayment(order)));
         }
       } catch {
         window.localStorage.removeItem("fanzzy-orders");
@@ -2904,7 +2907,7 @@ function OrdersWorkspace({
       } catch {
         window.localStorage.removeItem("fanzzy-orders");
       }
-      if (merged.size) setOrders(Array.from(merged.values()));
+      if (merged.size) setOrders(Array.from(merged.values()).filter(hasConfirmedPayment));
       const catalog = await fetchCatalogProducts();
       if (!catalog.error && catalog.data) {
         setCatalogProducts(catalog.data.filter((product) => !isDemoProduct(product)).map((product) => ({
@@ -2930,7 +2933,12 @@ function OrdersWorkspace({
   const persistOrders = async (next: OrderRecord[]) => {
     setOrders(next);
     window.localStorage.setItem("fanzzy-orders", JSON.stringify(next));
-    await saveStoreOrders(next);
+    // Retain hidden pending payments while an admin updates a confirmed order.
+    const remote = await fetchStoreOrders<OrderRecord>();
+    const allOrders = new Map<string, OrderRecord>();
+    remote.data?.forEach((order) => { if (order?.id) allOrders.set(order.id, order); });
+    next.forEach((order) => allOrders.set(order.id, order));
+    await saveStoreOrders(Array.from(allOrders.values()));
   };
 
   const filteredOrders = useMemo(() => {
