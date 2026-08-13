@@ -1,4 +1,5 @@
 import { createPendingOtpCookie, normalizeMobileNumber } from "../../../../lib/customer-sms-auth";
+import { randomInt } from "node:crypto";
 
 const json = (body: Record<string, unknown>, status = 200, headers?: HeadersInit) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
@@ -15,12 +16,13 @@ export async function POST(request: Request) {
   if (!phone) return json({ error: "Enter a valid 10-digit Indian mobile number" }, 400);
 
   try {
-    const response = await fetch(`https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${phone}/AUTOGEN`, { method: "POST" });
+    const code = String(randomInt(100000, 1_000_000));
+    const response = await fetch(`https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${phone}/${code}`, { method: "POST" });
     const result = await response.json() as { Status?: string; Details?: string; Errors?: string };
     if (!response.ok || result.Status?.toLowerCase() !== "success" || !result.Details) {
       return json({ error: result.Details || result.Errors || "The SMS code could not be sent" }, 502);
     }
-    return json({ sent: true }, 200, { "set-cookie": createPendingOtpCookie(phone, result.Details) });
+    return json({ sent: true }, 200, { "set-cookie": createPendingOtpCookie({ phone, sessionId: result.Details, code, expiresAt: Date.now() + 10 * 60 * 1000 }) });
   } catch {
     return json({ error: "The SMS code could not be sent. Please try again." }, 502);
   }

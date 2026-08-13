@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 export type CustomerSmsIdentity = { id: string; phone: string };
 
-type PendingOtp = { phone: string; sessionId: string; expiresAt: number };
+type PendingOtp = { phone: string; sessionId: string; code: string; expiresAt: number; voiceCallSentAt?: number };
 type SignedValue = CustomerSmsIdentity | PendingOtp;
 
 const pendingCookie = "fanzzy_customer_otp";
@@ -51,8 +51,8 @@ export const normalizeMobileNumber = (value: unknown) => {
 
 export const displayMobileNumber = (phone: string) => `+${phone}`;
 
-export const createPendingOtpCookie = (phone: string, sessionId: string) =>
-  cookie(pendingCookie, encode({ phone, sessionId, expiresAt: Date.now() + 10 * 60 * 1000 }), 10 * 60);
+export const createPendingOtpCookie = (pending: PendingOtp) =>
+  cookie(pendingCookie, encode(pending), Math.max(1, Math.ceil((pending.expiresAt - Date.now()) / 1000)));
 
 export const getPendingOtp = (request: Request) => {
   const pending = decode<PendingOtp>(getCookie(request, pendingCookie));
