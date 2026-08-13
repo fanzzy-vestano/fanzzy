@@ -1,0 +1,42 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+type VerifyPaymentRequest = {
+  razorpayOrderId?: unknown;
+  razorpayPaymentId?: unknown;
+  razorpaySignature?: unknown;
+};
+
+const json = (body: Record<string, unknown>, status = 200) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+
+export async function POST(request: Request) {
+  const keySecret = process.env.RAZORPAY_KEY_SECRET;
+  if (!keySecret) return json({ error: "Razorpay is not configured on the server" }, 503);
+
+  let body: VerifyPaymentRequest;
+  try {
+    body = await request.json() as VerifyPaymentRequest;
+  } catch {
+    return json({ error: "Invalid request body" }, 400);
+  }
+
+  const orderId = typeof body.razorpayOrderId === "string" ? body.razorpayOrderId : "";
+  const paymentId = typeof body.razorpayPaymentId === "string" ? body.razorpayPaymentId : "";
+  const receivedSignature = typeof body.razorpaySignature === "string" ? body.razorpaySignature : "";
+  if (!orderId || !paymentId || !receivedSignature) {
+    return json({ error: "Incomplete payment response" }, 400);
+  }
+
+  const expectedSignature = createHmac("sha256", keySecret)
+    .update(`${orderId}|${paymentId}`)
+    .digest("hex");
+  const expected = Buffer.from(expectedSignature, "utf8");
+  const received = Buffer.from(receivedSignature, "utf8");
+  const valid = expected.length === received.length && timingSafeEqual(expected, received);
+  if (!valid) return json({ error: "Payment verification failed" }, 400);
+
+  return json({ verified: true, razorpayOrderId: orderId, razorpayPaymentId: paymentId });
+}

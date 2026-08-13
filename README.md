@@ -9,6 +9,17 @@ Premium jewellery storefront and control room built with Next.js, TypeScript, Ta
 3. Run `pnpm dev` and open the local URL.
 4. Visit `/` for the storefront and `/admin` for the merchant control room.
 
+## Razorpay checkout
+
+The checkout uses Razorpay Standard Checkout. Add the API credentials from Razorpay Dashboard → Account & Settings → API Keys to `.env.local`:
+
+```env
+RAZORPAY_KEY_ID=rzp_test_...
+RAZORPAY_KEY_SECRET=...
+```
+
+Use test keys while validating payments. `RAZORPAY_KEY_SECRET` is server-only and must never be exposed as a `NEXT_PUBLIC_` variable or committed to source control. The server creates the Razorpay order and verifies the returned payment signature before saving the customer order.
+
 ## Product direction
 
 The current implementation is a polished, interactive vertical slice with a centralized visual system. Storefront interactions include category filtering, search, wishlist, quick view, cart drawer, quantity changes, promo-code copy, newsletter signup, and responsive mobile layout. The admin surface includes catalog search, inventory health, revenue visualization, order status, tasks, campaign status, and navigation scaffolding for catalog, orders, customers, marketing, homepage, and settings.
