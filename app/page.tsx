@@ -1,6 +1,7 @@
 ﻿"use client";
 
 import { type FormEvent, useEffect, useMemo, useState } from "react";
+import type { User } from "@supabase/supabase-js";
 import {
   fetchCatalogCategories,
   fetchCatalogProducts,
@@ -10,6 +11,7 @@ import {
   saveStoreSetting,
 } from "../lib/supabase/catalog";
 import { printOrderBill } from "../lib/order-bill";
+import { supabase } from "../lib/supabase/client";
 
 type Product = {
   id: string;
@@ -23,6 +25,7 @@ type Product = {
   tag?: string;
   tone: string;
   variants?: ProductVariant[];
+  billName?: string;
   imageAdjustments?: ImageAdjustments;
   hoverImageAdjustments?: ImageAdjustments;
 };
@@ -87,6 +90,9 @@ const isBogoCampaign = (campaign: MarketingRecord | null) => {
   );
 };
 const localProductVariantsKey = "fanzzy-product-variants";
+const checkoutAfterAuthKey = "fanzzy-checkout-after-auth";
+const cartStorageKey = "fanzzy-cart";
+const cartVariantsStorageKey = "fanzzy-cart-variants";
 const defaultImageAdjustments: ImageAdjustments = { zoom: 1, x: 0, y: 0, rotate: 0 };
 const normalizeImageAdjustments = (value: unknown): ImageAdjustments => {
   const source = value && typeof value === "object" ? value as Partial<ImageAdjustments> : {};
@@ -139,6 +145,7 @@ function normalizeStoredProduct(value: unknown, index: number): Product | null {
     tag: typeof raw.tag === "string" ? raw.tag : undefined,
     tone: typeof raw.tone === "string" && raw.tone ? raw.tone : productTones[index % productTones.length],
     variants,
+    billName: typeof raw.billName === "string" ? raw.billName.trim() : "",
     imageAdjustments: normalizeImageAdjustments(raw.imageAdjustments),
     hoverImageAdjustments: normalizeImageAdjustments(raw.hoverImageAdjustments),
   };
@@ -177,8 +184,24 @@ export default function Home() {
   const [search, setSearch] = useState("");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [wishlist, setWishlist] = useState<string[]>([]);
-  const [cart, setCart] = useState<Record<string, number>>({});
-  const [cartVariants, setCartVariants] = useState<Record<string, ProductVariant | null>>({});
+  const [cart, setCart] = useState<Record<string, number>>(() => {
+    if (typeof window === "undefined") return {};
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem(cartStorageKey) || "{}");
+      return parsed && typeof parsed === "object" ? parsed as Record<string, number> : {};
+    } catch {
+      return {};
+    }
+  });
+  const [cartVariants, setCartVariants] = useState<Record<string, ProductVariant | null>>(() => {
+    if (typeof window === "undefined") return {};
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem(cartVariantsStorageKey) || "{}");
+      return parsed && typeof parsed === "object" ? parsed as Record<string, ProductVariant | null> : {};
+    } catch {
+      return {};
+    }
+  });
   const [cartOpen, setCartOpen] = useState(false);
   const [ordersOpen, setOrdersOpen] = useState(false);
   const [orders, setOrders] = useState<CustomerOrder[]>([]);
@@ -190,6 +213,10 @@ export default function Home() {
     { role: "assistant", text: "Hi, I’m Fanzzy Assistant. I can help you find a piece, choose a gift, check an order, or answer care questions." },
   ]);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
+  const [authOpen, setAuthOpen] = useState(false);
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authMessage, setAuthMessage] = useState("");
+  const [authUser, setAuthUser] = useState<User | null>(null);
   const [checkoutForm, setCheckoutForm] = useState({ name: "", phone: "", email: "", address: "" });
   const [couponInput, setCouponInput] = useState("");
   const [appliedCoupon, setAppliedCoupon] = useState<MarketingRecord | null>(null);
@@ -216,8 +243,10 @@ export default function Home() {
       const remote = await fetchCatalogProducts();
       const variantsRemote = await fetchStoreSetting("productVariants");
       const imageAdjustmentsRemote = await fetchStoreSetting("productImageAdjustments");
+      const billNameRemote = await fetchStoreSetting("productBillNames");
       let variantsMap: Record<string, ProductVariant[]> = {};
       let imageAdjustmentsMap: Record<string, ProductImageAdjustments> = {};
+      let billNameMap: Record<string, string> = {};
       if (variantsRemote.value) {
         try {
           const parsed = JSON.parse(variantsRemote.value) as Record<string, ProductVariant[]>;
@@ -232,6 +261,18 @@ export default function Home() {
           if (parsed && typeof parsed === "object") imageAdjustmentsMap = parsed;
         } catch {
           imageAdjustmentsMap = {};
+        }
+      }
+      if (billNameRemote.value) {
+        try {
+          const parsed = JSON.parse(billNameRemote.value) as Record<string, unknown>;
+          if (parsed && typeof parsed === "object") {
+            billNameMap = Object.fromEntries(
+              Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+            );
+          }
+        } catch {
+          billNameMap = {};
         }
       }
       const localVariantsMap: Record<string, ProductVariant[]> = {};
@@ -284,6 +325,7 @@ export default function Home() {
           })),
           imageAdjustments: savedAdjustments?.image,
           hoverImageAdjustments: savedAdjustments?.hoverImage,
+          billName: billNameMap[product.sku] || "",
         }, index);
         }).filter((product): product is Product => product !== null);
         const remoteWithLocalVariants = remoteProducts.map((product) => ({
@@ -407,6 +449,50 @@ export default function Home() {
     .reduce((sum, price) => sum + price, 0);
   const deliveryTotal = deliveryCharge.enabled ? deliveryCharge.amount : 0;
   const orderTotal = Math.max(0, subtotal - couponDiscount - bogoDiscount + deliveryTotal);
+
+  useEffect(() => {
+    window.localStorage.setItem(cartStorageKey, JSON.stringify(cart));
+    window.localStorage.setItem(cartVariantsStorageKey, JSON.stringify(cartVariants));
+  }, [cart, cartVariants]);
+
+  useEffect(() => {
+    if (!supabase) return;
+    let active = true;
+    const applyUser = (user: User | null) => {
+      if (!active) return;
+      setAuthUser(user);
+      if (!user) return;
+      const metadata = user.user_metadata as Record<string, unknown> | undefined;
+      const googleName = typeof metadata?.full_name === "string"
+        ? metadata.full_name
+        : typeof metadata?.name === "string"
+          ? metadata.name
+          : "";
+      setCheckoutForm((current) => ({
+        ...current,
+        name: current.name || googleName,
+        email: current.email || user.email || "",
+      }));
+    };
+    void supabase.auth.getSession().then(({ data }) => applyUser(data.session?.user ?? null));
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+      applyUser(session?.user ?? null);
+    });
+    return () => {
+      active = false;
+      authListener.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!authUser || !cartItems.length || window.localStorage.getItem(checkoutAfterAuthKey) !== "1") return;
+    const timeout = window.setTimeout(() => {
+      window.localStorage.removeItem(checkoutAfterAuthKey);
+      setAuthOpen(false);
+      setCheckoutOpen(true);
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, [authUser, cartItems.length]);
 
   useEffect(() => {
     if (!toast) return;
@@ -624,9 +710,38 @@ export default function Home() {
     });
     announce("Item removed from cart");
   };
+  const closeAuth = () => {
+    window.localStorage.removeItem(checkoutAfterAuthKey);
+    setAuthOpen(false);
+    setAuthMessage("");
+  };
+  const continueWithGoogle = async () => {
+    if (!supabase) {
+      setAuthMessage("Google sign-in is not available right now. Please try again later.");
+      return;
+    }
+    setAuthLoading(true);
+    setAuthMessage("");
+    const redirectTo = `${window.location.origin}${siteBasePath}/`;
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo },
+    });
+    if (error) {
+      setAuthLoading(false);
+      setAuthMessage("Google sign-in could not start. Please try again.");
+    }
+  };
   const openCheckout = () => {
     if (!cartItems.length) return announce("Add a piece to your cart first");
     if (cartItems.some((product) => product.stock <= 0)) return announce("Remove sold out items before checkout");
+    if (!authUser) {
+      window.localStorage.setItem(checkoutAfterAuthKey, "1");
+      setCartOpen(false);
+      setAuthMessage("");
+      setAuthOpen(true);
+      return;
+    }
     setCartOpen(false);
     setCheckoutOpen(true);
   };
@@ -662,7 +777,7 @@ export default function Home() {
       email: checkoutForm.email.trim(),
       address: checkoutForm.address.trim(),
       ...(appliedCoupon ? { coupon: appliedCoupon.code } : {}),
-      items: cartItems.map((product) => ({ name: `${product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}`, quantity: product.quantity, price: formatINR(product.price) })),
+      items: cartItems.map((product) => ({ name: `${product.billName || product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}`, quantity: product.quantity, price: formatINR(product.price) })),
     };
     let previousOrders: unknown[] = [];
     try {
@@ -687,6 +802,7 @@ export default function Home() {
     window.dispatchEvent(new Event("fanzzy-orders-updated"));
     setOrderConfirmation(newOrder);
     setCart({});
+    setCartVariants({});
     setCheckoutOpen(false);
     setCheckoutForm({ name: "", phone: "", email: "", address: "" });
     setCouponInput("");
@@ -831,6 +947,8 @@ export default function Home() {
       {ordersOpen && <div className="drawer-backdrop" onClick={() => setOrdersOpen(false)}><aside className="orders-drawer" role="dialog" aria-modal="true" aria-labelledby="orders-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR FANZZY ACCOUNT</p><h2 id="orders-title">My orders</h2></div><button aria-label="Close orders" onClick={() => setOrdersOpen(false)}>×</button></div><div className="orders-intro"><p>Track your pieces, check delivery progress, and revisit every order in one place.</p><label>WhatsApp number used at checkout<input type="tel" value={orderLookupPhone} onChange={(event) => setOrderLookupPhone(event.target.value)} placeholder="+91 98765 43210" aria-label="WhatsApp number used at checkout" /></label></div>{visibleOrders.length ? <div className="customer-order-list">{visibleOrders.map((order) => <article className="customer-order-card" key={order.id}><div className="customer-order-head"><div><strong>{order.id}</strong><small>{formatOrderDate(order.date)} · {order.customerName}</small></div><span className={`customer-order-status ${order.status.toLowerCase()}`}>{order.status}</span></div>{order.items?.length ? <div className="customer-order-items">{order.items.map((item) => <div key={`${order.id}-${item.name}`}><span>{item.name} <b>× {item.quantity}</b></span><small>{item.price}</small></div>)}</div> : <p className="customer-order-items legacy-order">Order details are available in your confirmation.</p>}<div className="customer-order-total"><span>Total paid</span><strong>{order.total}</strong></div><button className="module-secondary customer-bill-button" onClick={() => downloadBill(order)}>Download bill ↗</button></article>)}</div> : <div className="orders-empty"><div>✦</div><h3>No orders found yet.</h3><p>Enter the WhatsApp number used at checkout, or start with a piece from the collection.</p><button className="button button-dark" onClick={() => { setOrdersOpen(false); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}>Shop the collection <span>↗</span></button></div>}</aside></div>}
 
       {cartOpen && <div className="drawer-backdrop" onClick={() => setCartOpen(false)}><aside className="cart-drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR CART</p><h2>{cartCount ? `${cartCount} piece${cartCount > 1 ? "s" : ""}` : "A little empty"}</h2></div><button onClick={() => setCartOpen(false)}>×</button></div>{cartItems.length ? <><div className="drawer-items">{cartItems.map((product) => <div className="drawer-item" key={product.cartKey}><img src={product.variant?.image || product.image} alt="" style={imageAdjustmentStyle(product.variant?.adjustments || product.imageAdjustments)} /><div><strong>{product.name}</strong>{product.variant?.name && <small className="cart-variant-name">{product.variant.name}</small>}<small>{formatINR(product.price)}</small><div className="quantity"><button onClick={() => updateQuantity(product.cartKey, -1)} aria-label={`Decrease ${product.name} quantity`}>−</button><span>{product.quantity}</span><button onClick={() => updateQuantity(product.cartKey, 1)} aria-label={`Increase ${product.name} quantity`}>+</button></div></div><div className="cart-item-actions"><b>{formatINR(product.price * product.quantity)}</b><button className="cart-remove" onClick={() => removeFromCart(product.cartKey)} aria-label={`Remove ${product.name} from cart`}>Remove</button></div></div>)}</div><div className="drawer-footer"><div><span>Subtotal</span><strong>{formatINR(subtotal)}</strong></div>{bogoDiscount > 0 && <div className="offer-total"><span>Buy 1 Get 1 discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="offer-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div><span>Delivery</span><strong>{deliveryCharge.enabled ? formatINR(deliveryTotal) : "Free"}</strong></div><div className="drawer-total"><span>Total</span><strong>{formatINR(orderTotal)}</strong></div><p>{bogoDiscount > 0 ? "Buy 1 Get 1 applied to eligible products." : deliveryCharge.enabled ? "Delivery charge applied to this order." : "Complimentary shipping above ₹999."}</p><button className="button button-dark full-width" onClick={openCheckout}>Proceed to buy <span>↗</span></button></div></> : <div className="empty-bag"><div>✦</div><p>Your future favourites<br />belong here.</p><button className="text-link" onClick={() => setCartOpen(false)}>Continue shopping <span>↗</span></button></div>}</aside></div>}
+
+      {authOpen && <div className="drawer-backdrop auth-backdrop" onClick={closeAuth}><section className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close sign in" onClick={closeAuth}>×</button><p className="eyebrow">SECURE CHECKOUT</p><h2 id="auth-title">Sign in to continue.</h2><p className="auth-intro">Use your Google account to continue securely. We never ask for or see your Google password.</p><button className="google-sign-in" onClick={continueWithGoogle} disabled={authLoading}><span className="google-mark" aria-hidden="true">G</span>{authLoading ? "Connecting to Google…" : "Continue with Google"}<span aria-hidden="true">↗</span></button>{authMessage && <p className="auth-message" role="alert">{authMessage}</p>}<p className="auth-note">You’ll return here automatically to finish your order.</p></section></div>}
 
       {checkoutOpen && <div className="drawer-backdrop checkout-backdrop" onClick={() => setCheckoutOpen(false)}><section className="checkout-modal" role="dialog" aria-modal="true" aria-labelledby="checkout-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">CHECKOUT</p><h2 id="checkout-title">Complete your order</h2></div><button aria-label="Close checkout" onClick={() => setCheckoutOpen(false)}>×</button></div><p className="checkout-intro">We’ll use your WhatsApp number to confirm your order and delivery updates.</p><div className="checkout-grid"><label>Customer name<input value={checkoutForm.name} onChange={(event) => setCheckoutForm((current) => ({ ...current, name: event.target.value }))} placeholder="Your full name" required /></label><label>WhatsApp number <span className="required-mark">Required</span><input type="tel" value={checkoutForm.phone} onChange={(event) => setCheckoutForm((current) => ({ ...current, phone: event.target.value }))} placeholder="+91 98765 43210" required /></label><label>Email address <span className="optional-mark">Optional</span><input type="email" value={checkoutForm.email} onChange={(event) => setCheckoutForm((current) => ({ ...current, email: event.target.value }))} placeholder="you@example.com" /></label><label className="checkout-wide">Delivery address<input value={checkoutForm.address} onChange={(event) => setCheckoutForm((current) => ({ ...current, address: event.target.value }))} placeholder="House number, street, city, pincode" required /></label><div className="checkout-coupon checkout-wide"><label htmlFor="checkout-coupon-code">Coupon code <span className="optional-mark">Optional</span></label><div className="coupon-entry"><input id="checkout-coupon-code" value={couponInput} onChange={(event) => { setCouponInput(event.target.value.toUpperCase()); setAppliedCoupon(null); }} placeholder="Enter coupon code" autoCapitalize="characters" /><button className="button button-light" type="button" onClick={applyCoupon}>Apply</button></div>{appliedCoupon && <p className="coupon-success">{appliedCoupon.code} applied · {appliedCoupon.discount} off</p>}</div></div>{bogoDiscount > 0 && <div className="checkout-total coupon-total"><span>Buy 1 Get 1 discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="checkout-total coupon-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div className="checkout-total"><span>Order total</span><strong>{formatINR(orderTotal)}</strong></div><div className="checkout-actions"><button className="button button-dark" onClick={submitCheckout}>Place order <span>↗</span></button><button className="save-text" onClick={() => setCheckoutOpen(false)}>Back to cart</button></div></section></div>}
 

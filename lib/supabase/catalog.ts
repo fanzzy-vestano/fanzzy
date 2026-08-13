@@ -39,6 +39,7 @@ const settingKeys = {
   newsletterSubscribers: "newsletter_subscribers",
   productBarcodes: "product_barcodes",
   productHsnCodes: "product_hsn_codes",
+  productBillNames: "product_bill_names",
   productPricing: "product_pricing",
   productVariants: "product_variants",
   productImageAdjustments: "product_image_adjustments",
