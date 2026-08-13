@@ -374,6 +374,41 @@
   flex-wrap: wrap;
 }
 
+.adjustment-preview {
+  background: #eee6de;
+  cursor: grab;
+  height: 76px;
+  overflow: hidden;
+  position: relative;
+  touch-action: none;
+  width: 76px;
+}
+
+.adjustment-preview:active {
+  cursor: grabbing;
+}
+
+.adjustment-preview img {
+  display: block;
+  height: 100%;
+  max-width: none;
+  pointer-events: none;
+  width: 100%;
+}
+
+.adjustment-preview span {
+  background: rgba(85, 39, 56, .78);
+  bottom: 0;
+  color: #fff8ef;
+  font-family: var(--mono);
+  font-size: 6px;
+  left: 0;
+  letter-spacing: .08em;
+  padding: 4px 5px;
+  position: absolute;
+  text-transform: uppercase;
+}
+
 .image-adjustment-controls {
   align-items: end;
   border-top: 1px solid rgba(85, 39, 56, .14);

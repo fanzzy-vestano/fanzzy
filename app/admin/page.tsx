@@ -143,6 +143,45 @@ const imageTransformStyle = (adjustments: ImageAdjustments) => ({
   objectPosition: `${50 + adjustments.x / 2}% ${50 + adjustments.y / 2}%`,
   transform: `scale(${adjustments.zoom}) rotate(${adjustments.rotate}deg)`,
 });
+function ImageAdjustmentPreview({
+  src,
+  alt,
+  adjustments,
+  onChange,
+  className = "",
+}: {
+  src: string;
+  alt: string;
+  adjustments: ImageAdjustments;
+  onChange: (next: ImageAdjustments) => void;
+  className?: string;
+}) {
+  const drag = useRef<{ pointerId: number; x: number; y: number; startX: number; startY: number } | null>(null);
+  return (
+    <div
+      className={`adjustment-preview ${className}`}
+      onPointerDown={(event) => {
+        drag.current = { pointerId: event.pointerId, x: adjustments.x, y: adjustments.y, startX: event.clientX, startY: event.clientY };
+        event.currentTarget.setPointerCapture(event.pointerId);
+      }}
+      onPointerMove={(event) => {
+        const start = drag.current;
+        if (!start || start.pointerId !== event.pointerId) return;
+        onChange({
+          ...adjustments,
+          x: Math.min(50, Math.max(-50, start.x + (event.clientX - start.startX) / 2)),
+          y: Math.min(50, Math.max(-50, start.y + (event.clientY - start.startY) / 2)),
+        });
+      }}
+      onPointerUp={() => { drag.current = null; }}
+      onPointerCancel={() => { drag.current = null; }}
+      title="Drag to position the image"
+    >
+      <img src={src} alt={alt} draggable={false} style={imageTransformStyle(adjustments)} />
+      <span>Drag</span>
+    </div>
+  );
+}
 function ImageAdjustmentControls({
   adjustments,
   onChange,
@@ -4685,7 +4724,7 @@ function ProductLibraryWorkspace({
             <p className="eyebrow">NEW PRODUCT</p>
             <h3 id="add-product-title">Add a product</h3>
             <div className="product-image-upload">
-              <img src={newProductImage} alt="Product preview" style={imageTransformStyle(newImageAdjustments)} />
+              <ImageAdjustmentPreview src={newProductImage} alt="Product preview" adjustments={newImageAdjustments} onChange={setNewImageAdjustments} />
               <label>
                 <strong>Upload product image</strong>
                 <small>JPG, PNG or WEBP · click to choose</small>
@@ -4698,7 +4737,7 @@ function ProductLibraryWorkspace({
               <ImageAdjustmentControls adjustments={newImageAdjustments} onChange={setNewImageAdjustments} />
             </div>
             <div className="product-image-upload hover-image-upload">
-              <img src={newProductHoverImage} alt="Product hover preview" style={imageTransformStyle(newHoverAdjustments)} />
+              <ImageAdjustmentPreview src={newProductHoverImage} alt="Product hover preview" adjustments={newHoverAdjustments} onChange={setNewHoverAdjustments} />
               <label>
                 <strong>Upload hover image</strong>
                 <small>Shown when customers point at this product</small>
@@ -4745,7 +4784,7 @@ function ProductLibraryWorkspace({
                         placeholder="Image URL (optional)"
                         aria-label={`Variant ${index + 1} image URL`}
                       />
-                      <img className="variant-adjust-preview" src={variant.image || newProductImage} alt="" style={imageTransformStyle(variant.adjustments || defaultImageAdjustments)} />
+                      <ImageAdjustmentPreview className="variant-adjust-preview" src={variant.image || newProductImage} alt="Variant preview" adjustments={variant.adjustments || defaultImageAdjustments} onChange={(adjustments) => updateNewVariantAdjustments(index, adjustments)} />
                       <label className="variant-upload">
                         Upload image
                         <input
@@ -4974,11 +5013,7 @@ function ProductLibraryWorkspace({
           <p className="eyebrow">EDIT PRODUCT</p>
           <h3>Edit {selectedProduct.name}</h3>
           <div className="product-image-upload">
-            <img
-              src={editValues.image || selectedProduct.image}
-              alt="Product main image preview"
-              style={imageTransformStyle(editImageAdjustments)}
-            />
+            <ImageAdjustmentPreview src={editValues.image || selectedProduct.image} alt="Product main image preview" adjustments={editImageAdjustments} onChange={setEditImageAdjustments} />
             <label>
               <strong>Upload main image</strong>
               <small>Shown as the primary product image</small>
@@ -4991,11 +5026,7 @@ function ProductLibraryWorkspace({
             <ImageAdjustmentControls adjustments={editImageAdjustments} onChange={setEditImageAdjustments} />
           </div>
           <div className="product-image-upload hover-image-upload">
-            <img
-              src={editValues.hoverImage || selectedProduct.image}
-              alt="Product hover preview"
-              style={imageTransformStyle(editHoverAdjustments)}
-            />
+            <ImageAdjustmentPreview src={editValues.hoverImage || selectedProduct.image} alt="Product hover preview" adjustments={editHoverAdjustments} onChange={setEditHoverAdjustments} />
             <label>
               <strong>Upload hover image</strong>
               <small>Shown when customers point at this product</small>
@@ -5042,7 +5073,7 @@ function ProductLibraryWorkspace({
                       placeholder="Image URL (optional)"
                       aria-label={`Variant ${index + 1} image URL`}
                     />
-                    <img className="variant-adjust-preview" src={variant.image || editValues.image || selectedProduct.image} alt="" style={imageTransformStyle(variant.adjustments || defaultImageAdjustments)} />
+                    <ImageAdjustmentPreview className="variant-adjust-preview" src={variant.image || editValues.image || selectedProduct.image} alt="Variant preview" adjustments={variant.adjustments || defaultImageAdjustments} onChange={(adjustments) => updateEditVariantAdjustments(index, adjustments)} />
                     <label className="variant-upload">
                       Upload image
                       <input
