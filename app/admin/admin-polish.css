@@ -448,15 +448,13 @@
 
 .variant-editor-row {
   align-items: start;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) 58px auto 30px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) 140px auto 30px;
 }
 
 .variant-adjust-preview {
   background: #eee6de;
-  height: 38px;
-  object-fit: cover;
-  overflow: hidden;
-  width: 58px;
+  height: 110px;
+  width: 140px;
 }
 
 .variant-editor-row .image-adjustment-controls {
