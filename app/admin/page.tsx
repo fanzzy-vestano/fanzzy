@@ -216,6 +216,8 @@ type OrderRecord = {
   status: OrderStatus;
   total: string;
   customerName: string;
+  userId?: string;
+  userEmail?: string;
   phone: string;
   email?: string;
   address?: string;
@@ -3143,6 +3145,7 @@ function OrdersWorkspace({
                 {selectedOrder.customerName} ·{" "}
                 {formatOrderDate(selectedOrder.date)} · {selectedOrder.total}
               </p>
+              <section className="admin-customer-details"><p className="eyebrow">CUSTOMER DETAILS</p><dl><div><dt>Name</dt><dd>{selectedOrder.customerName || "Not provided"}</dd></div><div><dt>Email</dt><dd>{selectedOrder.email || selectedOrder.userEmail || "Not provided"}</dd></div><div><dt>WhatsApp</dt><dd>{selectedOrder.phone || "Not provided"}</dd></div><div className="admin-customer-address"><dt>Delivery address</dt><dd>{selectedOrder.address || "Not provided"}</dd></div>{selectedOrder.userId && <div className="admin-customer-account"><dt>Account ID</dt><dd>{selectedOrder.userId}</dd></div>}</dl></section>
               {selectedOrder.items?.length ? <section className="admin-order-items"><p className="eyebrow">ITEMS IN THIS ORDER</p><div>{selectedOrder.items.map((item) => { const product = getOrderedProduct(item); const variant = item.name.includes(" · ") ? item.name.split(" · ").slice(1).join(" · ") : ""; return <article key={`${selectedOrder.id}-${item.name}`}><>{product?.image ? <img src={product.image} alt="" /> : <span className="admin-order-item-placeholder" aria-hidden="true">✦</span>}</><span><strong>{item.name}</strong>{product ? <><small>{product.category} · SKU {product.sku}</small><small>Current stock: {product.stock} · {product.status}</small></> : <small>Product no longer in the catalog</small>}{variant && <small>Selected option: {variant}</small>}<em>Quantity ordered: {item.quantity}</em></span><b>{item.price}</b></article>; })}</div></section> : <p className="admin-order-items-empty">This older order has no saved item details.</p>}
               <div className="order-status-editor">
                 <label>
