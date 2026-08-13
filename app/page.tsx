@@ -369,6 +369,7 @@ export default function Home() {
           compareAt: product.compareAt,
           variants: variants?.map((variant, variantIndex) => ({
             ...variant,
+            name: variant.name || `Option ${variantIndex + 1}`,
             adjustments: normalizeImageAdjustments(savedAdjustments?.variants?.[variantIndex] || variant.adjustments),
           })),
           imageAdjustments: savedAdjustments?.image,

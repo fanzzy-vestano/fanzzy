@@ -26,6 +26,27 @@ export type RazorpayPayment = {
   notes?: Record<string, unknown>;
 };
 
+const paymentAddress = (payment: RazorpayPayment) => {
+  const address = payment.notes?.address;
+  return typeof address === "string" && address.trim() ? address.trim() : undefined;
+};
+
+const customerEmail = (email?: string) => {
+  const normalized = email?.trim();
+  // Razorpay uses this placeholder for some payment methods. It is not the customer's email.
+  return normalized && !normalized.toLowerCase().endsWith("@razorpay.com") ? normalized : undefined;
+};
+
+const restorePaymentContactDetails = (order: StoredOrder, payment: RazorpayPayment) => {
+  const address = paymentAddress(payment);
+  const email = customerEmail(payment.email);
+  if (payment.contact?.trim()) order.phone = payment.contact.trim();
+  if (address) order.address = address;
+  if (email) order.email = email;
+  if (!email && order.email?.toLowerCase().endsWith("@razorpay.com")) delete order.email;
+  if (!email && order.customerName === payment.email?.split("@")[0]) order.customerName = "Razorpay customer";
+};
+
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "https://pdrcrkxeyqxqgpwfxqpu.supabase.co";
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
   || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
@@ -92,7 +113,11 @@ export async function finalizeRazorpayPayment(payment: RazorpayPayment, receipt?
   if (!payment.id) throw new Error("Razorpay payment ID is missing");
   const orders = await readOrders();
   let order = orders.find((candidate) => candidate.razorpayPaymentId === payment.id);
-  if (order?.paymentStatus === "paid" && order.inventoryAdjusted !== false) return order;
+  if (order?.paymentStatus === "paid" && order.inventoryAdjusted !== false) {
+    restorePaymentContactDetails(order, payment);
+    await writeOrders(orders);
+    return order;
+  }
 
   if (!order) {
     order = orders.find((candidate) => candidate.razorpayOrderId && candidate.razorpayOrderId === payment.order_id);
@@ -103,9 +128,10 @@ export async function finalizeRazorpayPayment(payment: RazorpayPayment, receipt?
       date: payment.created_at ? new Date(payment.created_at * 1000).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10),
       status: "Processing",
       total: asMoney(Number(payment.amount) || 0),
-      customerName: payment.email?.split("@")[0] || "Razorpay customer",
+      customerName: customerEmail(payment.email)?.split("@")[0] || "Razorpay customer",
       phone: payment.contact || "Not provided",
-      email: payment.email || undefined,
+      email: customerEmail(payment.email),
+      address: paymentAddress(payment),
       items: [],
     };
     orders.unshift(order);
@@ -114,6 +140,7 @@ export async function finalizeRazorpayPayment(payment: RazorpayPayment, receipt?
   order.paymentStatus = "paid";
   order.razorpayOrderId = payment.order_id || order.razorpayOrderId;
   order.razorpayPaymentId = payment.id;
+  restorePaymentContactDetails(order, payment);
   order.inventoryAdjusted = false;
   await writeOrders(orders);
 
