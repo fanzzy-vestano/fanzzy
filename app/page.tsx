@@ -54,7 +54,7 @@ type CustomerOrder = {
   paymentStatus?: "pending" | "paid";
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
-  items?: Array<{ name: string; quantity: number; price: string; productId?: string }>;
+  items?: Array<{ name: string; quantity: number; price: string; productId?: string; image?: string; variantName?: string; variantImage?: string }>;
 };
 type AssistantMessage = { role: "user" | "assistant"; text: string; productIds?: string[] };
 type RazorpayCheckoutResponse = {
@@ -1005,7 +1005,7 @@ export default function Home() {
       address: checkoutForm.address.trim(),
       paymentStatus: "pending",
       ...(appliedCoupon ? { coupon: appliedCoupon.code } : {}),
-      items: cartItems.map((product) => ({ productId: product.id, name: `${product.billName || product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}`, quantity: product.quantity, price: formatINR(product.price) })),
+      items: cartItems.map((product) => ({ productId: product.id, name: `${product.billName || product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}`, quantity: product.quantity, price: formatINR(product.price), image: product.image, variantName: product.variant?.name, variantImage: product.variant?.image })),
     };
 
     setIsPaying(true);

@@ -225,7 +225,7 @@ type OrderRecord = {
   paymentStatus?: "pending" | "paid";
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
-  items?: Array<{ name: string; quantity: number; price: string; productId?: string }>;
+  items?: Array<{ name: string; quantity: number; price: string; productId?: string; image?: string; variantName?: string; variantImage?: string }>;
 };
 const adminOrders: OrderRecord[] = [];
 const isDemoOrder = (order: { id?: string }) => /^#FZ-104[4-8]$/.test(String(order.id ?? ""));
@@ -2891,7 +2891,8 @@ function OrdersWorkspace({
   const [toDate, setToDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [selectedOrder, setSelectedOrder] = useState<OrderRecord | null>(null);
   const [phone, setPhone] = useState("");
-  const [catalogProducts, setCatalogProducts] = useState<Array<{ id: string; name: string; sku: string; category: string; stock: number; status: string; image: string; variants: ProductVariant[] }>>([]);
+  const [catalogProducts, setCatalogProducts] = useState<Array<{ id: string; name: string; sku: string; category: string; stock: number; price: number; status: string; image: string; variants: ProductVariant[] }>>([]);
+  const [orderItemDraft, setOrderItemDraft] = useState({ productId: "", variantName: "", quantity: "1", price: "" });
 
   useEffect(() => {
     const syncOrders = async () => {
@@ -2925,6 +2926,7 @@ function OrdersWorkspace({
           sku: product.sku,
           category: product.category,
           stock: product.stock,
+          price: product.price,
           status: product.status,
           image: product.image || adminPlaceholderImage,
           variants: Array.isArray(variantsMap[product.sku]) ? variantsMap[product.sku] : [],
@@ -2979,10 +2981,32 @@ function OrdersWorkspace({
   const openOrder = (order: OrderRecord) => {
     setSelectedOrder(order);
     setPhone(order.phone);
+    setOrderItemDraft({ productId: "", variantName: "", quantity: "1", price: "" });
   };
   const getOrderedProduct = (item: NonNullable<OrderRecord["items"]>[number]) => {
     const itemName = item.name.split(" · ")[0].trim().toLowerCase();
     return catalogProducts.find((product) => product.id === item.productId || product.name.trim().toLowerCase() === itemName);
+  };
+  const draftProduct = catalogProducts.find((product) => product.id === orderItemDraft.productId);
+  const addMissingOrderItem = () => {
+    if (!selectedOrder || !draftProduct) return onNotify("Choose the ordered product first");
+    const quantity = Math.max(1, Math.floor(Number(orderItemDraft.quantity) || 1));
+    const variant = draftProduct.variants.find((candidate) => candidate.name === orderItemDraft.variantName);
+    const price = orderItemDraft.price.trim() || `₹${draftProduct.price.toLocaleString("en-IN")}`;
+    const item = {
+      productId: draftProduct.id,
+      name: `${draftProduct.name}${variant?.name ? ` · ${variant.name}` : ""}`,
+      quantity,
+      price,
+      image: draftProduct.image,
+      variantName: variant?.name,
+      variantImage: variant?.image,
+    };
+    const updated = { ...selectedOrder, items: [...(selectedOrder.items || []), item] };
+    setSelectedOrder(updated);
+    void persistOrders(orders.map((order) => order.id === updated.id ? updated : order));
+    setOrderItemDraft({ productId: "", variantName: "", quantity: "1", price: "" });
+    onNotify(`${item.name} added to ${updated.id}`);
   };
   const downloadBill = (order: OrderRecord) => {
     if (!printOrderBill(order)) onNotify("Allow pop-ups to download the bill");
@@ -3169,7 +3193,7 @@ function OrdersWorkspace({
               </p>
               <p className="product-detail-meta">Payment: {selectedOrder.paymentStatus === "paid" ? "Paid" : "Awaiting Razorpay confirmation"}{selectedOrder.razorpayPaymentId ? ` · Razorpay payment ${selectedOrder.razorpayPaymentId}` : selectedOrder.razorpayOrderId ? ` · Razorpay order ${selectedOrder.razorpayOrderId}` : ""}</p>
               <section className="admin-customer-details"><p className="eyebrow">CUSTOMER DETAILS</p><dl><div><dt>Name</dt><dd>{selectedOrder.customerName || "Not provided"}</dd></div><div><dt>Email</dt><dd>{selectedOrder.email || selectedOrder.userEmail || "Not provided"}</dd></div><div><dt>WhatsApp</dt><dd>{selectedOrder.phone || "Not provided"}</dd></div><div className="admin-customer-address"><dt>Delivery address</dt><dd>{selectedOrder.address || "Not provided"}</dd></div>{selectedOrder.userId && <div className="admin-customer-account"><dt>Account ID</dt><dd>{selectedOrder.userId}</dd></div>}</dl></section>
-              {selectedOrder.items?.length ? <section className="admin-order-items"><p className="eyebrow">ITEMS IN THIS ORDER</p><div>{selectedOrder.items.map((item) => { const product = getOrderedProduct(item); const variant = item.name.includes(" · ") ? item.name.split(" · ").slice(1).join(" · ") : ""; const selectedVariant = variant ? product?.variants.find((candidate) => candidate.name.trim().toLowerCase() === variant.trim().toLowerCase()) : undefined; const displayImage = selectedVariant?.image || product?.image; return <article key={`${selectedOrder.id}-${item.name}`}><>{displayImage ? <img src={displayImage} alt={variant ? `${item.name} variant` : ""} /> : <span className="admin-order-item-placeholder" aria-hidden="true">✦</span>}</><span><strong>{item.name}</strong>{product ? <><small>{product.category} · SKU {product.sku}</small><small>Current stock: {product.stock} · {product.status}</small></> : <small>Product no longer in the catalog</small>}{variant && <small>Selected variant: {variant}{selectedVariant ? " · Variant image shown" : ""}</small>}<em>Quantity ordered: {item.quantity}</em></span><b>{item.price}</b></article>; })}</div></section> : <p className="admin-order-items-empty">This older order has no saved item details.</p>}
+              {selectedOrder.items?.length ? <section className="admin-order-items"><p className="eyebrow">ITEMS IN THIS ORDER</p><div>{selectedOrder.items.map((item) => { const product = getOrderedProduct(item); const variant = item.variantName || (item.name.includes(" · ") ? item.name.split(" · ").slice(1).join(" · ") : ""); const selectedVariant = variant ? product?.variants.find((candidate) => candidate.name.trim().toLowerCase() === variant.trim().toLowerCase()) : undefined; const displayImage = item.variantImage || selectedVariant?.image || item.image || product?.image; return <article key={`${selectedOrder.id}-${item.name}`}><>{displayImage ? <img src={displayImage} alt={variant ? `${item.name} variant` : ""} /> : <span className="admin-order-item-placeholder" aria-hidden="true">✦</span>}</><span><strong>{item.name}</strong>{product ? <><small>{product.category} · SKU {product.sku}</small><small>Current stock: {product.stock} · {product.status}</small></> : <small>Product no longer in the catalog</small>}{variant && <small>Selected variant: {variant}{displayImage ? " · Variant image shown" : ""}</small>}<em>Quantity ordered: {item.quantity}</em></span><b>{item.price}</b></article>; })}</div></section> : <section className="admin-order-items admin-order-item-repair"><p className="eyebrow">ADD MISSING ORDER DETAILS</p><p>This older paid order has no saved product information. Select the product and variant to restore its order record.</p><div className="admin-order-item-repair-fields"><label>Product<select value={orderItemDraft.productId} onChange={(event) => { const product = catalogProducts.find((candidate) => candidate.id === event.target.value); setOrderItemDraft({ productId: event.target.value, variantName: "", quantity: "1", price: product ? `₹${product.price.toLocaleString("en-IN")}` : "" }); }}><option value="">Select product</option>{catalogProducts.map((product) => <option key={product.id} value={product.id}>{product.name} · {product.sku}</option>)}</select></label>{draftProduct?.variants.length ? <label>Variant<select value={orderItemDraft.variantName} onChange={(event) => setOrderItemDraft((current) => ({ ...current, variantName: event.target.value }))}><option value="">Select variant</option>{draftProduct.variants.map((variant, index) => <option key={`${variant.name}-${index}`} value={variant.name}>{variant.name || `Option ${index + 1}`}</option>)}</select></label> : null}<label>Quantity<input type="number" min="1" value={orderItemDraft.quantity} onChange={(event) => setOrderItemDraft((current) => ({ ...current, quantity: event.target.value }))} /></label><label>Price<input value={orderItemDraft.price} onChange={(event) => setOrderItemDraft((current) => ({ ...current, price: event.target.value }))} placeholder="₹0" /></label></div>{draftProduct && <div className="admin-order-item-repair-preview">{orderItemDraft.variantName && draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image ? <img src={draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image} alt="Selected variant preview" /> : draftProduct.image ? <img src={draftProduct.image} alt="Selected product preview" /> : null}<span>{orderItemDraft.variantName ? `Selected variant: ${orderItemDraft.variantName}` : "Select a variant if applicable"}</span></div>}<button className="module-primary" type="button" onClick={addMissingOrderItem}>Add to this order</button></section>}
               <div className="order-status-editor">
                 <label>
                   Status
