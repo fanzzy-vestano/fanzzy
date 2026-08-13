@@ -2891,7 +2891,7 @@ function OrdersWorkspace({
   const [toDate, setToDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [selectedOrder, setSelectedOrder] = useState<OrderRecord | null>(null);
   const [phone, setPhone] = useState("");
-  const [catalogProducts, setCatalogProducts] = useState<Array<{ id: string; name: string; sku: string; category: string; stock: number; status: string; image: string }>>([]);
+  const [catalogProducts, setCatalogProducts] = useState<Array<{ id: string; name: string; sku: string; category: string; stock: number; status: string; image: string; variants: ProductVariant[] }>>([]);
 
   useEffect(() => {
     const syncOrders = async () => {
@@ -2908,7 +2908,16 @@ function OrdersWorkspace({
         window.localStorage.removeItem("fanzzy-orders");
       }
       if (merged.size) setOrders(Array.from(merged.values()).filter(hasConfirmedPayment));
-      const catalog = await fetchCatalogProducts();
+      const [catalog, variantsRemote] = await Promise.all([fetchCatalogProducts(), fetchStoreSetting("productVariants")]);
+      let variantsMap: Record<string, ProductVariant[]> = {};
+      if (variantsRemote.value) {
+        try {
+          const parsed = JSON.parse(variantsRemote.value) as Record<string, ProductVariant[]>;
+          if (parsed && typeof parsed === "object") variantsMap = parsed;
+        } catch {
+          variantsMap = {};
+        }
+      }
       if (!catalog.error && catalog.data) {
         setCatalogProducts(catalog.data.filter((product) => !isDemoProduct(product)).map((product) => ({
           id: product.sku.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
@@ -2918,6 +2927,7 @@ function OrdersWorkspace({
           stock: product.stock,
           status: product.status,
           image: product.image || adminPlaceholderImage,
+          variants: Array.isArray(variantsMap[product.sku]) ? variantsMap[product.sku] : [],
         })));
       }
     };
@@ -3159,7 +3169,7 @@ function OrdersWorkspace({
               </p>
               <p className="product-detail-meta">Payment: {selectedOrder.paymentStatus === "paid" ? "Paid" : "Awaiting Razorpay confirmation"}{selectedOrder.razorpayPaymentId ? ` · Razorpay payment ${selectedOrder.razorpayPaymentId}` : selectedOrder.razorpayOrderId ? ` · Razorpay order ${selectedOrder.razorpayOrderId}` : ""}</p>
               <section className="admin-customer-details"><p className="eyebrow">CUSTOMER DETAILS</p><dl><div><dt>Name</dt><dd>{selectedOrder.customerName || "Not provided"}</dd></div><div><dt>Email</dt><dd>{selectedOrder.email || selectedOrder.userEmail || "Not provided"}</dd></div><div><dt>WhatsApp</dt><dd>{selectedOrder.phone || "Not provided"}</dd></div><div className="admin-customer-address"><dt>Delivery address</dt><dd>{selectedOrder.address || "Not provided"}</dd></div>{selectedOrder.userId && <div className="admin-customer-account"><dt>Account ID</dt><dd>{selectedOrder.userId}</dd></div>}</dl></section>
-              {selectedOrder.items?.length ? <section className="admin-order-items"><p className="eyebrow">ITEMS IN THIS ORDER</p><div>{selectedOrder.items.map((item) => { const product = getOrderedProduct(item); const variant = item.name.includes(" · ") ? item.name.split(" · ").slice(1).join(" · ") : ""; return <article key={`${selectedOrder.id}-${item.name}`}><>{product?.image ? <img src={product.image} alt="" /> : <span className="admin-order-item-placeholder" aria-hidden="true">✦</span>}</><span><strong>{item.name}</strong>{product ? <><small>{product.category} · SKU {product.sku}</small><small>Current stock: {product.stock} · {product.status}</small></> : <small>Product no longer in the catalog</small>}{variant && <small>Selected option: {variant}</small>}<em>Quantity ordered: {item.quantity}</em></span><b>{item.price}</b></article>; })}</div></section> : <p className="admin-order-items-empty">This older order has no saved item details.</p>}
+              {selectedOrder.items?.length ? <section className="admin-order-items"><p className="eyebrow">ITEMS IN THIS ORDER</p><div>{selectedOrder.items.map((item) => { const product = getOrderedProduct(item); const variant = item.name.includes(" · ") ? item.name.split(" · ").slice(1).join(" · ") : ""; const selectedVariant = variant ? product?.variants.find((candidate) => candidate.name.trim().toLowerCase() === variant.trim().toLowerCase()) : undefined; const displayImage = selectedVariant?.image || product?.image; return <article key={`${selectedOrder.id}-${item.name}`}><>{displayImage ? <img src={displayImage} alt={variant ? `${item.name} variant` : ""} /> : <span className="admin-order-item-placeholder" aria-hidden="true">✦</span>}</><span><strong>{item.name}</strong>{product ? <><small>{product.category} · SKU {product.sku}</small><small>Current stock: {product.stock} · {product.status}</small></> : <small>Product no longer in the catalog</small>}{variant && <small>Selected variant: {variant}{selectedVariant ? " · Variant image shown" : ""}</small>}<em>Quantity ordered: {item.quantity}</em></span><b>{item.price}</b></article>; })}</div></section> : <p className="admin-order-items-empty">This older order has no saved item details.</p>}
               <div className="order-status-editor">
                 <label>
                   Status
