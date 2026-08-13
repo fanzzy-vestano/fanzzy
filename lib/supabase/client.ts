@@ -11,3 +11,17 @@ export const supabase =
   supabaseUrl && supabasePublishableKey
     ? createBrowserClient(supabaseUrl, supabasePublishableKey)
     : null;
+
+export async function isGoogleProviderEnabled(): Promise<boolean | null> {
+  if (!supabaseUrl || !supabasePublishableKey) return null;
+  try {
+    const response = await fetch(`${supabaseUrl}/auth/v1/settings`, {
+      headers: { apikey: supabasePublishableKey },
+    });
+    if (!response.ok) return null;
+    const settings = await response.json() as { external?: { google?: boolean } };
+    return settings.external?.google === true;
+  } catch {
+    return null;
+  }
+}

@@ -11,7 +11,7 @@ import {
   saveStoreSetting,
 } from "../lib/supabase/catalog";
 import { printOrderBill } from "../lib/order-bill";
-import { supabase } from "../lib/supabase/client";
+import { isGoogleProviderEnabled, supabase } from "../lib/supabase/client";
 
 type Product = {
   id: string;
@@ -722,6 +722,12 @@ export default function Home() {
     }
     setAuthLoading(true);
     setAuthMessage("");
+    const googleEnabled = await isGoogleProviderEnabled();
+    if (googleEnabled === false) {
+      setAuthLoading(false);
+      setAuthMessage("Google sign-in is not enabled for this store yet. Please enable Google under Supabase → Authentication → Providers.");
+      return;
+    }
     const redirectTo = `${window.location.origin}${siteBasePath}/`;
     const { error } = await supabase.auth.signInWithOAuth({
       provider: "google",
