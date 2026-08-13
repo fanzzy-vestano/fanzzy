@@ -52,7 +52,7 @@ type CustomerOrder = {
   email?: string;
   address?: string;
   coupon?: string;
-  paymentStatus?: "paid";
+  paymentStatus?: "pending" | "paid";
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
   items?: Array<{ name: string; quantity: number; price: string; productId?: string }>;
@@ -71,7 +71,7 @@ type RazorpayCheckoutOptions = {
   description: string;
   order_id: string;
   prefill: { name: string; contact: string; email?: string };
-  notes: { address: string };
+  notes: { address: string; fanzzy_order_id: string };
   theme: { color: string };
   handler: (response: RazorpayCheckoutResponse) => void;
   modal: { ondismiss: () => void };
@@ -941,6 +941,31 @@ export default function Home() {
       ? `${newOrder.id} placed successfully. Inventory needs a manual update.`
       : `${newOrder.id} placed successfully`);
   };
+  const persistPendingOrder = async (newOrder: CustomerOrder) => {
+    if (!authUser) throw new Error("Sign in before placing an order");
+    const remote = await fetchStoreOrders<CustomerOrder>();
+    const merged = new Map<string, CustomerOrder>();
+    remote.data?.forEach((order) => { if (order?.id) merged.set(order.id, order); });
+    try {
+      const stored = window.localStorage.getItem(`fanzzy-orders:${authUser.id}`);
+      const localOrders = stored ? JSON.parse(stored) : [];
+      if (Array.isArray(localOrders)) {
+        localOrders.forEach((order) => {
+          if (order?.id && !merged.has(order.id)) merged.set(order.id, order as CustomerOrder);
+        });
+      }
+    } catch {
+      // A corrupt local cache must not prevent the server-side order record.
+    }
+    const nextOrders = [newOrder, ...Array.from(merged.values()).filter((order) => order.id !== newOrder.id)];
+    const saveError = await saveStoreOrders(nextOrders);
+    if (saveError) throw new Error("Could not save the order record. Please try again.");
+    window.localStorage.setItem(
+      `fanzzy-orders:${authUser.id}`,
+      JSON.stringify(nextOrders.filter((order) => order.userId === authUser.id)),
+    );
+    window.dispatchEvent(new Event("fanzzy-orders-updated"));
+  };
   const submitCheckout = async () => {
     if (isPaying) return;
     if (!authUser) {
@@ -969,19 +994,24 @@ export default function Home() {
       phone: checkoutForm.phone.trim(),
       email: checkoutForm.email.trim(),
       address: checkoutForm.address.trim(),
+      paymentStatus: "pending",
       ...(appliedCoupon ? { coupon: appliedCoupon.code } : {}),
       items: cartItems.map((product) => ({ productId: product.id, name: `${product.billName || product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}`, quantity: product.quantity, price: formatINR(product.price) })),
     };
 
     setIsPaying(true);
     try {
+      // Save before opening Razorpay so a completed payment can always be matched
+      // in Admin Orders, even if the customer's browser closes during the callback.
+      await persistPendingOrder(pendingOrder);
       const orderResponse = await fetch("/api/razorpay/order", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ amount: Math.round(orderTotal * 100), receipt: orderId.replace("#", "") }),
+        body: JSON.stringify({ amount: Math.round(orderTotal * 100), receipt: orderId.replace("#", ""), fanzzyOrderId: orderId }),
       });
       const razorpayOrder = await orderResponse.json() as { id?: string; amount?: number; currency?: string; keyId?: string; error?: string };
       if (!orderResponse.ok || !razorpayOrder.id || !razorpayOrder.keyId) throw new Error(razorpayOrder.error || "Razorpay order creation failed");
+      await persistPendingOrder({ ...pendingOrder, razorpayOrderId: razorpayOrder.id });
       const Razorpay = await loadRazorpayCheckout();
       const checkout = new Razorpay({
         key: razorpayOrder.keyId,
@@ -991,7 +1021,7 @@ export default function Home() {
         description: `Fanzzy order ${orderId}`,
         order_id: razorpayOrder.id,
         prefill: { name, contact: checkoutForm.phone.trim(), ...(checkoutForm.email.trim() ? { email: checkoutForm.email.trim() } : {}) },
-        notes: { address: checkoutForm.address.trim() },
+        notes: { address: checkoutForm.address.trim(), fanzzy_order_id: orderId },
         theme: { color: "#4b1c2b" },
         handler: (payment) => {
           void (async () => {
