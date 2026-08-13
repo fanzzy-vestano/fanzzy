@@ -71,6 +71,12 @@ img { display: block; width: 100%; }
 .google-sign-in { align-items: center; background: #fff; border: 1px solid var(--line); color: var(--ink); display: flex; font-size: 11px; gap: 12px; justify-content: space-between; padding: 15px 17px; width: 100%; }
 .google-sign-in:hover { border-color: var(--wine); }
 .google-sign-in:disabled { cursor: wait; opacity: .65; }
+.otp-auth-form { display: grid; gap: 14px; }
+.otp-auth-form label { color: var(--wine); display: grid; font-family: var(--mono); font-size: 8px; gap: 8px; letter-spacing: .07em; text-transform: uppercase; }
+.otp-auth-form input { background: #fffdf9; border: 1px solid var(--line); color: var(--ink); font-family: var(--sans); font-size: 13px; letter-spacing: 0; outline: 0; padding: 14px 15px; text-transform: none; }
+.otp-auth-form input:focus { border-color: var(--wine); }
+.email-otp-mark { color: var(--wine); font-size: 15px; }
+.auth-resend { background: transparent; color: var(--wine); font-family: var(--mono); font-size: 8px; justify-self: start; letter-spacing: .06em; padding: 2px 0; text-decoration: underline; text-underline-offset: 3px; text-transform: uppercase; }
 .guest-checkout { align-items: center; background: transparent; border: 0; border-bottom: 1px solid var(--line); color: var(--wine); display: flex; font-family: var(--mono); font-size: 9px; justify-content: space-between; letter-spacing: .08em; padding: 16px 4px 12px; text-transform: uppercase; width: 100%; }
 .guest-checkout:hover { border-color: var(--wine); }
 .guest-checkout:disabled { cursor: wait; opacity: .65; }
@@ -204,6 +210,8 @@ img { display: block; width: 100%; }
 .customer-order-status.packed { color: #8f6b42; }.customer-order-status.shipped { color: #55747d; }.customer-order-status.delivered { color: #5f7a55; }.customer-order-status.cancelled { color: #a45d64; }
 .customer-order-items { border-bottom: 1px solid var(--line); border-top: 1px solid var(--line); display: grid; gap: 10px; margin-top: 17px; padding: 14px 0; }
 .customer-order-items > div { align-items: center; display: flex; font-size: 12px; justify-content: space-between; gap: 16px; }
+.customer-order-items .customer-order-product { align-items: center; background: transparent; color: inherit; display: flex; font-size: 12px; gap: 12px; justify-content: space-between; padding: 2px 0; text-align: left; width: 100%; }
+.customer-order-product:hover .order-product-copy strong { color: var(--wine); }.customer-order-product img,.order-product-placeholder { background: #f0e8df; flex: 0 0 46px; height: 52px; object-fit: cover; width: 46px; }.order-product-placeholder { align-items: center; color: var(--gold); display: flex; font-size: 15px; justify-content: center; }.customer-order-product .order-product-copy { display: grid; flex: 1; gap: 4px; min-width: 0; }.order-product-copy strong { color: var(--ink); font-family: var(--serif); font-size: 15px; font-weight: 500; transition: color .2s ease; }.order-product-copy b { color: var(--muted); font-family: var(--mono); font-size: 9px; font-weight: 400; }.order-product-copy em { color: var(--muted); font-family: var(--mono); font-size: 8px; font-style: normal; letter-spacing: .05em; text-transform: uppercase; }
 .customer-order-items span { color: var(--ink); }.customer-order-items span b { color: var(--muted); font-family: var(--mono); font-size: 9px; font-weight: 400; }.customer-order-items small { color: var(--wine); font-family: var(--mono); font-size: 9px; }.legacy-order { border-bottom: 0; color: var(--muted); display: block; font-size: 10px; line-height: 1.5; }
 .customer-order-total { align-items: center; display: flex; justify-content: space-between; padding-top: 14px; }.customer-order-total span { color: var(--muted); font-size: 10px; }.customer-order-total strong { color: var(--wine); font-family: var(--mono); font-size: 12px; font-weight: 400; }
 .orders-empty { align-items: center; display: flex; flex: 1; flex-direction: column; justify-content: center; padding: 45px 20px; text-align: center; }.orders-empty > div { color: var(--gold); font-size: 38px; }.orders-empty h3 { color: var(--wine); font-family: var(--serif); font-size: 28px; font-weight: 500; letter-spacing: -.05em; margin: 8px 0; }.orders-empty p { color: var(--muted); font-size: 11px; line-height: 1.7; margin: 0 0 24px; max-width: 300px; }

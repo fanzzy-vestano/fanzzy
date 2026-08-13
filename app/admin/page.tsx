@@ -220,7 +220,7 @@ type OrderRecord = {
   email?: string;
   address?: string;
   coupon?: string;
-  items?: Array<{ name: string; quantity: number; price: string }>;
+  items?: Array<{ name: string; quantity: number; price: string; productId?: string }>;
 };
 const adminOrders: OrderRecord[] = [];
 const isDemoOrder = (order: { id?: string }) => /^#FZ-104[4-8]$/.test(String(order.id ?? ""));
@@ -2883,6 +2883,7 @@ function OrdersWorkspace({
   const [toDate, setToDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [selectedOrder, setSelectedOrder] = useState<OrderRecord | null>(null);
   const [phone, setPhone] = useState("");
+  const [catalogProducts, setCatalogProducts] = useState<Array<{ id: string; name: string; category: string; image: string }>>([]);
 
   useEffect(() => {
     const syncOrders = async () => {
@@ -2899,6 +2900,15 @@ function OrdersWorkspace({
         window.localStorage.removeItem("fanzzy-orders");
       }
       if (merged.size) setOrders(Array.from(merged.values()));
+      const catalog = await fetchCatalogProducts();
+      if (!catalog.error && catalog.data) {
+        setCatalogProducts(catalog.data.filter((product) => !isDemoProduct(product)).map((product) => ({
+          id: product.sku.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+          name: product.name,
+          category: product.category,
+          image: product.image || adminPlaceholderImage,
+        })));
+      }
     };
     void syncOrders();
     window.addEventListener("storage", syncOrders);
@@ -2943,6 +2953,10 @@ function OrdersWorkspace({
   const openOrder = (order: OrderRecord) => {
     setSelectedOrder(order);
     setPhone(order.phone);
+  };
+  const getOrderedProduct = (item: NonNullable<OrderRecord["items"]>[number]) => {
+    const itemName = item.name.split(" · ")[0].trim().toLowerCase();
+    return catalogProducts.find((product) => product.id === item.productId || product.name.trim().toLowerCase() === itemName);
   };
   const downloadBill = (order: OrderRecord) => {
     if (!printOrderBill(order)) onNotify("Allow pop-ups to download the bill");
@@ -3125,6 +3139,7 @@ function OrdersWorkspace({
                 {selectedOrder.customerName} ·{" "}
                 {formatOrderDate(selectedOrder.date)} · {selectedOrder.total}
               </p>
+              {selectedOrder.items?.length ? <section className="admin-order-items"><p className="eyebrow">ITEMS IN THIS ORDER</p><div>{selectedOrder.items.map((item) => { const product = getOrderedProduct(item); return <article key={`${selectedOrder.id}-${item.name}`}><>{product?.image ? <img src={product.image} alt="" /> : <span className="admin-order-item-placeholder" aria-hidden="true">✦</span>}</><span><strong>{item.name}</strong>{product ? <small>{product.category}</small> : <small>Product no longer in the catalog</small>}<em>Quantity: {item.quantity}</em></span><b>{item.price}</b></article>; })}</div></section> : <p className="admin-order-items-empty">This older order has no saved item details.</p>}
               <div className="order-status-editor">
                 <label>
                   Status
