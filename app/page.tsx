@@ -886,15 +886,6 @@ export default function Home() {
       setAuthOpen(true);
       return;
     }
-    const inventoryUpdate = await decrementCatalogStock(
-      cartItems.map((product) => ({ sku: product.sku || product.id, quantity: product.quantity })),
-    );
-    if (inventoryUpdate.data?.length) {
-      const updatedStock = new Map(inventoryUpdate.data.map((product) => [product.sku, product.stock]));
-      setProducts((current) => current.map((product) => updatedStock.has(product.sku || product.id)
-        ? { ...product, stock: updatedStock.get(product.sku || product.id)! }
-        : product));
-    }
     let previousOrders: unknown[] = [];
     try {
       const stored = window.localStorage.getItem(`fanzzy-orders:${authUser.id}`);
@@ -911,6 +902,28 @@ export default function Home() {
         merged.set(order.id, order as CustomerOrder);
       }
     });
+    const existingPayment = Array.from(merged.values()).find((order) =>
+      order.razorpayPaymentId && order.razorpayPaymentId === newOrder.razorpayPaymentId,
+    );
+    if (existingPayment) {
+      setOrderConfirmation(existingPayment);
+      setCart({});
+      setCartVariants({});
+      setCheckoutOpen(false);
+      setIsPaying(false);
+      announce(`${existingPayment.id} was already confirmed`);
+      return;
+    }
+    const inventoryUpdate = await decrementCatalogStock(
+      cartItems.map((product) => ({ sku: product.sku || product.id, quantity: product.quantity })),
+    );
+    if (inventoryUpdate.data?.length) {
+      const updatedStock = new Map(inventoryUpdate.data.map((product) => [product.sku, product.stock]));
+      setProducts((current) => current.map((product) => updatedStock.has(product.sku || product.id)
+        ? { ...product, stock: updatedStock.get(product.sku || product.id)! }
+        : product));
+      window.dispatchEvent(new Event("fanzzy-products-updated"));
+    }
     const nextOrders = [newOrder, ...Array.from(merged.values()).filter((order) => order.id !== newOrder.id)];
     await saveStoreOrders(nextOrders);
     const userOrders = nextOrders.filter((order) => order.userId === authUser.id);

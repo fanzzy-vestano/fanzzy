@@ -2176,6 +2176,14 @@
   font-size: 8px;
 }
 
+.order-list .order-list-products {
+  color: var(--wine);
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .order-list b {
   color: var(--wine);
   font-family: var(--mono);
