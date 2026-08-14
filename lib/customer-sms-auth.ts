@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 export type CustomerSmsIdentity = { id: string; phone: string };
 
-type PendingOtp = { phone: string; sessionId: string; code: string; expiresAt: number };
+type PendingOtp = { phone: string; sessionId: string; expiresAt: number };
 type SignedValue = CustomerSmsIdentity | PendingOtp;
 
 const pendingCookie = "fanzzy_customer_otp";
@@ -16,12 +16,15 @@ export const getTwoFactorApiKey = () =>
 
 const secret = () => process.env.CUSTOMER_AUTH_SECRET || getTwoFactorApiKey();
 
-const OTP_RESEND_COOLDOWN_SECONDS = 45;
+export const OTP_RESEND_COOLDOWN_SECONDS = 60;
 const OTP_WINDOW_MS = 15 * 60 * 1000;
 const OTP_MAX_REQUESTS_PER_WINDOW = 5;
+const OTP_VERIFY_WINDOW_MS = 10 * 60 * 1000;
+const OTP_MAX_VERIFY_ATTEMPTS = 8;
 const OTP_RATE_LIMIT_MAX_ENTRIES = 10_000;
 type OtpRateLimitEntry = { windowStartedAt: number; requestCount: number; lastRequestedAt: number };
-const otpRateLimits = new Map<string, OtpRateLimitEntry>();
+const otpSendRateLimits = new Map<string, OtpRateLimitEntry>();
+const otpVerifyRateLimits = new Map<string, OtpRateLimitEntry>();
 const base64Url = (value: string) => Buffer.from(value, "utf8").toString("base64url");
 const fromBase64Url = (value: string) => Buffer.from(value, "base64url").toString("utf8");
 
@@ -67,46 +70,81 @@ const getClientIp = (request: Request) =>
   || request.headers.get("x-real-ip")?.trim()
   || "unknown";
 
-const rateLimitKeys = (request: Request, phone: string) => [
-  `phone:${phone}`,
-  `ip:${getClientIp(request)}`,
+const rateLimitKeys = (scope: "send" | "verify", request: Request, phone: string) => [
+  `${scope}:phone:${phone}`,
+  `${scope}:ip:${getClientIp(request)}`,
 ];
 
-const pruneOtpRateLimits = (now: number) => {
-  for (const [key, entry] of otpRateLimits) {
-    if (now - entry.windowStartedAt >= OTP_WINDOW_MS) otpRateLimits.delete(key);
+const pruneOtpRateLimits = (rateLimits: Map<string, OtpRateLimitEntry>, windowMs: number, now: number) => {
+  for (const [key, entry] of rateLimits) {
+    if (now - entry.windowStartedAt >= windowMs) rateLimits.delete(key);
   }
-  if (otpRateLimits.size <= OTP_RATE_LIMIT_MAX_ENTRIES) return;
-  const oldest = [...otpRateLimits.entries()]
+  if (rateLimits.size <= OTP_RATE_LIMIT_MAX_ENTRIES) return;
+  const oldest = [...rateLimits.entries()]
     .sort(([, first], [, second]) => first.lastRequestedAt - second.lastRequestedAt)
-    .slice(0, otpRateLimits.size - OTP_RATE_LIMIT_MAX_ENTRIES);
-  for (const [key] of oldest) otpRateLimits.delete(key);
+    .slice(0, rateLimits.size - OTP_RATE_LIMIT_MAX_ENTRIES);
+  for (const [key] of oldest) rateLimits.delete(key);
 };
 
-export const consumeOtpRateLimit = (request: Request, phone: string) => {
+const consumeRateLimit = ({
+  scope,
+  rateLimits,
+  request,
+  phone,
+  windowMs,
+  maxRequests,
+  cooldownSeconds = 0,
+}: {
+  scope: "send" | "verify";
+  rateLimits: Map<string, OtpRateLimitEntry>;
+  request: Request;
+  phone: string;
+  windowMs: number;
+  maxRequests: number;
+  cooldownSeconds?: number;
+}) => {
   const now = Date.now();
-  pruneOtpRateLimits(now);
-  const entries = rateLimitKeys(request, phone).map((key) => ({ key, entry: otpRateLimits.get(key) }));
+  pruneOtpRateLimits(rateLimits, windowMs, now);
+  const entries = rateLimitKeys(scope, request, phone).map((key) => ({ key, entry: rateLimits.get(key) }));
   const retryAfter = entries.reduce((longest, { entry }) => {
-    if (!entry || now - entry.windowStartedAt >= OTP_WINDOW_MS) return longest;
-    if (now - entry.lastRequestedAt < OTP_RESEND_COOLDOWN_SECONDS * 1000) {
-      return Math.max(longest, OTP_RESEND_COOLDOWN_SECONDS - Math.floor((now - entry.lastRequestedAt) / 1000));
+    if (!entry || now - entry.windowStartedAt >= windowMs) return longest;
+    if (cooldownSeconds && now - entry.lastRequestedAt < cooldownSeconds * 1000) {
+      return Math.max(longest, cooldownSeconds - Math.floor((now - entry.lastRequestedAt) / 1000));
     }
-    if (entry.requestCount >= OTP_MAX_REQUESTS_PER_WINDOW) {
-      return Math.max(longest, Math.ceil((entry.windowStartedAt + OTP_WINDOW_MS - now) / 1000));
+    if (entry.requestCount >= maxRequests) {
+      return Math.max(longest, Math.ceil((entry.windowStartedAt + windowMs - now) / 1000));
     }
     return longest;
   }, 0);
   if (retryAfter > 0) return { allowed: false as const, retryAfter };
 
   for (const { key, entry } of entries) {
-    const next = !entry || now - entry.windowStartedAt >= OTP_WINDOW_MS
+    const next = !entry || now - entry.windowStartedAt >= windowMs
       ? { windowStartedAt: now, requestCount: 1, lastRequestedAt: now }
       : { ...entry, requestCount: entry.requestCount + 1, lastRequestedAt: now };
-    otpRateLimits.set(key, next);
+    rateLimits.set(key, next);
   }
   return { allowed: true as const, retryAfter: 0 };
 };
+
+export const consumeOtpSendRateLimit = (request: Request, phone: string) => consumeRateLimit({
+  scope: "send",
+  rateLimits: otpSendRateLimits,
+  request,
+  phone,
+  windowMs: OTP_WINDOW_MS,
+  maxRequests: OTP_MAX_REQUESTS_PER_WINDOW,
+  cooldownSeconds: OTP_RESEND_COOLDOWN_SECONDS,
+});
+
+export const consumeOtpVerifyRateLimit = (request: Request, phone: string) => consumeRateLimit({
+  scope: "verify",
+  rateLimits: otpVerifyRateLimits,
+  request,
+  phone,
+  windowMs: OTP_VERIFY_WINDOW_MS,
+  maxRequests: OTP_MAX_VERIFY_ATTEMPTS,
+});
 
 export const displayMobileNumber = (phone: string) => `+${phone}`;
 
