@@ -26,18 +26,11 @@ export async function POST(request: Request) {
 
   try {
     const code = String(randomInt(100000, 1_000_000));
-    // Use the approved transactional SMS route explicitly. The account's
-    // approved mapping is FANZZY + "Fanzzy Login SMS OTP". This avoids the
-    // legacy OTP route's provider-side fallback to TFACTR/voice delivery.
-    const response = await fetch(`https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/ADDON_SERVICES/SEND/TSMS`, {
+    // Use 2Factor's dedicated OTP endpoint so the provider applies its OTP
+    // route and approved OTP template instead of treating this as bulk SMS.
+    const smsPhone = phone.slice(-10);
+    const response = await fetch(`https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${smsPhone}/${code}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        From: "FANZZY",
-        To: phone,
-        Msg: `Your Fanzzy verification code is ${code}. It expires in 10 minutes. Do not share it.`,
-        TemplateName: "Fanzzy Login SMS OTP",
-      }),
       signal: AbortSignal.timeout(15_000),
     });
     const raw = await response.text();
