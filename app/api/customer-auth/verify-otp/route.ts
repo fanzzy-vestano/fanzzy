@@ -11,23 +11,18 @@ const sessionHeaders = (phone: string) => {
 };
 
 export async function POST(request: Request) {
-  const apiKey = process.env.TWOFACTOR_API_KEY;
   const pending = getPendingOtp(request);
-  if (!apiKey || !pending) return json({ error: "Your code has expired. Request a new one." }, 401);
+  if (!pending) return json({ error: "OTP expired" }, 410);
   let code = "";
   try {
     code = String((await request.json() as { code?: unknown }).code || "").replace(/\D/g, "");
   } catch {
     return json({ error: "Enter the SMS code" }, 400);
   }
-  if (code.length < 4 || code.length > 8) return json({ error: "Enter the SMS code" }, 400);
+  if (code.length !== 6) return json({ error: "Enter the SMS code" }, 400);
+  if (code !== pending.code) return json({ error: "Invalid OTP" }, 401);
 
   try {
-    const response = await fetch(`https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/VERIFY/${encodeURIComponent(pending.sessionId)}/${code}`, { method: "POST" });
-    const result = await response.json() as { Status?: string; Details?: string; Errors?: string };
-    if (!response.ok || result.Status?.toLowerCase() !== "success") {
-      return json({ error: result.Details || result.Errors || "That code is invalid or has expired" }, 401);
-    }
     return new Response(JSON.stringify({ user: { id: `phone:${pending.phone}`, phone: `+${pending.phone}` } }), {
       status: 200,
       headers: sessionHeaders(pending.phone),

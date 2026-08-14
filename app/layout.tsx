@@ -11,7 +11,10 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en"><body>{children}</body></html>;
+  // The active customer-login rollout is SMS-only. This guards the public UI
+  // against exposing the legacy voice-call fallback while older client markup
+  // is replaced by the SMS-only login flow.
+  return <html lang="en"><body><style>{".otp-fallback-actions button + button { display: none !important; }"}</style>{children}</body></html>;
 }
 
 
