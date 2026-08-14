@@ -92,6 +92,9 @@ const isDemoProduct = (product: { name?: string; sku?: string }) =>
 const isDemoOrder = (order: { id?: string }) => /^#FZ-104[4-8]$/.test(String(order.id ?? ""));
 
 const formatINR = (value: number) => `₹${(Number.isFinite(value) ? value : 0).toLocaleString("en-IN")}`;
+const CUSTOMER_PRICE_MULTIPLIER = 1.4;
+const getCustomerPrice = (product: Pick<Product, "price">) => product.price;
+const getComparePrice = (product: Pick<Product, "price">) => Math.round(product.price * CUSTOMER_PRICE_MULTIPLIER);
 const loadRazorpayCheckout = () => new Promise<new (options: RazorpayCheckoutOptions) => RazorpayCheckout>((resolve, reject) => {
   const existing = (window as Window & { Razorpay?: new (options: RazorpayCheckoutOptions) => RazorpayCheckout }).Razorpay;
   if (existing) return resolve(existing);
@@ -221,10 +224,10 @@ function ProductCard({ product, wished, onWishlist, onAdd, onQuickView, onImageZ
           <p className="eyebrow">{product.category}</p>
           <h3>{product.name}</h3>
         </div>
-        <button className="add-icon" onClick={onAdd} disabled={isOutOfStock} aria-label={isOutOfStock ? `${product.name} is sold out` : `Add ${product.name} to cart`}>+</button>
+        <button className="add-to-cart-button" type="button" onClick={onAdd} disabled={isOutOfStock} aria-label={isOutOfStock ? `${product.name} is sold out` : `Add ${product.name} to cart`}>Add to cart</button>
       </div>
       {product.variants?.length ? <button className="product-variants-preview" onClick={onQuickView} aria-label={`View ${product.name} variants`}><span>{product.variants.length} colour / model option{product.variants.length === 1 ? "" : "s"}</span><span className="product-variant-thumbs">{product.variants.slice(0, 4).map((variant) => <img key={`${product.id}-${variant.name}`} src={variant.image || product.image} alt={variant.name} style={imageAdjustmentStyle(variant.adjustments)} />)}</span><b>View ↗</b></button> : null}
-      <div className="price-row"><span>{formatINR(product.price)}</span>{product.compareAt && <del>{formatINR(product.compareAt)}</del>}</div>
+      <div className="price-row"><span>{formatINR(getCustomerPrice(product))}</span><del>{formatINR(getComparePrice(product))}</del></div>
     </article>
   );
 }
@@ -258,6 +261,7 @@ export default function Home() {
   const [authPhone, setAuthPhone] = useState("");
   const [authOtp, setAuthOtp] = useState("");
   const [otpSent, setOtpSent] = useState(false);
+  const [otpCooldown, setOtpCooldown] = useState(0);
   const [authJustVerified, setAuthJustVerified] = useState(false);
   const [authUser, setAuthUser] = useState<CustomerAuthUser | null>(null);
   const [checkoutForm, setCheckoutForm] = useState({ name: "", phone: "", email: "", address: "" });
@@ -281,6 +285,12 @@ export default function Home() {
   const [heroSlideIndex, setHeroSlideIndex] = useState(0);
   const [heroSlideDuration, setHeroSlideDuration] = useState(defaultHeroSlideDuration);
   const profileName = authUser?.phone || "Fanzzy customer";
+
+  useEffect(() => {
+    if (otpCooldown <= 0) return;
+    const timer = window.setInterval(() => setOtpCooldown((current) => Math.max(0, current - 1)), 1000);
+    return () => window.clearInterval(timer);
+  }, [otpCooldown]);
 
   useEffect(() => {
     const syncProducts = async () => {
@@ -508,7 +518,7 @@ export default function Home() {
     return product ? [{ ...product, cartKey, quantity, variant: cartVariants[cartKey] ?? null }] : [];
   });
   const cartCount = Object.values(cart).reduce((sum, count) => sum + count, 0);
-  const subtotal = cartItems.reduce((sum, product) => sum + product.price * product.quantity, 0);
+  const subtotal = cartItems.reduce((sum, product) => sum + getCustomerPrice(product) * product.quantity, 0);
   const couponDiscount = appliedCoupon ? getCouponDiscount(appliedCoupon, subtotal) : 0;
   const bogoCampaign = isBogoCampaign(activeCampaign) ? activeCampaign : null;
   const bogoQuantities = getBogoQuantities(bogoCampaign);
@@ -519,7 +529,7 @@ export default function Home() {
   const bogoPrices = bogoCampaign
     ? cartItems.flatMap((product) => {
         if (bogoEligibleIds && !bogoEligibleIds.has(product.id.toLowerCase())) return [];
-        return Array.from({ length: product.quantity }, () => product.price);
+        return Array.from({ length: product.quantity }, () => getCustomerPrice(product));
       }).sort((a, b) => a - b)
     : [];
   const bogoFreeCount = Math.floor(bogoPrices.length / (bogoQuantities.buy + bogoQuantities.get)) * bogoQuantities.get;
@@ -796,6 +806,7 @@ export default function Home() {
     setAuthMessage("");
     setAuthOtp("");
     setOtpSent(false);
+    setOtpCooldown(0);
     setAuthJustVerified(false);
   };
   const signOut = async () => {
@@ -810,21 +821,31 @@ export default function Home() {
       setAuthMessage("Enter your mobile number to receive a code.");
       return;
     }
-    setAuthLoading(true);
-    setAuthMessage("");
-    const response = await fetch("/api/customer-auth/send-otp", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ phone }),
-    });
-    const result = await response.json() as { error?: string };
-    setAuthLoading(false);
-    if (!response.ok) {
-      setAuthMessage(result.error || "We could not send your SMS code. Please try again.");
+    if (otpCooldown > 0) {
+      setAuthMessage(`Please wait ${otpCooldown} seconds before requesting another OTP.`);
       return;
     }
-    setOtpSent(true);
-    setAuthMessage("A one-time code was sent to your mobile number.");
+    setAuthLoading(true);
+    setAuthMessage("");
+    try {
+      const response = await fetch("/api/customer-auth/send-otp", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ phone }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) {
+        setAuthMessage(result.error || (response.status >= 500 ? "Please try again" : "We could not send the OTP."));
+        return;
+      }
+      setOtpSent(true);
+      setOtpCooldown(45);
+      setAuthMessage("OTP sent successfully");
+    } catch {
+      setAuthMessage("Please try again");
+    } finally {
+      setAuthLoading(false);
+    }
   };
   const verifySmsOtp = async () => {
     const token = authOtp.trim();
@@ -834,31 +855,29 @@ export default function Home() {
     }
     setAuthLoading(true);
     setAuthMessage("");
-    const response = await fetch("/api/customer-auth/verify-otp", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ code: token }),
-    });
-    const result = await response.json() as { error?: string; user?: CustomerAuthUser };
-    setAuthLoading(false);
-    if (!response.ok || !result.user) {
-      setAuthMessage(result.error || "That code is invalid or has expired. Request a new code and try again.");
-      return;
+    try {
+      const response = await fetch("/api/customer-auth/verify-otp", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code: token }),
+      });
+      const result = await response.json() as { error?: string; user?: CustomerAuthUser };
+      if (!response.ok || !result.user) {
+        setAuthMessage(result.error || (response.status === 410 ? "OTP expired" : "Invalid OTP"));
+        return;
+      }
+      setAuthUser(result.user);
+      setCheckoutForm((current) => ({ ...current, phone: current.phone || result.user!.phone }));
+      setAuthOtp("");
+      setOtpSent(false);
+      setOtpCooldown(0);
+      setAuthJustVerified(true);
+      setAuthMessage("OTP verified successfully");
+    } catch {
+      setAuthMessage("Please try again");
+    } finally {
+      setAuthLoading(false);
     }
-    setAuthUser(result.user);
-    setCheckoutForm((current) => ({ ...current, phone: current.phone || result.user!.phone }));
-    setAuthOtp("");
-    setOtpSent(false);
-    setAuthJustVerified(true);
-    setAuthMessage("Login successful. Welcome to Fanzzy.");
-  };
-  const requestVoiceOtp = async () => {
-    setAuthLoading(true);
-    setAuthMessage("");
-    const response = await fetch("/api/customer-auth/call-otp", { method: "POST" });
-    const result = await response.json() as { error?: string };
-    setAuthLoading(false);
-    setAuthMessage(response.ok ? "We are calling your mobile number now. Enter the same OTP from the call." : result.error || "The verification call could not be started.");
   };
   const openCheckout = async () => {
     if (!cartItems.length) return announce("Add a piece to your cart first");
@@ -1003,7 +1022,7 @@ export default function Home() {
       address: checkoutForm.address.trim(),
       paymentStatus: "pending",
       ...(appliedCoupon ? { coupon: appliedCoupon.code } : {}),
-      items: cartItems.map((product) => ({ productId: product.id, name: `${product.billName || product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}`, quantity: product.quantity, price: formatINR(product.price), image: product.image, variantName: product.variant?.name, variantImage: product.variant?.image })),
+      items: cartItems.map((product) => ({ productId: product.id, name: `${product.billName || product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}`, quantity: product.quantity, price: formatINR(getCustomerPrice(product)), image: product.image, variantName: product.variant?.name, variantImage: product.variant?.image })),
     };
 
     setIsPaying(true);
@@ -1088,7 +1107,7 @@ export default function Home() {
   const assistantReply = (message: string) => {
     const query = message.toLowerCase();
     const money = (value: number) => formatINR(value);
-    const productSummary = (items: Product[]) => items.slice(0, 3).map((product) => `${product.name} (${money(product.price)})`).join(", ");
+    const productSummary = (items: Product[]) => items.slice(0, 3).map((product) => `${product.name} (${money(getCustomerPrice(product))})`).join(", ");
     if (/hello|hi|hey|help/.test(query)) return "I can help with almost anything in the store: latest arrivals, product suggestions, budgets, gifts, stock, a new order, order tracking, shipping, returns, payments, and jewellery care. Ask me anything.";
     if (/latest|new arrival|newest|recent|just in|arrived/.test(query)) {
       const latest = [...products].reverse().slice(0, 3);
@@ -1104,10 +1123,10 @@ export default function Home() {
       const budget = query.match(/(?:under|below|less than|within|budget)\s*(?:₹|rs\.?\s*)?([\d,]+)/)?.[1];
       if (budget) {
         const amount = Number(budget.replace(/,/g, ""));
-        const matches = products.filter((product) => product.price <= amount);
+        const matches = products.filter((product) => getCustomerPrice(product) <= amount);
         return matches.length ? `Within ${money(amount)}, I found ${productSummary(matches)}.` : `I couldn’t find a piece under ${money(amount)} yet. Try increasing your budget or ask for our lowest-priced pieces.`;
       }
-      return `Our pieces currently range from ${money(Math.min(...products.map((product) => product.price)))} to ${money(Math.max(...products.map((product) => product.price)))}. Tell me a maximum budget and I’ll filter them.`;
+      return `Our pieces currently range from ${money(Math.min(...products.map((product) => getCustomerPrice(product))))} to ${money(Math.max(...products.map((product) => getCustomerPrice(product))))}. Tell me a maximum budget and I’ll filter them.`;
     }
     if (/stock|available|availability|in stock/.test(query)) {
       const available = products.filter((product) => product.price >= 0);
@@ -1123,10 +1142,10 @@ export default function Home() {
     const category = ["earrings", "necklaces", "bracelets", "rings"].find((item) => query.includes(item));
     if (category) {
       const matches = products.filter((product) => product.category.toLowerCase().includes(category)).slice(0, 3);
-      if (matches.length) return `Here are a few ${category} to explore: ${matches.map((product) => `${product.name} (${formatINR(product.price)})`).join(", ")}.`;
+      if (matches.length) return `Here are a few ${category} to explore: ${matches.map((product) => `${product.name} (${formatINR(getCustomerPrice(product))})`).join(", ")}.`;
     }
     const matches = products.filter((product) => `${product.name} ${product.category}`.toLowerCase().includes(query)).slice(0, 3);
-    if (matches.length) return `I found ${matches.map((product) => `${product.name} (${formatINR(product.price)})`).join(", ")}. Open the collection to take a closer look.`;
+    if (matches.length) return `I found ${matches.map((product) => `${product.name} (${formatINR(getCustomerPrice(product))})`).join(", ")}. Open the collection to take a closer look.`;
     return "I’m here to help with products, latest arrivals, budgets, gifts, new orders, order status, shipping, payments, returns, offers, and jewellery care. Try asking: ‘What’s new?’, ‘Show me rings under ₹1500’, or ‘How do I place a new order?’";
   };
   const assistantProducts = (message: string) => {
@@ -1134,7 +1153,7 @@ export default function Home() {
     if (/order|track|delivery|status|ship|return|exchange|care|clean|payment|cod|razorpay/.test(query)) return [];
     if (/latest|new arrival|newest|recent|just in|arrived/.test(query)) return [...products].reverse().slice(0, 3);
     const budget = query.match(/(?:under|below|less than|within|budget)\s*(?:₹|rs\.?\s*)?([\d,]+)/)?.[1];
-    if (budget) return products.filter((product) => product.price <= Number(budget.replace(/,/g, ""))).slice(0, 3);
+    if (budget) return products.filter((product) => getCustomerPrice(product) <= Number(budget.replace(/,/g, ""))).slice(0, 3);
     const category = ["earrings", "necklaces", "bracelets", "rings"].find((item) => query.includes(item));
     if (category) return products.filter((product) => product.category.toLowerCase().includes(category)).slice(0, 3);
     if (/gift|present|birthday|anniversary/.test(query)) return products.filter((product) => product.tag === "Bestseller" || product.tag === "New in").slice(0, 3);
@@ -1160,7 +1179,7 @@ export default function Home() {
           <button onClick={() => announce(`${wishlist.length} saved piece${wishlist.length === 1 ? "" : "s"}`)} aria-label="View wishlist">♡ <span className="action-label">Saved</span>{wishlist.length > 0 && <b>{wishlist.length}</b>}</button>
           <button onClick={openOrders} aria-label="View my orders">Orders {orders.length > 0 && <b>{orders.length}</b>}</button>
           <button onClick={() => setCartOpen(true)} aria-label="Open shopping cart">Cart <span className="bag-count">({cartCount.toString().padStart(2, "0")})</span></button>
-          <button className="profile-button" onClick={() => setProfileOpen(true)} aria-label="View account profile">{authUser ? "●" : "○"} <span className="action-label">Profile</span></button>
+          <button className="profile-button" onClick={() => setProfileOpen(true)} aria-label="View account profile"><span className="profile-logo" data-signed-in={authUser ? "true" : "false"} aria-hidden="true"><span /></span><span className="action-label">Profile</span></button>
         </div>
         <button className="mobile-menu" onClick={() => setMobileNavOpen((current) => !current)} aria-label={mobileNavOpen ? "Close menu" : "Open menu"} aria-expanded={mobileNavOpen}>{mobileNavOpen ? "×" : "☰"}</button>
       </header>
@@ -1176,6 +1195,7 @@ export default function Home() {
           <button onClick={() => { setMobileNavOpen(false); openSearch(); }}>Search the collection <span>⌕</span></button>
           <button onClick={() => { setMobileNavOpen(false); announce(`${wishlist.length} saved piece${wishlist.length === 1 ? "" : "s"}`); }}>Saved pieces <span>♡</span></button>
           <button onClick={() => { setMobileNavOpen(false); openOrders(); }}>My orders <span>↗</span></button>
+          <button onClick={() => { setMobileNavOpen(false); setProfileOpen(true); }}>Profile <span className="mobile-profile-logo" aria-hidden="true"><span /></span></button>
           <button onClick={() => { setMobileNavOpen(false); setCartOpen(true); }}>Your cart <span>({cartCount.toString().padStart(2, "0")})</span></button>
         </div>
       </div>}
@@ -1203,9 +1223,9 @@ export default function Home() {
       {returnPolicyOpen && <div className="drawer-backdrop terms-backdrop" onClick={() => setReturnPolicyOpen(false)}><section className="terms-modal" role="dialog" aria-modal="true" aria-labelledby="return-policy-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">FANZZY</p><h2 id="return-policy-title">Return Policy</h2></div><button aria-label="Close return policy" onClick={() => setReturnPolicyOpen(false)}>×</button></div><div className="terms-content"><p>Customers may request a return for eligible products within the return period mentioned on our website.</p><p>Once a return request is approved, the <strong>customer must send the product to the return hub/address provided by Fanzzy</strong>.</p><ul><li>The product must be unused, undamaged, and returned in its original packaging with all tags/accessories intact.</li><li><strong>Return courier/shipping charges must be paid by the customer. Fanzzy will not bear the cost of sending the returned product to our hub.</strong></li><li>Customers are responsible for safely packing and dispatching the return item.</li><li>We recommend using a trackable courier service. Fanzzy will not be responsible for return parcels lost or damaged during transit.</li><li>Refund/replacement processing will begin only after the returned item reaches our hub and successfully passes the quality inspection.</li><li>Original delivery/shipping charges, if any, are non-refundable unless the return is due to a wrong or defective product supplied by Fanzzy.</li><li>Products that are used, damaged, altered, or returned without original packaging may not be eligible for refund or replacement.</li><li>Certain products may be marked as <strong>non-returnable</strong> for hygiene or other applicable reasons.</li></ul><p>If a customer receives a <strong>wrong, damaged, or defective product</strong>, they should contact Fanzzy customer support within the specified return period with the order details and supporting photos/videos.</p></div></section></div>}
       {privacyOpen && <div className="drawer-backdrop terms-backdrop" onClick={() => setPrivacyOpen(false)}><section className="terms-modal" role="dialog" aria-modal="true" aria-labelledby="privacy-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">FANZZY</p><h2 id="privacy-title">Privacy Policy</h2></div><button aria-label="Close privacy policy" onClick={() => setPrivacyOpen(false)}>×</button></div><div className="terms-content"><p>At <strong>Fanzzy</strong>, we respect and protect your privacy. We collect necessary information such as your name, contact details, address, and order information to process orders, arrange delivery, manage returns/refunds, and provide customer support.</p><p>Your information may be shared with trusted <strong>payment, courier, and service partners</strong> only when required to complete our services. We do not sell customers' personal information to third parties.</p><p>We take reasonable measures to keep your information secure. By using the Fanzzy website, you agree to this Privacy Policy and any updates made to it.</p></div></section></div>}
 
-      {assistantOpen && <div className="drawer-backdrop" onClick={() => setAssistantOpen(false)}><aside className="assistant-drawer" role="dialog" aria-modal="true" aria-labelledby="assistant-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">FANZZY AI</p><h2 id="assistant-title">How can I help?</h2></div><button aria-label="Close AI assistant" onClick={() => setAssistantOpen(false)}>×</button></div><div className="assistant-messages" aria-live="polite">{assistantMessages.map((message, index) => <div className={`assistant-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.text}{message.productIds?.length ? <div className="assistant-product-actions">{message.productIds.map((productId) => { const product = products.find((item) => item.id === productId); return product ? <button key={product.id} onClick={() => { setQuickProduct(product); setAssistantOpen(false); }}>View {product.name} · {formatINR(product.price)} ↗</button> : null; })}</div> : null}</span></div>)}</div><div className="assistant-prompts"><button onClick={() => sendAssistantMessage("Help me choose a gift")}>Choose a gift</button><button onClick={() => sendAssistantMessage("Track my order")}>Track my order</button><button onClick={() => sendAssistantMessage("How do I care for my jewellery?")}>Jewellery care</button></div><form className="assistant-form" onSubmit={(event) => { event.preventDefault(); sendAssistantMessage(); }}><input value={assistantInput} onChange={(event) => setAssistantInput(event.target.value)} placeholder="Ask Fanzzy Assistant..." aria-label="Ask Fanzzy Assistant" /><button type="submit" aria-label="Send message">↗</button></form></aside></div>}
+      {assistantOpen && <div className="drawer-backdrop" onClick={() => setAssistantOpen(false)}><aside className="assistant-drawer" role="dialog" aria-modal="true" aria-labelledby="assistant-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">FANZZY AI</p><h2 id="assistant-title">How can I help?</h2></div><button aria-label="Close AI assistant" onClick={() => setAssistantOpen(false)}>×</button></div><div className="assistant-messages" aria-live="polite">{assistantMessages.map((message, index) => <div className={`assistant-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.text}{message.productIds?.length ? <div className="assistant-product-actions">{message.productIds.map((productId) => { const product = products.find((item) => item.id === productId); return product ? <button key={product.id} onClick={() => { setQuickProduct(product); setAssistantOpen(false); }}>View {product.name} · {formatINR(getCustomerPrice(product))} ↗</button> : null; })}</div> : null}</span></div>)}</div><div className="assistant-prompts"><button onClick={() => sendAssistantMessage("Help me choose a gift")}>Choose a gift</button><button onClick={() => sendAssistantMessage("Track my order")}>Track my order</button><button onClick={() => sendAssistantMessage("How do I care for my jewellery?")}>Jewellery care</button></div><form className="assistant-form" onSubmit={(event) => { event.preventDefault(); sendAssistantMessage(); }}><input value={assistantInput} onChange={(event) => setAssistantInput(event.target.value)} placeholder="Ask Fanzzy Assistant..." aria-label="Ask Fanzzy Assistant" /><button type="submit" aria-label="Send message">↗</button></form></aside></div>}
 
-      {searchOpen && <div className="overlay search-overlay" role="dialog" aria-modal="true" aria-label="Search"><div className="overlay-top"><span className="wordmark"><img src={siteAsset("fanzzy-mark.png")} alt="Fanzzy" className="brand-logo" /></span><button onClick={closeSearch}>Close&nbsp; ×</button></div><div className="search-content"><p className="eyebrow">SEARCH THE COLLECTION</p><div className="large-search"><input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Try “gold hoops”" /><span>⌕</span></div>{search && <div className="search-results">{filteredProducts.length ? filteredProducts.map((product) => <button key={product.id} onClick={() => { setQuickProduct(product); closeSearch(); }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(product.price)}</small></span><b>↗</b></button>) : <p className="muted">No pieces found. Try another search.</p>}</div>}{!search && <div className="search-suggestions"><span>Trending now</span><button onClick={() => setSearch("hoops")}>Hoops</button><button onClick={() => setSearch("pearl")}>Pearls</button><button onClick={() => setSearch("chain")}>Chains</button></div>}</div></div>}
+      {searchOpen && <div className="overlay search-overlay" role="dialog" aria-modal="true" aria-label="Search"><div className="overlay-top"><span className="wordmark"><img src={siteAsset("fanzzy-mark.png")} alt="Fanzzy" className="brand-logo" /></span><button onClick={closeSearch}>Close&nbsp; ×</button></div><div className="search-content"><p className="eyebrow">SEARCH THE COLLECTION</p><div className="large-search"><input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Try “gold hoops”" /><span>⌕</span></div>{search && <div className="search-results">{filteredProducts.length ? filteredProducts.map((product) => <button key={product.id} onClick={() => { setQuickProduct(product); closeSearch(); }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(getCustomerPrice(product))}</small></span><b>↗</b></button>) : <p className="muted">No pieces found. Try another search.</p>}</div>}{!search && <div className="search-suggestions"><span>Trending now</span><button onClick={() => setSearch("hoops")}>Hoops</button><button onClick={() => setSearch("pearl")}>Pearls</button><button onClick={() => setSearch("chain")}>Chains</button></div>}</div></div>}
 
       {orderConfirmation && <div className="drawer-backdrop" onClick={() => setOrderConfirmation(null)}><section className="order-confirmation" role="dialog" aria-modal="true" aria-labelledby="order-confirmation-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close payment confirmation" onClick={() => setOrderConfirmation(null)}>×</button><p className="eyebrow">PAYMENT SUCCESSFUL</p><h2 id="order-confirmation-title">Your payment is complete.</h2><p>We received <strong>{orderConfirmation.total}</strong> for order <strong>{orderConfirmation.id}</strong>. Your order has been confirmed.</p>{orderConfirmation.razorpayPaymentId && <p className="payment-reference">Payment ID: {orderConfirmation.razorpayPaymentId}</p>}<div className="confirmation-actions"><button className="button button-dark" onClick={() => downloadBill(orderConfirmation)}>Download bill <span>↗</span></button><button className="save-text" onClick={() => { setOrderConfirmation(null); setOrdersOpen(true); }}>View my orders</button></div></section></div>}
 
@@ -1213,13 +1233,13 @@ export default function Home() {
 
       {ordersOpen && <div className="drawer-backdrop" onClick={() => setOrdersOpen(false)}><aside className="orders-drawer" role="dialog" aria-modal="true" aria-labelledby="orders-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR FANZZY ACCOUNT</p><h2 id="orders-title">My orders</h2></div><button aria-label="Close orders" onClick={() => setOrdersOpen(false)}>×</button></div><div className="orders-intro"><p>These are the orders placed using your signed-in account. Only you can see this account’s orders.</p></div>{visibleOrders.length ? <div className="customer-order-list">{visibleOrders.map((order) => <article className="customer-order-card" key={order.id}><div className="customer-order-head"><div><strong>{order.id}</strong><small>{formatOrderDate(order.date)} · {order.customerName}</small></div><span className={`customer-order-status ${order.status.toLowerCase()}`}>{order.status}</span></div>{order.items?.length ? <div className="customer-order-items">{order.items.map((item) => { const product = getOrderedProduct(item); return <button className="customer-order-product" key={`${order.id}-${item.name}`} onClick={() => openOrderedProduct(item)} aria-label={`View ${item.name} details`}>{product ? <img src={product.image} alt="" style={imageAdjustmentStyle(product.imageAdjustments)} /> : <span className="order-product-placeholder" aria-hidden="true">✦</span>}<span className="order-product-copy"><strong>{item.name}</strong><b>× {item.quantity}</b>{product ? <em>{product.category} · View details ↗</em> : <em>Product no longer in the collection</em>}</span><small>{item.price}</small></button>; })}</div> : <p className="customer-order-items legacy-order">Order details are available in your confirmation.</p>}<div className="customer-order-total"><span>Total paid</span><strong>{order.total}</strong></div><button className="module-secondary customer-bill-button" onClick={() => downloadBill(order)}>Download bill ↗</button></article>)}</div> : <div className="orders-empty"><div>✦</div><h3>No orders found for this account.</h3><p>Orders appear here after you complete payment while signed in to this account.</p><button className="button button-dark" onClick={() => { setOrdersOpen(false); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}>Shop the collection <span>↗</span></button></div>}</aside></div>}
 
-      {cartOpen && <div className="drawer-backdrop" onClick={() => setCartOpen(false)}><aside className="cart-drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR CART</p><h2>{cartCount ? `${cartCount} piece${cartCount > 1 ? "s" : ""}` : "A little empty"}</h2></div><button onClick={() => setCartOpen(false)}>×</button></div>{cartItems.length ? <><div className="drawer-items">{cartItems.map((product) => <div className="drawer-item" key={product.cartKey}><img src={product.variant?.image || product.image} alt="" style={imageAdjustmentStyle(product.variant?.adjustments || product.imageAdjustments)} /><div><strong>{product.name}</strong>{product.variant?.name && <small className="cart-variant-name">{product.variant.name}</small>}<small>{formatINR(product.price)}</small><div className="quantity"><button onClick={() => updateQuantity(product.cartKey, -1)} aria-label={`Decrease ${product.name} quantity`}>−</button><span>{product.quantity}</span><button onClick={() => updateQuantity(product.cartKey, 1)} aria-label={`Increase ${product.name} quantity`}>+</button></div></div><div className="cart-item-actions"><b>{formatINR(product.price * product.quantity)}</b><button className="cart-remove" onClick={() => removeFromCart(product.cartKey)} aria-label={`Remove ${product.name} from cart`}>Remove</button></div></div>)}</div><div className="drawer-footer"><div><span>Subtotal</span><strong>{formatINR(subtotal)}</strong></div>{bogoDiscount > 0 && <div className="offer-total"><span>{bogoOfferLabel} discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="offer-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div><span>Delivery</span><strong>{deliveryCharge.enabled ? formatINR(deliveryTotal) : "Free"}</strong></div><div className="drawer-total"><span>Total</span><strong>{formatINR(orderTotal)}</strong></div><p>{bogoDiscount > 0 ? `${bogoOfferLabel} applied to eligible products.` : deliveryCharge.enabled ? "Delivery charge applied to this order." : "Complimentary shipping above ₹999."}</p><button className="button button-dark full-width" onClick={openCheckout}>Proceed to buy <span>↗</span></button></div></> : <div className="empty-bag"><div>✦</div><p>Your future favourites<br />belong here.</p><button className="text-link" onClick={() => setCartOpen(false)}>Continue shopping <span>↗</span></button></div>}</aside></div>}
+      {cartOpen && <div className="drawer-backdrop" onClick={() => setCartOpen(false)}><aside className="cart-drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR CART</p><h2>{cartCount ? `${cartCount} piece${cartCount > 1 ? "s" : ""}` : "A little empty"}</h2></div><button onClick={() => setCartOpen(false)}>×</button></div>{cartItems.length ? <><div className="drawer-items">{cartItems.map((product) => <div className="drawer-item" key={product.cartKey}><img src={product.variant?.image || product.image} alt="" style={imageAdjustmentStyle(product.variant?.adjustments || product.imageAdjustments)} /><div><strong>{product.name}</strong>{product.variant?.name && <small className="cart-variant-name">{product.variant.name}</small>}<small>{formatINR(getCustomerPrice(product))}</small><div className="quantity"><button onClick={() => updateQuantity(product.cartKey, -1)} aria-label={`Decrease ${product.name} quantity`}>−</button><span>{product.quantity}</span><button onClick={() => updateQuantity(product.cartKey, 1)} aria-label={`Increase ${product.name} quantity`}>+</button></div></div><div className="cart-item-actions"><b>{formatINR(getCustomerPrice(product) * product.quantity)}</b><button className="cart-remove" onClick={() => removeFromCart(product.cartKey)} aria-label={`Remove ${product.name} from cart`}>Remove</button></div></div>)}</div><div className="drawer-footer"><div><span>Subtotal</span><strong>{formatINR(subtotal)}</strong></div>{bogoDiscount > 0 && <div className="offer-total"><span>{bogoOfferLabel} discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="offer-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div><span>Delivery</span><strong>{deliveryCharge.enabled ? formatINR(deliveryTotal) : "Free"}</strong></div><div className="drawer-total"><span>Total</span><strong>{formatINR(orderTotal)}</strong></div><p>{bogoDiscount > 0 ? `${bogoOfferLabel} applied to eligible products.` : deliveryCharge.enabled ? "Delivery charge applied to this order." : "Complimentary shipping above ₹999."}</p><button className="button button-dark full-width" onClick={openCheckout}>Proceed to buy <span>↗</span></button></div></> : <div className="empty-bag"><div>✦</div><p>Your future favourites<br />belong here.</p><button className="text-link" onClick={() => setCartOpen(false)}>Continue shopping <span>↗</span></button></div>}</aside></div>}
 
-      {authOpen && <div className="drawer-backdrop auth-backdrop" onClick={closeAuth}><section className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close sign in" onClick={closeAuth}>×</button><p className="eyebrow">SECURE MOBILE LOGIN</p><h2 id="auth-title">Continue with your mobile number.</h2><p className="auth-intro">Enter your mobile number and we’ll send a one-time SMS code. No password is required.</p><div className="otp-auth-form"><label>Mobile number<input type="tel" value={authPhone} onChange={(event) => { setAuthPhone(event.target.value); setAuthOtp(""); setOtpSent(false); }} placeholder="+91 98765 43210" inputMode="tel" autoComplete="tel" disabled={authLoading} /></label>{otpSent && <label>SMS one-time code<input value={authOtp} onChange={(event) => setAuthOtp(event.target.value.replace(/\s/g, ""))} inputMode="numeric" autoComplete="one-time-code" placeholder="Enter the code" disabled={authLoading} onKeyDown={(event) => { if (event.key === "Enter") void verifySmsOtp(); }} /></label>}<button className="google-sign-in" type="button" onClick={() => void (otpSent ? verifySmsOtp() : sendSmsOtp())} disabled={authLoading}><span className="email-otp-mark" aria-hidden="true">✦</span>{authLoading ? "Please wait…" : otpSent ? "Verify code" : "Send SMS code"}<span aria-hidden="true">↗</span></button>{otpSent && <div className="otp-fallback-actions"><button className="auth-resend" type="button" onClick={() => void sendSmsOtp()} disabled={authLoading}>Send a new SMS code</button><button className="auth-resend" type="button" onClick={() => void requestVoiceOtp()} disabled={authLoading}>SMS not received? Call me with the code</button></div>}</div>{authMessage && <p className="auth-message" role="alert">{authMessage}</p>}<p className="auth-note">Your orders and cart are saved to this verified mobile number.</p></section></div>}
+      {authOpen && <div className="drawer-backdrop auth-backdrop" onClick={closeAuth}><section className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close sign in" onClick={closeAuth}>×</button><p className="eyebrow">SECURE MOBILE LOGIN</p><h2 id="auth-title">Continue with your mobile number.</h2><p className="auth-intro">Enter your mobile number and we’ll send a one-time SMS code. No password is required.</p><div className="otp-auth-form"><label>Mobile number<input type="tel" value={authPhone} onChange={(event) => { setAuthPhone(event.target.value); setAuthOtp(""); setOtpSent(false); setOtpCooldown(0); }} placeholder="+91 98765 43210" inputMode="tel" autoComplete="tel" disabled={authLoading} /></label>{otpSent && <label>SMS one-time code<input value={authOtp} onChange={(event) => setAuthOtp(event.target.value.replace(/\s/g, ""))} inputMode="numeric" autoComplete="one-time-code" placeholder="Enter the code" disabled={authLoading} onKeyDown={(event) => { if (event.key === "Enter") void verifySmsOtp(); }} /></label>}<button className="google-sign-in" type="button" onClick={() => void (otpSent ? verifySmsOtp() : sendSmsOtp())} disabled={authLoading}><span className="email-otp-mark" aria-hidden="true">✦</span>{authLoading ? "Please wait…" : otpSent ? "Verify code" : "Send SMS code"}<span aria-hidden="true">↗</span></button>{otpSent && <div className="otp-fallback-actions"><button className="auth-resend" type="button" onClick={() => void sendSmsOtp()} disabled={authLoading || otpCooldown > 0}>{otpCooldown > 0 ? `Resend OTP in ${otpCooldown}s` : "Resend OTP"}</button></div>}</div>{authMessage && <p className="auth-message" role="alert">{authMessage}</p>}<p className="auth-note">Your orders and cart are saved to this verified mobile number.</p></section></div>}
 
       {checkoutOpen && <div className="drawer-backdrop checkout-backdrop" onClick={() => setCheckoutOpen(false)}><section className="checkout-modal" role="dialog" aria-modal="true" aria-labelledby="checkout-title" onClick={(event) => event.stopPropagation()} onFocusCapture={(event) => { if (event.target instanceof HTMLInputElement) requestAnimationFrame(() => event.target.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" })); }}><div className="drawer-header"><div><p className="eyebrow">CHECKOUT</p><h2 id="checkout-title">Complete your order</h2></div><button aria-label="Close checkout" onClick={() => setCheckoutOpen(false)}>×</button></div><p className="checkout-intro">We’ll use your WhatsApp number to confirm your order and delivery updates.</p><div className="checkout-grid"><label>Customer name<input value={checkoutForm.name} onChange={(event) => setCheckoutForm((current) => ({ ...current, name: event.target.value }))} placeholder="Your full name" required /></label><label>WhatsApp number <span className="required-mark">Required</span><input type="tel" value={checkoutForm.phone} onChange={(event) => setCheckoutForm((current) => ({ ...current, phone: event.target.value }))} placeholder="+91 98765 43210" required /></label><label>Email address <span className="optional-mark">Optional</span><input type="email" value={checkoutForm.email} onChange={(event) => setCheckoutForm((current) => ({ ...current, email: event.target.value }))} placeholder="you@example.com" /></label><label className="checkout-wide">Delivery address<input value={checkoutForm.address} onChange={(event) => setCheckoutForm((current) => ({ ...current, address: event.target.value }))} placeholder="House number, street, city, pincode" required /></label><div className="checkout-coupon checkout-wide"><label htmlFor="checkout-coupon-code">Coupon code <span className="optional-mark">Optional</span></label><div className="coupon-entry"><input id="checkout-coupon-code" value={couponInput} onChange={(event) => { setCouponInput(event.target.value.toUpperCase()); setAppliedCoupon(null); }} placeholder="Enter coupon code" autoCapitalize="characters" /><button className="button button-light" type="button" onClick={applyCoupon}>Apply</button></div>{appliedCoupon && <p className="coupon-success">{appliedCoupon.code} applied · {appliedCoupon.discount} off</p>}</div></div>{bogoDiscount > 0 && <div className="checkout-total coupon-total"><span>{bogoOfferLabel} discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="checkout-total coupon-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div className="checkout-total"><span>Order total</span><strong>{formatINR(orderTotal)}</strong></div><div className="checkout-actions"><button className="button button-dark" onClick={submitCheckout}>Place order <span>↗</span></button><button className="save-text" onClick={() => setCheckoutOpen(false)}>Back to cart</button></div></section></div>}
 
-      {quickProduct && <div className="drawer-backdrop" onClick={() => setQuickProduct(null)}><div className="quick-modal" onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setQuickProduct(null)}>×</button><div className="quick-image" onClick={() => setZoomedImage({ src: selectedVariant?.image || quickProduct.image, alt: selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name, adjustments: selectedVariant?.adjustments || quickProduct.imageAdjustments })} title="Click to zoom"><img src={selectedVariant?.image || quickProduct.image} alt={selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name} style={imageAdjustmentStyle(selectedVariant?.adjustments || quickProduct.imageAdjustments)} /></div><div className="quick-copy"><p className="eyebrow">{quickProduct.category}</p><h2>{quickProduct.name}</h2><div className="price-row"><span>{formatINR(quickProduct.price)}</span>{quickProduct.compareAt && <del>{formatINR(quickProduct.compareAt)}</del>}</div>{quickProduct.variants?.length ? <div className="variant-picker"><span>Choose colour / series / model</span><div>{quickProduct.variants.map((variant, index) => <button key={`${quickProduct.id}-${variant.name || index}`} className={selectedVariant?.name === variant.name && selectedVariant?.image === variant.image ? "active" : ""} onClick={() => setSelectedVariant(variant)}><img src={variant.image || quickProduct.image} alt="" style={imageAdjustmentStyle(variant.adjustments)} /><span>{variant.name || `Option ${index + 1}`}</span></button>)}</div></div> : null}<p>Designed to become part of your everyday ritual. Hand-finished in small batches with a soft, lasting glow.</p><div className="quick-actions"><button className="button button-dark" disabled={quickProduct.stock <= 0} onClick={() => { addToCart(quickProduct, selectedVariant); if (quickProduct.stock > 0) setQuickProduct(null); }}>{quickProduct.stock <= 0 ? "Sold out" : <>Add selected item to cart <span>↗</span></>}</button><button className="save-text" onClick={() => toggleWishlist(quickProduct.id)}>{wishlist.includes(quickProduct.id) ? "♥ Saved" : "♡ Save for later"}</button></div></div></div></div>}
+      {quickProduct && <div className="drawer-backdrop" onClick={() => setQuickProduct(null)}><div className="quick-modal" onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setQuickProduct(null)}>×</button><div className="quick-image" onClick={() => setZoomedImage({ src: selectedVariant?.image || quickProduct.image, alt: selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name, adjustments: selectedVariant?.adjustments || quickProduct.imageAdjustments })} title="Click to zoom"><img src={selectedVariant?.image || quickProduct.image} alt={selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name} style={imageAdjustmentStyle(selectedVariant?.adjustments || quickProduct.imageAdjustments)} /></div><div className="quick-copy"><p className="eyebrow">{quickProduct.category}</p><h2>{quickProduct.name}</h2><div className="price-row"><span>{formatINR(getCustomerPrice(quickProduct))}</span><del>{formatINR(getComparePrice(quickProduct))}</del></div>{quickProduct.variants?.length ? <div className="variant-picker"><span>Choose colour / series / model</span><div>{quickProduct.variants.map((variant, index) => <button key={`${quickProduct.id}-${variant.name || index}`} className={selectedVariant?.name === variant.name && selectedVariant?.image === variant.image ? "active" : ""} onClick={() => setSelectedVariant(variant)}><img src={variant.image || quickProduct.image} alt="" style={imageAdjustmentStyle(variant.adjustments)} /><span>{variant.name || `Option ${index + 1}`}</span></button>)}</div></div> : null}<p>Designed to become part of your everyday ritual. Hand-finished in small batches with a soft, lasting glow.</p><div className="quick-actions"><button className="button button-dark" disabled={quickProduct.stock <= 0} onClick={() => { addToCart(quickProduct, selectedVariant); if (quickProduct.stock > 0) setQuickProduct(null); }}>{quickProduct.stock <= 0 ? "Sold out" : <>Add selected item to cart <span>↗</span></>}</button><button className="save-text" onClick={() => toggleWishlist(quickProduct.id)}>{wishlist.includes(quickProduct.id) ? "♥ Saved" : "♡ Save for later"}</button></div></div></div></div>}
 
       {zoomedImage && <div className="drawer-backdrop image-zoom-backdrop" onClick={() => setZoomedImage(null)}><section className="image-zoom-modal" role="dialog" aria-modal="true" aria-label={`Zoomed view of ${zoomedImage.alt}`} onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setZoomedImage(null)} aria-label="Close image zoom">×</button><img src={zoomedImage.src} alt={zoomedImage.alt} style={imageAdjustmentStyle(zoomedImage.adjustments)} /></section></div>}
 
