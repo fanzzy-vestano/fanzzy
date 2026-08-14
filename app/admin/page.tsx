@@ -40,12 +40,14 @@ type AdminProduct = {
   gstRate?: number;
   markup?: number;
   costWithGst?: string;
+  sizes?: string[];
+  sizeStock?: Record<string, number>;
   variants?: ProductVariant[];
   imageAdjustments?: ImageAdjustments;
   hoverImageAdjustments?: ImageAdjustments;
 };
 type ImageAdjustments = { zoom: number; x: number; y: number; rotate: number };
-type ProductVariant = { name: string; image: string; adjustments?: ImageAdjustments };
+type ProductVariant = { name: string; image: string; stock?: number; adjustments?: ImageAdjustments };
 type ProductImageAdjustments = {
   image?: ImageAdjustments;
   hoverImage?: ImageAdjustments;
@@ -142,34 +144,52 @@ const normalizeImageAdjustments = (value: unknown): ImageAdjustments => {
     rotate: Math.min(180, Math.max(-180, numberOr(source.rotate, 0))),
   };
 };
-const imageTransformStyle = (adjustments: ImageAdjustments) => ({
-  objectPosition: `${50 + adjustments.x / 2}% ${50 + adjustments.y / 2}%`,
-  transform: `scale(${adjustments.zoom}) rotate(${adjustments.rotate}deg)`,
-});
+const imageTransformStyle = (adjustments: ImageAdjustments) => {
+  const safe = normalizeImageAdjustments(adjustments);
+  const translation = safe.zoom - 1;
+  return {
+    objectFit: "cover" as const,
+    objectPosition: "50% 50%",
+    transform: `translate(${safe.x * translation}%, ${safe.y * translation}%) scale(${safe.zoom}) rotate(${safe.rotate}deg)`,
+    transformOrigin: "center center",
+  };
+};
+const hasImageAdjustments = (value?: ImageAdjustments) => {
+  const adjustments = normalizeImageAdjustments(value);
+  return adjustments.zoom !== 1 || adjustments.x !== 0 || adjustments.y !== 0 || adjustments.rotate !== 0;
+};
 function ImageAdjustmentPreview({
   src,
   alt,
   adjustments,
   onChange,
+  onClick,
+  enabled = true,
   className = "",
 }: {
   src: string;
   alt: string;
   adjustments: ImageAdjustments;
   onChange: (next: ImageAdjustments) => void;
+  onClick?: () => void;
+  enabled?: boolean;
   className?: string;
 }) {
   const drag = useRef<{ pointerId: number; x: number; y: number; startX: number; startY: number } | null>(null);
+  const dragged = useRef(false);
   return (
     <div
-      className={`adjustment-preview ${className}`}
+      className={`adjustment-preview ${enabled ? "" : "adjustment-preview-disabled"} ${className}`}
       onPointerDown={(event) => {
+        dragged.current = false;
+        if (!enabled) return;
         drag.current = { pointerId: event.pointerId, x: adjustments.x, y: adjustments.y, startX: event.clientX, startY: event.clientY };
         event.currentTarget.setPointerCapture(event.pointerId);
       }}
       onPointerMove={(event) => {
         const start = drag.current;
         if (!start || start.pointerId !== event.pointerId) return;
+        if (event.clientX !== start.startX || event.clientY !== start.startY) dragged.current = true;
         onChange({
           ...adjustments,
           x: Math.min(50, Math.max(-50, start.x + (event.clientX - start.startX))),
@@ -178,10 +198,11 @@ function ImageAdjustmentPreview({
       }}
       onPointerUp={() => { drag.current = null; }}
       onPointerCancel={() => { drag.current = null; }}
-      title="Drag to position the image"
+      onClick={() => { if (!dragged.current) onClick?.(); dragged.current = false; }}
+      title={enabled ? "Drag to position the image" : "Photo adjustment is disabled"}
     >
-      <img src={src} alt={alt} draggable={false} style={imageTransformStyle(adjustments)} />
-      <span>Drag</span>
+      {src ? <img src={src} alt={alt} draggable={false} style={imageTransformStyle(adjustments)} /> : <strong className="adjustment-preview-empty">Upload image</strong>}
+      {src && <span>{enabled ? "Drag" : "Adjustment off"}</span>}
     </div>
   );
 }
@@ -202,6 +223,26 @@ function ImageAdjustmentControls({
       <label>Rotate <input type="range" min="-180" max="180" value={adjustments.rotate} onChange={(event) => update("rotate", event.target.value)} /></label>
       <button type="button" onClick={() => onChange(defaultImageAdjustments)}>Reset</button>
     </div>
+  );
+}
+function PhotoAdjustmentToggle({ enabled, onChange }: { enabled: boolean; onChange: (enabled: boolean) => void }) {
+  return (
+    <label className="photo-adjustment-toggle">
+      <input type="checkbox" checked={enabled} onChange={(event) => onChange(event.target.checked)} />
+      <span>
+        <strong>Enable photo adjustment</strong>
+        <small>Turn on only when this image needs repositioning, zoom or rotation.</small>
+      </span>
+    </label>
+  );
+}
+function VariantAdjustmentToggle({ enabled, onChange }: { enabled: boolean; onChange: (enabled: boolean) => void }) {
+  return (
+    <label className="variant-adjustment-toggle">
+      <input type="checkbox" checked={enabled} onChange={(event) => onChange(event.target.checked)} />
+      <span>Variant photo adjustments</span>
+      <strong>{enabled ? "ON" : "OFF"}</strong>
+    </label>
   );
 }
 type OrderStatus =
@@ -225,7 +266,7 @@ type OrderRecord = {
   paymentStatus?: "pending" | "paid";
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
-  items?: Array<{ name: string; quantity: number; price: string; productId?: string; image?: string; variantName?: string; variantImage?: string }>;
+  items?: Array<{ name: string; quantity: number; price: string; productId?: string; image?: string; variantName?: string; variantImage?: string; size?: string }>;
 };
 const adminOrders: OrderRecord[] = [];
 const isDemoOrder = (order: { id?: string }) => /^#FZ-104[4-8]$/.test(String(order.id ?? ""));
@@ -266,6 +307,13 @@ const calculatePricing = (costValue: string, gstValue: string, markupValue: stri
     price: costWithGst > 0 ? formatMoney(costWithGst * (1 + markup / 100)) : "₹",
   };
 };
+const calculateMarkupFromSellingPrice = (costValue: string, gstValue: string, priceValue: string) => {
+  const cost = parseMoney(costValue);
+  const gst = Number(gstValue) || 0;
+  const price = parseMoney(priceValue);
+  const costWithGst = cost * (1 + gst / 100);
+  return costWithGst > 0 && price > 0 ? String(Math.round(((price / costWithGst - 1) * 100) * 100) / 100) : "";
+};
 const makeLocalImage = (file: File) =>
   new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -299,6 +347,9 @@ const localImageToFile = async (source: string, name: string) => {
   return new File([blob], name, { type: blob.type || "image/webp" });
 };
 const localProductVariantsKey = "fanzzy-product-variants";
+const parseProductSizes = (value: string) => Array.from(new Set(value.split(",").map((size) => size.trim()).filter(Boolean)));
+const normalizeSizeStock = (value: Record<string, number | ""> | undefined): Record<string, number> =>
+  Object.fromEntries(Object.entries(value || {}).filter(([, quantity]) => quantity !== "" && Number.isFinite(Number(quantity))).map(([size, quantity]) => [size, Math.max(0, Math.floor(Number(quantity)))]));
 const persistCatalog = (catalog: AdminProduct[]) => {
   if (typeof window === "undefined") return;
   const tones = ["#d9c4bc", "#dad7ce", "#d0c2b0", "#e5ddd1"];
@@ -319,6 +370,8 @@ const persistCatalog = (catalog: AdminProduct[]) => {
     gstRate: product.gstRate || 0,
     markup: product.markup || 0,
     costWithGst: product.costWithGst || product.cost,
+    sizes: product.sizes || [],
+    sizeStock: product.sizeStock || {},
     variants: product.variants || [],
     imageAdjustments: product.imageAdjustments || defaultImageAdjustments,
     hoverImageAdjustments: product.hoverImageAdjustments || defaultImageAdjustments,
@@ -379,6 +432,7 @@ const toCatalogProduct = (product: AdminProduct) => ({
   status: product.status,
   image: product.image,
   hoverImage: product.hoverImage || product.image,
+  sizes: product.sizes || [],
   variants: product.variants || [],
   imageAdjustments: product.imageAdjustments || defaultImageAdjustments,
   hoverImageAdjustments: product.hoverImageAdjustments || defaultImageAdjustments,
@@ -422,6 +476,20 @@ const saveProductVariants = async (catalog: AdminProduct[]) => {
       .map((product) => [product.sku, product.variants]),
   );
   await saveStoreSetting("productVariants", JSON.stringify(variants));
+};
+const saveProductSizes = async (catalog: AdminProduct[]) => {
+  const sizes = Object.fromEntries(
+    catalog
+      .filter((product) => product.sku && product.sizes?.length)
+      .map((product) => [product.sku, product.sizes]),
+  );
+  await saveStoreSetting("productSizes", JSON.stringify(sizes));
+};
+const saveProductSizeStock = async (catalog: AdminProduct[]) => {
+  const stock = Object.fromEntries(
+    catalog.filter((product) => product.sku && product.sizes?.length).map((product) => [product.sku, product.sizeStock || {}]),
+  );
+  await saveStoreSetting("productSizeStock", JSON.stringify(stock));
 };
 const saveProductImageAdjustments = async (catalog: AdminProduct[]) => {
   const adjustments = Object.fromEntries(
@@ -2896,6 +2964,8 @@ function OrdersWorkspace({
 
   useEffect(() => {
     const syncOrders = async () => {
+      // Recover captured payments even when the customer's browser callback was interrupted.
+      await fetch("/api/razorpay/sync-payments", { method: "POST" }).catch(() => undefined);
       const remote = await fetchStoreOrders<OrderRecord>();
       const merged = new Map<string, OrderRecord>();
       remote.data?.forEach((order) => { if (order?.id && !isDemoOrder(order)) merged.set(order.id, order); });
@@ -3217,7 +3287,7 @@ function OrdersWorkspace({
               </p>
               <p className="product-detail-meta">Payment: {selectedOrder.paymentStatus === "paid" ? "Paid" : "Awaiting Razorpay confirmation"}{selectedOrder.razorpayPaymentId ? ` · Razorpay payment ${selectedOrder.razorpayPaymentId}` : selectedOrder.razorpayOrderId ? ` · Razorpay order ${selectedOrder.razorpayOrderId}` : ""}</p>
               <section className="admin-customer-details"><p className="eyebrow">CUSTOMER DETAILS</p><dl><div><dt>Name</dt><dd>{selectedOrder.customerName || "Not provided"}</dd></div><div><dt>Email</dt><dd>{selectedOrder.email || selectedOrder.userEmail || "Not provided"}</dd></div><div><dt>WhatsApp</dt><dd>{selectedOrder.phone || "Not provided"}</dd></div><div className="admin-customer-address"><dt>Delivery address</dt><dd>{selectedOrder.address || "Not provided"}</dd></div>{selectedOrder.userId && <div className="admin-customer-account"><dt>Account ID</dt><dd>{selectedOrder.userId}</dd></div>}</dl>{selectedOrder.razorpayPaymentId && <button className="module-secondary admin-restore-payment-details" type="button" onClick={() => void restoreOrderDetailsFromRazorpay()}>Restore delivery details from Razorpay</button>}</section>
-              {selectedOrder.items?.length ? <section className="admin-order-items"><p className="eyebrow">ITEMS IN THIS ORDER</p><div>{selectedOrder.items.map((item) => { const product = getOrderedProduct(item); const variant = item.variantName || (item.name.includes(" · ") ? item.name.split(" · ").slice(1).join(" · ") : ""); const selectedVariant = variant ? product?.variants.find((candidate) => candidate.name.trim().toLowerCase() === variant.trim().toLowerCase()) : undefined; const displayImage = item.variantImage || selectedVariant?.image || item.image || product?.image; return <article key={`${selectedOrder.id}-${item.name}`}><>{displayImage ? <img src={displayImage} alt={variant ? `${item.name} variant` : ""} /> : <span className="admin-order-item-placeholder" aria-hidden="true">✦</span>}</><span><strong>{item.name}</strong>{product ? <><small>{product.category} · SKU {product.sku}</small><small>Current stock: {product.stock} · {product.status}</small></> : <small>Product no longer in the catalog</small>}{variant && <small>Selected variant: {variant}{displayImage ? " · Variant image shown" : ""}</small>}<em>Quantity ordered: {item.quantity}</em></span><b>{item.price}</b></article>; })}</div></section> : <section className="admin-order-items admin-order-item-repair"><p className="eyebrow">ADD MISSING ORDER DETAILS</p><p>This older paid order has no saved product information. Select the product and variant to restore its order record.</p><div className="admin-order-item-repair-fields"><label>Product<select value={orderItemDraft.productId} onChange={(event) => { const product = catalogProducts.find((candidate) => candidate.id === event.target.value); setOrderItemDraft({ productId: event.target.value, variantName: "", quantity: "1", price: product ? `₹${product.price.toLocaleString("en-IN")}` : "" }); }}><option value="">Select product</option>{catalogProducts.map((product) => <option key={product.id} value={product.id}>{product.name} · {product.sku}</option>)}</select></label>{draftProduct?.variants.length ? <label>Variant<select value={orderItemDraft.variantName} onChange={(event) => setOrderItemDraft((current) => ({ ...current, variantName: event.target.value }))}><option value="">Select variant</option>{draftProduct.variants.map((variant, index) => <option key={`${variant.name}-${index}`} value={variant.name}>{variant.name || `Option ${index + 1}`}</option>)}</select></label> : null}<label>Quantity<input type="number" min="1" value={orderItemDraft.quantity} onChange={(event) => setOrderItemDraft((current) => ({ ...current, quantity: event.target.value }))} /></label><label>Price<input value={orderItemDraft.price} onChange={(event) => setOrderItemDraft((current) => ({ ...current, price: event.target.value }))} placeholder="₹0" /></label></div>{draftProduct && <div className="admin-order-item-repair-preview">{orderItemDraft.variantName && draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image ? <img src={draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image} alt="Selected variant preview" /> : draftProduct.image ? <img src={draftProduct.image} alt="Selected product preview" /> : null}<span>{orderItemDraft.variantName ? `Selected variant: ${orderItemDraft.variantName}` : "Select a variant if applicable"}</span></div>}<button className="module-primary" type="button" onClick={addMissingOrderItem}>Add to this order</button></section>}
+              {selectedOrder.items?.length ? <section className="admin-order-items"><p className="eyebrow">ITEMS IN THIS ORDER</p><div>{selectedOrder.items.map((item) => { const product = getOrderedProduct(item); const size = item.size || item.name.match(/(?:^| · )Size (.+)$/i)?.[1] || ""; const variant = item.variantName || (item.name.includes(" · ") ? item.name.split(" · ").slice(1).filter((part) => !/^Size /i.test(part)).join(" · ") : ""); const selectedVariant = variant ? product?.variants.find((candidate) => candidate.name.trim().toLowerCase() === variant.trim().toLowerCase()) : undefined; const displayImage = item.variantImage || selectedVariant?.image || item.image || product?.image; return <article key={`${selectedOrder.id}-${item.name}`}><>{displayImage ? <img src={displayImage} alt={variant ? `${item.name} variant` : ""} /> : <span className="admin-order-item-placeholder" aria-hidden="true">✦</span>}</><span><strong>{item.name}</strong>{product ? <><small>{product.category} · SKU {product.sku}</small><small>Current stock: {product.stock} · {product.status}</small></> : <small>Product no longer in the catalog</small>}{variant && <small>Selected variant: {variant}{displayImage ? " · Variant image shown" : ""}</small>}{size && <small>Selected size: {size}</small>}<em>Quantity ordered: {item.quantity}</em></span><b>{item.price}</b></article>; })}</div></section> : <section className="admin-order-items admin-order-item-repair"><p className="eyebrow">ADD MISSING ORDER DETAILS</p><p>This older paid order has no saved product information. Select the product and variant to restore its order record.</p><div className="admin-order-item-repair-fields"><label>Product<select value={orderItemDraft.productId} onChange={(event) => { const product = catalogProducts.find((candidate) => candidate.id === event.target.value); setOrderItemDraft({ productId: event.target.value, variantName: "", quantity: "1", price: product ? `₹${product.price.toLocaleString("en-IN")}` : "" }); }}><option value="">Select product</option>{catalogProducts.map((product) => <option key={product.id} value={product.id}>{product.name} · {product.sku}</option>)}</select></label>{draftProduct?.variants.length ? <label>Variant<select value={orderItemDraft.variantName} onChange={(event) => setOrderItemDraft((current) => ({ ...current, variantName: event.target.value }))}><option value="">Select variant</option>{draftProduct.variants.map((variant, index) => <option key={`${variant.name}-${index}`} value={variant.name}>{variant.name || `Option ${index + 1}`}</option>)}</select></label> : null}<label>Quantity<input type="number" min="1" value={orderItemDraft.quantity} onChange={(event) => setOrderItemDraft((current) => ({ ...current, quantity: event.target.value }))} /></label><label>Price<input value={orderItemDraft.price} onChange={(event) => setOrderItemDraft((current) => ({ ...current, price: event.target.value }))} placeholder="₹0" /></label></div>{draftProduct && <div className="admin-order-item-repair-preview">{orderItemDraft.variantName && draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image ? <img src={draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image} alt="Selected variant preview" /> : draftProduct.image ? <img src={draftProduct.image} alt="Selected product preview" /> : null}<span>{orderItemDraft.variantName ? `Selected variant: ${orderItemDraft.variantName}` : "Select a variant if applicable"}</span></div>}<button className="module-primary" type="button" onClick={addMissingOrderItem}>Add to this order</button></section>}
               <div className="order-status-editor">
                 <label>
                   Status
@@ -4076,6 +4146,8 @@ function ProductLibraryWorkspace({
     markup: "",
     gstRate: "",
     costWithGst: "₹",
+    sizes: "",
+    sizeStock: {} as Record<string, number | "">,
     variants: [] as ProductVariant[],
   });
   const [newProductImage, setNewProductImage] = useState(
@@ -4090,11 +4162,23 @@ function ProductLibraryWorkspace({
   );
   const [newImageAdjustments, setNewImageAdjustments] = useState<ImageAdjustments>(defaultImageAdjustments);
   const [newHoverAdjustments, setNewHoverAdjustments] = useState<ImageAdjustments>(defaultImageAdjustments);
+  const [newImageAdjustmentsEnabled, setNewImageAdjustmentsEnabled] = useState(false);
+  const [newHoverAdjustmentsEnabled, setNewHoverAdjustmentsEnabled] = useState(false);
+  const [newVariantAdjustmentsEnabled, setNewVariantAdjustmentsEnabled] = useState(false);
   const [editImageFile, setEditImageFile] = useState<File | null>(null);
   const [editHoverFile, setEditHoverFile] = useState<File | null>(null);
   const [editImageAdjustments, setEditImageAdjustments] = useState<ImageAdjustments>(defaultImageAdjustments);
   const [editHoverAdjustments, setEditHoverAdjustments] = useState<ImageAdjustments>(defaultImageAdjustments);
+  const [editImageAdjustmentsEnabled, setEditImageAdjustmentsEnabled] = useState(false);
+  const [editHoverAdjustmentsEnabled, setEditHoverAdjustmentsEnabled] = useState(false);
+  const [editVariantAdjustmentsEnabled, setEditVariantAdjustmentsEnabled] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const newProductImageInputRef = useRef<HTMLInputElement>(null);
+  const newProductHoverImageInputRef = useRef<HTMLInputElement>(null);
+  const editProductImageInputRef = useRef<HTMLInputElement>(null);
+  const editProductHoverImageInputRef = useRef<HTMLInputElement>(null);
+  const newVariantImageInputRefs = useRef<Record<number, HTMLInputElement | null>>({});
+  const editVariantImageInputRefs = useRef<Record<number, HTMLInputElement | null>>({});
   const [newProduct, setNewProduct] = useState({
     name: "",
     category: "Earrings",
@@ -4108,6 +4192,8 @@ function ProductLibraryWorkspace({
     markup: "",
     gstRate: "",
     costWithGst: "₹",
+    sizes: "",
+    sizeStock: {} as Record<string, number | "">,
     variants: [] as ProductVariant[],
   });
   useEffect(() => {
@@ -4119,12 +4205,16 @@ function ProductLibraryWorkspace({
       const billNameRemote = await fetchStoreSetting("productBillNames");
       const pricingRemote = await fetchStoreSetting("productPricing");
       const variantsRemote = await fetchStoreSetting("productVariants");
+      const sizesRemote = await fetchStoreSetting("productSizes");
+      const sizeStockRemote = await fetchStoreSetting("productSizeStock");
       const imageAdjustmentsRemote = await fetchStoreSetting("productImageAdjustments");
       let barcodeMap: Record<string, string> = {};
       let hsnCodeMap: Record<string, string> = {};
       let billNameMap: Record<string, string> = {};
       let pricingMap: Record<string, { gstRate?: number; markup?: number }> = {};
       let variantsMap: Record<string, ProductVariant[]> = {};
+      let sizesMap: Record<string, string[]> = {};
+      let sizeStockMap: Record<string, Record<string, number>> = {};
       let imageAdjustmentsMap: Record<string, ProductImageAdjustments> = {};
       if (barcodeRemote.value) {
         try {
@@ -4178,6 +4268,24 @@ function ProductLibraryWorkspace({
           variantsMap = {};
         }
       }
+      if (sizesRemote.value) {
+        try {
+          const parsed = JSON.parse(sizesRemote.value) as Record<string, unknown>;
+          if (parsed && typeof parsed === "object") {
+            sizesMap = Object.fromEntries(
+              Object.entries(parsed).filter((entry): entry is [string, string[]] => Array.isArray(entry[1]) && entry[1].every((size) => typeof size === "string")),
+            );
+          }
+        } catch {
+          sizesMap = {};
+        }
+      }
+      if (sizeStockRemote.value) {
+        try {
+          const parsed = JSON.parse(sizeStockRemote.value) as Record<string, Record<string, number>>;
+          if (parsed && typeof parsed === "object") sizeStockMap = parsed;
+        } catch { sizeStockMap = {}; }
+      }
       if (imageAdjustmentsRemote.value) {
         try {
           const parsed = JSON.parse(imageAdjustmentsRemote.value) as Record<string, ProductImageAdjustments>;
@@ -4187,6 +4295,7 @@ function ProductLibraryWorkspace({
         }
       }
       const localVariantsMap: Record<string, ProductVariant[]> = {};
+      const localSizesMap: Record<string, string[]> = {};
       const storedVariantCache = window.localStorage.getItem(localProductVariantsKey);
       if (storedVariantCache) {
         try {
@@ -4203,10 +4312,11 @@ function ProductLibraryWorkspace({
       const storedCatalog = window.localStorage.getItem("fanzzy-products");
       if (storedCatalog) {
         try {
-          const parsed = JSON.parse(storedCatalog) as Array<{ sku?: string; variants?: ProductVariant[] }>;
+          const parsed = JSON.parse(storedCatalog) as Array<{ sku?: string; variants?: ProductVariant[]; sizes?: string[] }>;
           if (Array.isArray(parsed)) {
             parsed.forEach((product) => {
               if (product.sku && product.variants?.length) localVariantsMap[product.sku] = product.variants;
+              if (product.sku && product.sizes?.length) localSizesMap[product.sku] = product.sizes;
             });
           }
         } catch {
@@ -4217,6 +4327,7 @@ function ProductLibraryWorkspace({
         const mapped: AdminProduct[] = remote.data.filter((product) => !isDemoProduct(product)).map((product) => {
           const savedAdjustments = imageAdjustmentsMap[product.sku];
           const variants = variantsMap[product.sku]?.length ? variantsMap[product.sku] : localVariantsMap[product.sku] || [];
+          const sizes = sizesMap[product.sku]?.length ? sizesMap[product.sku] : localSizesMap[product.sku] || [];
           return {
           name: product.name,
           price: `₹${product.price.toLocaleString("en-IN")}`,
@@ -4234,6 +4345,8 @@ function ProductLibraryWorkspace({
           gstRate: pricingMap[product.sku]?.gstRate || 0,
           markup: pricingMap[product.sku]?.markup || 0,
           costWithGst: calculatePricing(`₹${(product.cost ?? 0).toLocaleString("en-IN")}`, String(pricingMap[product.sku]?.gstRate || 0), String(pricingMap[product.sku]?.markup || 0)).costWithGst,
+          sizes,
+          sizeStock: sizeStockMap[product.sku] || {},
           variants: variants.map((variant, index) => ({
             ...variant,
             adjustments: normalizeImageAdjustments(savedAdjustments?.variants?.[index] || variant.adjustments),
@@ -4298,7 +4411,9 @@ function ProductLibraryWorkspace({
                   gstRate: product.gstRate ?? pricingMap[sku]?.gstRate ?? 0,
                   markup: product.markup ?? pricingMap[sku]?.markup ?? 0,
                   costWithGst: product.costWithGst || calculatePricing(String(rawCost ?? "₹0"), String(product.gstRate ?? pricingMap[sku]?.gstRate ?? 0), String(product.markup ?? pricingMap[sku]?.markup ?? 0)).costWithGst,
-                  variants: product.variants?.length ? product.variants : variantsMap[sku]?.length ? variantsMap[sku] : localVariantsMap[sku] || [],
+          sizes: product.sizes?.length ? product.sizes : sizesMap[sku]?.length ? sizesMap[sku] : localSizesMap[sku] || [],
+          sizeStock: product.sizeStock || sizeStockMap[sku] || {},
+          variants: product.variants?.length ? product.variants : variantsMap[sku]?.length ? variantsMap[sku] : localVariantsMap[sku] || [],
                 };
               }),
           );
@@ -4326,8 +4441,14 @@ function ProductLibraryWorkspace({
         next.costWithGst = pricing.costWithGst;
         if (parseMoney(next.cost) > 0) next.price = pricing.price;
       }
+      if (field === "price") next.markup = calculateMarkupFromSellingPrice(next.cost, next.gstRate, next.price);
       return next;
     });
+  const updateNewSizes = (value: string) => setNewProduct((current) => {
+    const sizes = parseProductSizes(value);
+    const sizeStock = Object.fromEntries(sizes.map((size) => [size, current.sizeStock[size] ?? ""]));
+    return { ...current, sizes: value, sizeStock };
+  });
   const openAddProduct = () => {
     setNewProduct({
       name: "",
@@ -4342,6 +4463,7 @@ function ProductLibraryWorkspace({
       markup: "",
       gstRate: "",
       costWithGst: "₹",
+      sizes: "",
       variants: [],
     });
     setNewProductImage(adminPlaceholderImage);
@@ -4350,6 +4472,9 @@ function ProductLibraryWorkspace({
     setNewProductHoverFile(null);
     setNewImageAdjustments(defaultImageAdjustments);
     setNewHoverAdjustments(defaultImageAdjustments);
+    setNewImageAdjustmentsEnabled(false);
+    setNewHoverAdjustmentsEnabled(false);
+    setNewVariantAdjustmentsEnabled(false);
     setSelectedProduct(null);
     setIsEditing(false);
     setIsAdding(true);
@@ -4406,9 +4531,13 @@ function ProductLibraryWorkspace({
       gstRate: Number(newProduct.gstRate) || 0,
       markup: Number(newProduct.markup) || 0,
       costWithGst: newProduct.costWithGst,
-      variants: newProduct.variants,
-      imageAdjustments: newImageAdjustments,
-      hoverImageAdjustments: newHoverAdjustments,
+      sizes: parseProductSizes(newProduct.sizes),
+      sizeStock: normalizeSizeStock(newProduct.sizeStock),
+      variants: newVariantAdjustmentsEnabled
+        ? newProduct.variants
+        : newProduct.variants.map((variant) => ({ ...variant, adjustments: defaultImageAdjustments })),
+      imageAdjustments: newImageAdjustmentsEnabled ? newImageAdjustments : defaultImageAdjustments,
+      hoverImageAdjustments: newHoverAdjustmentsEnabled ? newHoverAdjustments : defaultImageAdjustments,
     };
     const remoteError = await saveCatalogProduct(toCatalogProduct(product));
     setProducts((current) => {
@@ -4418,6 +4547,8 @@ function ProductLibraryWorkspace({
       void saveProductHsnCodes(next);
       void saveProductBillNames(next);
       void saveProductPricing(next);
+      void saveProductSizes(next);
+      void saveProductSizeStock(next);
       void saveProductVariants(next);
       void saveProductImageAdjustments(next);
       return next;
@@ -4435,6 +4566,8 @@ function ProductLibraryWorkspace({
       markup: "",
       gstRate: "",
       costWithGst: "₹",
+      sizes: "",
+      sizeStock: {},
       variants: [],
     });
     setNewProductImage(adminPlaceholderImage);
@@ -4443,6 +4576,9 @@ function ProductLibraryWorkspace({
     setNewProductHoverFile(null);
     setNewImageAdjustments(defaultImageAdjustments);
     setNewHoverAdjustments(defaultImageAdjustments);
+    setNewImageAdjustmentsEnabled(false);
+    setNewHoverAdjustmentsEnabled(false);
+    setNewVariantAdjustmentsEnabled(false);
     setIsAdding(false);
     onNotify(
       remoteError
@@ -4591,8 +4727,14 @@ function ProductLibraryWorkspace({
         next.costWithGst = pricing.costWithGst;
         if (parseMoney(next.cost) > 0) next.price = pricing.price;
       }
+      if (field === "price") next.markup = calculateMarkupFromSellingPrice(next.cost, next.gstRate, next.price);
       return next;
     });
+  const updateEditSizes = (value: string) => setEditValues((current) => {
+    const sizes = parseProductSizes(value);
+    const sizeStock = Object.fromEntries(sizes.map((size) => [size, current.sizeStock[size] ?? ""]));
+    return { ...current, sizes: value, sizeStock };
+  });
   const startEditing = (product: AdminProduct) => {
     setSelectedProduct(product);
     setIsAdding(false);
@@ -4614,10 +4756,15 @@ function ProductLibraryWorkspace({
         : "",
       gstRate: String(product.gstRate || 0),
       costWithGst: product.costWithGst || product.cost,
+      sizes: product.sizes?.join(", ") || "",
+      sizeStock: product.sizeStock || {},
       variants: product.variants || [],
     });
     setEditImageAdjustments(product.imageAdjustments || defaultImageAdjustments);
     setEditHoverAdjustments(product.hoverImageAdjustments || defaultImageAdjustments);
+    setEditImageAdjustmentsEnabled(hasImageAdjustments(product.imageAdjustments));
+    setEditHoverAdjustmentsEnabled(hasImageAdjustments(product.hoverImageAdjustments));
+    setEditVariantAdjustmentsEnabled(product.variants?.some((variant) => hasImageAdjustments(variant.adjustments)) ?? false);
     setEditImageFile(null);
     setEditHoverFile(null);
   };
@@ -4668,9 +4815,13 @@ function ProductLibraryWorkspace({
       gstRate: Number(editValues.gstRate) || 0,
       markup: Number(editValues.markup) || 0,
       costWithGst: editValues.costWithGst,
-      variants: editValues.variants,
-      imageAdjustments: editImageAdjustments,
-      hoverImageAdjustments: editHoverAdjustments,
+      sizes: parseProductSizes(editValues.sizes),
+      sizeStock: normalizeSizeStock(editValues.sizeStock),
+      variants: editVariantAdjustmentsEnabled
+        ? editValues.variants
+        : editValues.variants.map((variant) => ({ ...variant, adjustments: defaultImageAdjustments })),
+      imageAdjustments: editImageAdjustmentsEnabled ? editImageAdjustments : defaultImageAdjustments,
+      hoverImageAdjustments: editHoverAdjustmentsEnabled ? editHoverAdjustments : defaultImageAdjustments,
     };
     const remoteError = await saveCatalogProduct(toCatalogProduct(updated));
     if (!remoteError && updated.sku !== selectedProduct.sku)
@@ -4684,6 +4835,8 @@ function ProductLibraryWorkspace({
       void saveProductHsnCodes(next);
       void saveProductBillNames(next);
       void saveProductPricing(next);
+      void saveProductSizes(next);
+      void saveProductSizeStock(next);
       void saveProductVariants(next);
       void saveProductImageAdjustments(next);
       return next;
@@ -4706,6 +4859,8 @@ function ProductLibraryWorkspace({
       void saveProductHsnCodes(next);
       void saveProductBillNames(next);
       void saveProductPricing(next);
+      void saveProductSizes(next);
+      void saveProductSizeStock(next);
       void saveProductVariants(next);
       void saveProductImageAdjustments(next);
       return next;
@@ -4740,6 +4895,7 @@ function ProductLibraryWorkspace({
     const barcodeColumn = findColumn(["barcode", "bar code", "ean", "upc"]);
     const hsnCodeColumn = findColumn(["hsn", "hsn code", "hsncode"]);
     const billNameColumn = findColumn(["bill name", "invoice name", "billing name"]);
+    const sizesColumn = findColumn(["sizes", "size", "available sizes"]);
     const imported = rows
       .map((row, index): AdminProduct | null => {
         const name = nameColumn >= 0 ? row[nameColumn]?.trim() : "";
@@ -4771,6 +4927,7 @@ function ProductLibraryWorkspace({
           barcode: barcodeColumn >= 0 ? row[barcodeColumn]?.trim() || "" : "",
           hsnCode: hsnCodeColumn >= 0 ? row[hsnCodeColumn]?.trim() || "" : "",
           billName: billNameColumn >= 0 ? row[billNameColumn]?.trim() || "" : "",
+          sizes: sizesColumn >= 0 ? parseProductSizes(row[sizesColumn]?.trim() || "") : [],
           status: stock > 0 ? "Published" : "Draft",
           image: adminPlaceholderImage,
         };
@@ -4790,6 +4947,7 @@ function ProductLibraryWorkspace({
         void saveProductHsnCodes(next);
         void saveProductBillNames(next);
         void saveProductPricing(next);
+        void saveProductSizes(next);
         void saveProductVariants(next);
         void saveProductImageAdjustments(next);
         return next;
@@ -4803,7 +4961,7 @@ function ProductLibraryWorkspace({
     event.target.value = "";
   };
   const exportCsv = () => {
-    const headers = ["name", "billName", "sku", "barcode", "hsnCode", "category", "stock", "price", "cost", "status", "image", "hoverImage"];
+    const headers = ["name", "billName", "sku", "barcode", "hsnCode", "category", "sizes", "stock", "price", "cost", "status", "image", "hoverImage"];
     const escapeCsv = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
     const rows = products.map((product) => [
       product.name,
@@ -4812,6 +4970,7 @@ function ProductLibraryWorkspace({
       product.barcode || "",
       product.hsnCode || "",
       product.category,
+      (product.sizes || []).join(", "),
       product.stock,
       product.price,
       product.cost,
@@ -4885,30 +5044,34 @@ function ProductLibraryWorkspace({
             <p className="eyebrow">NEW PRODUCT</p>
             <h3 id="add-product-title">Add a product</h3>
             <div className="product-image-upload">
-              <ImageAdjustmentPreview src={newProductImage} alt="Product preview" adjustments={newImageAdjustments} onChange={setNewImageAdjustments} />
+              <ImageAdjustmentPreview src={newProductImage} alt="Product preview" adjustments={newImageAdjustments} enabled={newImageAdjustmentsEnabled} onClick={() => newProductImageInputRef.current?.click()} onChange={setNewImageAdjustments} />
               <label>
                 <strong>Upload product image</strong>
                 <small>JPG, PNG or WEBP · click to choose</small>
                 <input
+                  ref={newProductImageInputRef}
                   type="file"
                   accept="image/png,image/jpeg,image/webp"
                   onChange={uploadProductImage}
                 />
               </label>
-              <ImageAdjustmentControls adjustments={newImageAdjustments} onChange={setNewImageAdjustments} />
+              <PhotoAdjustmentToggle enabled={newImageAdjustmentsEnabled} onChange={setNewImageAdjustmentsEnabled} />
+              {newImageAdjustmentsEnabled && <ImageAdjustmentControls adjustments={newImageAdjustments} onChange={setNewImageAdjustments} />}
             </div>
             <div className="product-image-upload hover-image-upload">
-              <ImageAdjustmentPreview src={newProductHoverImage} alt="Product hover preview" adjustments={newHoverAdjustments} onChange={setNewHoverAdjustments} />
+              <ImageAdjustmentPreview src={newProductHoverImage} alt="Product hover preview" adjustments={newHoverAdjustments} enabled={newHoverAdjustmentsEnabled} onClick={() => newProductHoverImageInputRef.current?.click()} onChange={setNewHoverAdjustments} />
               <label>
                 <strong>Upload hover image</strong>
                 <small>Shown when customers point at this product</small>
                 <input
+                  ref={newProductHoverImageInputRef}
                   type="file"
                   accept="image/png,image/jpeg,image/webp"
                   onChange={uploadProductHoverImage}
                 />
               </label>
-              <ImageAdjustmentControls adjustments={newHoverAdjustments} onChange={setNewHoverAdjustments} />
+              <PhotoAdjustmentToggle enabled={newHoverAdjustmentsEnabled} onChange={setNewHoverAdjustmentsEnabled} />
+              {newHoverAdjustmentsEnabled && <ImageAdjustmentControls adjustments={newHoverAdjustments} onChange={setNewHoverAdjustments} />}
             </div>
             <div className="variant-editor">
               <div className="variant-editor-heading">
@@ -4916,18 +5079,22 @@ function ProductLibraryWorkspace({
                   <p className="eyebrow">COLOUR / SERIES / MODEL VARIANTS</p>
                   <small>Add a separate customer-selectable image for each variant. Drag its preview to adjust the position.</small>
                 </div>
-                <button
-                  className="module-secondary variant-add"
-                  type="button"
-                  onClick={() =>
-                    setNewProduct((current) => ({
-                      ...current,
-                      variants: [...current.variants, { name: "", image: "", adjustments: defaultImageAdjustments }],
-                    }))
-                  }
-                >
-                  + Add variant
-                </button>
+                <div className="variant-editor-actions">
+                  <VariantAdjustmentToggle enabled={newVariantAdjustmentsEnabled} onChange={setNewVariantAdjustmentsEnabled} />
+                  <button
+                    className="module-secondary variant-add"
+                    type="button"
+                    onClick={() =>
+                      setNewProduct((current) => ({
+                        ...current,
+                        stock: current.variants.length ? current.stock : "",
+                        variants: [...current.variants, { name: "", image: "", adjustments: defaultImageAdjustments }],
+                      }))
+                    }
+                  >
+                    + Add variant
+                  </button>
+                </div>
               </div>
               {newProduct.variants.length ? (
                 <div className="variant-editor-list">
@@ -4939,16 +5106,32 @@ function ProductLibraryWorkspace({
                         placeholder="e.g. Rose gold / Model 2"
                         aria-label={`Variant ${index + 1} name`}
                       />
+                      <label className="variant-stock-field">
+                        Variant stock
                         <input
-                          value={variant.image}
+                          type="number"
+                          min="0"
+                          value={variant.stock ?? ""}
+                          onChange={(event) => setNewProduct((current) => ({
+                            ...current,
+                            variants: current.variants.map((item, variantIndex) => variantIndex === index ? { ...item, stock: event.target.value === "" ? undefined : Math.max(0, Number(event.target.value) || 0) } : item),
+                          }))}
+                          onWheel={(event) => event.currentTarget.blur()}
+                          placeholder="0"
+                          aria-label={`Variant ${index + 1} stock`}
+                        />
+                      </label>
+                      <input
+                        value={variant.image}
                         onChange={(event) => updateNewVariant(index, "image", event.target.value)}
                         placeholder="Image URL (optional)"
                         aria-label={`Variant ${index + 1} image URL`}
                       />
-                      <ImageAdjustmentPreview className="variant-adjust-preview" src={variant.image || newProductImage} alt="Variant preview" adjustments={variant.adjustments || defaultImageAdjustments} onChange={(adjustments) => updateNewVariantAdjustments(index, adjustments)} />
+                      <ImageAdjustmentPreview className="variant-adjust-preview" src={variant.image} alt="Variant preview" adjustments={variant.adjustments || defaultImageAdjustments} enabled={newVariantAdjustmentsEnabled} onClick={() => newVariantImageInputRefs.current[index]?.click()} onChange={(adjustments) => updateNewVariantAdjustments(index, adjustments)} />
                       <label className="variant-upload">
                         Upload image
                         <input
+                          ref={(element) => { newVariantImageInputRefs.current[index] = element; }}
                           type="file"
                           accept="image/png,image/jpeg,image/webp"
                           onChange={(event) => {
@@ -4970,10 +5153,10 @@ function ProductLibraryWorkspace({
                       >
                         ×
                       </button>
-                      <ImageAdjustmentControls
+                      {newVariantAdjustmentsEnabled && <ImageAdjustmentControls
                         adjustments={variant.adjustments || defaultImageAdjustments}
                         onChange={(adjustments) => updateNewVariantAdjustments(index, adjustments)}
-                      />
+                      />}
                     </div>
                   ))}
                 </div>
@@ -5038,6 +5221,16 @@ function ProductLibraryWorkspace({
                   <option>Rings</option>
                 </select>
               </label>
+              <label>
+                Available sizes
+                <input
+                  value={newProduct.sizes}
+                  onChange={(event) => updateNewSizes(event.target.value)}
+                  placeholder="e.g. 6, 7, 8"
+                />
+                <small className="field-help">Separate multiple sizes with commas.</small>
+              </label>
+              {parseProductSizes(newProduct.sizes).length > 0 && <div className="size-stock-editor form-wide"><span className="field-label">Stock by size</span><div>{parseProductSizes(newProduct.sizes).map((size) => <label key={size}>{size}<input type="number" min="0" step="1" value={newProduct.sizeStock[size] ?? ""} onChange={(event) => setNewProduct((current) => ({ ...current, sizeStock: { ...current.sizeStock, [size]: event.target.value === "" ? "" : Number(event.target.value) } }))} placeholder="Quantity" onWheel={(event) => event.currentTarget.blur()} /></label>)}</div></div>}
                 <label>
                   Cost price
                   <input
@@ -5085,8 +5278,8 @@ function ProductLibraryWorkspace({
                     placeholder="Calculated from cost + markup"
                   />
                 </label>
-                <label>
-                  Stock
+                    <label className={newProduct.variants.length ? "product-stock-disabled" : ""}>
+                  Stock {newProduct.variants.length ? <small>Use variant stock below</small> : null}
                 <input
                   type="number"
                   min="0"
@@ -5094,6 +5287,7 @@ function ProductLibraryWorkspace({
                   onChange={(event) => updateField("stock", event.target.value)}
                   onWheel={(event) => event.currentTarget.blur()}
                   placeholder="0"
+                  disabled={newProduct.variants.length > 0}
                 />
               </label>
             </div>
@@ -5182,30 +5376,34 @@ function ProductLibraryWorkspace({
           <p className="eyebrow">EDIT PRODUCT</p>
           <h3>Edit {selectedProduct.name}</h3>
           <div className="product-image-upload">
-            <ImageAdjustmentPreview src={editValues.image || selectedProduct.image} alt="Product main image preview" adjustments={editImageAdjustments} onChange={setEditImageAdjustments} />
+            <ImageAdjustmentPreview src={editValues.image || selectedProduct.image} alt="Product main image preview" adjustments={editImageAdjustments} enabled={editImageAdjustmentsEnabled} onClick={() => editProductImageInputRef.current?.click()} onChange={setEditImageAdjustments} />
             <label>
               <strong>Upload main image</strong>
               <small>Shown as the primary product image</small>
               <input
+                ref={editProductImageInputRef}
                 type="file"
                 accept="image/png,image/jpeg,image/webp"
                 onChange={uploadEditImage}
               />
             </label>
-            <ImageAdjustmentControls adjustments={editImageAdjustments} onChange={setEditImageAdjustments} />
+            <PhotoAdjustmentToggle enabled={editImageAdjustmentsEnabled} onChange={setEditImageAdjustmentsEnabled} />
+            {editImageAdjustmentsEnabled && <ImageAdjustmentControls adjustments={editImageAdjustments} onChange={setEditImageAdjustments} />}
           </div>
           <div className="product-image-upload hover-image-upload">
-            <ImageAdjustmentPreview src={editValues.hoverImage || selectedProduct.image} alt="Product hover preview" adjustments={editHoverAdjustments} onChange={setEditHoverAdjustments} />
+            <ImageAdjustmentPreview src={editValues.hoverImage || selectedProduct.image} alt="Product hover preview" adjustments={editHoverAdjustments} enabled={editHoverAdjustmentsEnabled} onClick={() => editProductHoverImageInputRef.current?.click()} onChange={setEditHoverAdjustments} />
             <label>
               <strong>Upload hover image</strong>
               <small>Shown when customers point at this product</small>
               <input
+                ref={editProductHoverImageInputRef}
                 type="file"
                 accept="image/png,image/jpeg,image/webp"
                 onChange={uploadEditHoverImage}
               />
             </label>
-            <ImageAdjustmentControls adjustments={editHoverAdjustments} onChange={setEditHoverAdjustments} />
+            <PhotoAdjustmentToggle enabled={editHoverAdjustmentsEnabled} onChange={setEditHoverAdjustmentsEnabled} />
+            {editHoverAdjustmentsEnabled && <ImageAdjustmentControls adjustments={editHoverAdjustments} onChange={setEditHoverAdjustments} />}
           </div>
           <div className="variant-editor">
             <div className="variant-editor-heading">
@@ -5213,18 +5411,22 @@ function ProductLibraryWorkspace({
                 <p className="eyebrow">COLOUR / SERIES / MODEL VARIANTS</p>
                 <small>Add a separate customer-selectable image for each variant. Drag its preview to adjust the position.</small>
               </div>
-              <button
-                className="module-secondary variant-add"
-                type="button"
-                onClick={() =>
-                  setEditValues((current) => ({
-                    ...current,
+              <div className="variant-editor-actions">
+                <VariantAdjustmentToggle enabled={editVariantAdjustmentsEnabled} onChange={setEditVariantAdjustmentsEnabled} />
+                <button
+                  className="module-secondary variant-add"
+                  type="button"
+                  onClick={() =>
+                    setEditValues((current) => ({
+                      ...current,
+                      stock: current.variants.length ? current.stock : "",
                       variants: [...current.variants, { name: "", image: "", adjustments: defaultImageAdjustments }],
-                  }))
-                }
-              >
-                + Add variant
-              </button>
+                    }))
+                  }
+                >
+                  + Add variant
+                </button>
+              </div>
             </div>
             {editValues.variants.length ? (
               <div className="variant-editor-list">
@@ -5236,16 +5438,32 @@ function ProductLibraryWorkspace({
                       placeholder="e.g. Rose gold / Model 2"
                       aria-label={`Variant ${index + 1} name`}
                     />
+                    <label className="variant-stock-field">
+                      Variant stock
+                      <input
+                        type="number"
+                        min="0"
+                        value={variant.stock ?? ""}
+                        onChange={(event) => setEditValues((current) => ({
+                          ...current,
+                          variants: current.variants.map((item, variantIndex) => variantIndex === index ? { ...item, stock: event.target.value === "" ? undefined : Math.max(0, Number(event.target.value) || 0) } : item),
+                        }))}
+                        onWheel={(event) => event.currentTarget.blur()}
+                        placeholder="0"
+                        aria-label={`Variant ${index + 1} stock`}
+                      />
+                    </label>
                     <input
                       value={variant.image}
                       onChange={(event) => updateEditVariant(index, "image", event.target.value)}
                       placeholder="Image URL (optional)"
                       aria-label={`Variant ${index + 1} image URL`}
                     />
-                    <ImageAdjustmentPreview className="variant-adjust-preview" src={variant.image || editValues.image || selectedProduct.image} alt="Variant preview" adjustments={variant.adjustments || defaultImageAdjustments} onChange={(adjustments) => updateEditVariantAdjustments(index, adjustments)} />
+                    <ImageAdjustmentPreview className="variant-adjust-preview" src={variant.image} alt="Variant preview" adjustments={variant.adjustments || defaultImageAdjustments} enabled={editVariantAdjustmentsEnabled} onClick={() => editVariantImageInputRefs.current[index]?.click()} onChange={(adjustments) => updateEditVariantAdjustments(index, adjustments)} />
                     <label className="variant-upload">
                       Upload image
                       <input
+                        ref={(element) => { editVariantImageInputRefs.current[index] = element; }}
                         type="file"
                         accept="image/png,image/jpeg,image/webp"
                         onChange={(event) => {
@@ -5267,10 +5485,10 @@ function ProductLibraryWorkspace({
                     >
                       ×
                     </button>
-                    <ImageAdjustmentControls
+                    {editVariantAdjustmentsEnabled && <ImageAdjustmentControls
                       adjustments={variant.adjustments || defaultImageAdjustments}
                       onChange={(adjustments) => updateEditVariantAdjustments(index, adjustments)}
-                    />
+                    />}
                   </div>
                 ))}
               </div>
@@ -5361,6 +5579,16 @@ function ProductLibraryWorkspace({
                 <option>Rings</option>
               </select>
             </label>
+            <label>
+              Available sizes
+              <input
+                value={editValues.sizes}
+                onChange={(event) => updateEditSizes(event.target.value)}
+                placeholder="e.g. 6, 7, 8"
+              />
+              <small className="field-help">Separate multiple sizes with commas.</small>
+            </label>
+            {parseProductSizes(editValues.sizes).length > 0 && <div className="size-stock-editor form-wide"><span className="field-label">Stock by size</span><div>{parseProductSizes(editValues.sizes).map((size) => <label key={size}>{size}<input type="number" min="0" step="1" value={editValues.sizeStock[size] ?? ""} onChange={(event) => setEditValues((current) => ({ ...current, sizeStock: { ...current.sizeStock, [size]: event.target.value === "" ? "" : Number(event.target.value) } }))} placeholder="Quantity" onWheel={(event) => event.currentTarget.blur()} /></label>)}</div></div>}
                 <label>
                   Cost price
                   <input
@@ -5413,8 +5641,8 @@ function ProductLibraryWorkspace({
                     placeholder="Calculated from cost + markup"
                   />
                 </label>
-                <label>
-                  Stock
+                <label className={editValues.variants.length ? "product-stock-disabled" : ""}>
+                  Stock {editValues.variants.length ? <small>Use variant stock below</small> : null}
               <input
                 type="number"
                 min="0"
@@ -5425,6 +5653,7 @@ function ProductLibraryWorkspace({
                     stock: event.target.value,
                   }))
                 }
+                disabled={editValues.variants.length > 0}
                 onWheel={(event) => event.currentTarget.blur()}
               />
             </label>
@@ -5485,6 +5714,10 @@ function ProductLibraryWorkspace({
               <span>
                 <small>Bill name</small>
                 <strong>{selectedProduct.billName || selectedProduct.name}</strong>
+              </span>
+              <span>
+                <small>Available sizes</small>
+                <strong>{selectedProduct.sizes?.length ? selectedProduct.sizes.join(", ") : "Not added"}</strong>
               </span>
             </div>
             <div className="product-detail-actions">

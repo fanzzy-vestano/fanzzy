@@ -16,7 +16,8 @@ export type CatalogProduct = {
   tag?: string;
   tone?: string;
   barcode?: string;
-  variants?: Array<{ name: string; image: string }>;
+  variants?: Array<{ name: string; image: string; stock?: number }>;
+  sizes?: string[];
 };
 
 export type CatalogCategory = {
@@ -42,6 +43,8 @@ const settingKeys = {
   productBillNames: "product_bill_names",
   productPricing: "product_pricing",
   productVariants: "product_variants",
+  productSizes: "product_sizes",
+  productSizeStock: "product_size_stock",
   productImageAdjustments: "product_image_adjustments",
 } as const;
 

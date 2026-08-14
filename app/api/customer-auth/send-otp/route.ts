@@ -5,7 +5,6 @@ const json = (body: Record<string, unknown>, status = 200, headers?: HeadersInit
 
 export async function POST(request: Request) {
   const apiKey = getTwoFactorApiKey();
-  if (!apiKey) return json({ error: "SMS login is not configured yet" }, 503);
   let phone = "";
   try {
     phone = normalizeMobileNumber((await request.json() as { phone?: unknown }).phone);
@@ -23,10 +22,29 @@ export async function POST(request: Request) {
     );
   }
 
+  const developmentOtp = () => {
+    const code = process.env.CUSTOMER_SMS_DEV_CODE?.trim() || "123456";
+    return json(
+      { sent: true, developmentCode: code, developmentOnly: true },
+      200,
+      { "set-cookie": createPendingOtpCookie({ phone, sessionId: "local-development", developmentCode: code, expiresAt: Date.now() + 10 * 60 * 1000 }) },
+    );
+  };
+
+  if (!apiKey) {
+    if (process.env.NODE_ENV === "development") return developmentOtp();
+    return json({ error: "SMS login is not configured yet" }, 503);
+  }
+
   try {
-    const templateName = process.env.TWO_FACTOR_OTP_TEMPLATE_NAME?.trim() || "Fanzzy Login OTP";
-    const response = await fetch(`https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${phone}/AUTOGEN/${encodeURIComponent(templateName)}`, {
-      signal: AbortSignal.timeout(15_000),
+    // AUTOGEN works with the provider's default OTP template. Only add the
+    // optional custom template when it has explicitly been configured in the
+    // environment; an invented template name makes the provider reject the
+    // request before it can send anything.
+    const templateName = process.env.TWO_FACTOR_OTP_TEMPLATE_NAME?.trim();
+    const endpoint = `https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${phone}/AUTOGEN${templateName ? `/${encodeURIComponent(templateName)}` : ""}`;
+    const response = await fetch(endpoint, {
+      method: "POST",
     });
     const raw = await response.text();
     let result: Record<string, unknown> = {};
@@ -41,7 +59,9 @@ export async function POST(request: Request) {
       return json({ error: "We could not send the SMS code. Please try again." }, 502);
     }
     return json({ sent: true }, 200, { "set-cookie": createPendingOtpCookie({ phone, sessionId, expiresAt: Date.now() + 10 * 60 * 1000 }) });
-  } catch {
+  } catch (error) {
+    console.error("Customer SMS OTP send failed", error);
+    if (process.env.NODE_ENV === "development") return developmentOtp();
     return json({ error: "The SMS code could not be sent. Please try again." }, 502);
   }
 }

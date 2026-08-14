@@ -39,6 +39,8 @@ export async function POST(request: Request) {
   try {
     const razorpayResponse = await fetch("https://api.razorpay.com/v1/orders", {
       method: "POST",
+      cache: "no-store",
+      redirect: "follow",
       headers: {
         Authorization: `Basic ${Buffer.from(`${keyId}:${keySecret}`).toString("base64")}`,
         "Content-Type": "application/json",
@@ -56,7 +58,8 @@ export async function POST(request: Request) {
     }
 
     return json({ id: result.id, amount: result.amount, currency: result.currency, keyId });
-  } catch {
-    return json({ error: "Razorpay is temporarily unavailable" }, 502);
+  } catch (error) {
+    console.error("Razorpay order creation failed", error);
+    return json({ error: process.env.NODE_ENV === "development" && error instanceof Error ? `Razorpay provider error: ${error.message}` : "Razorpay is temporarily unavailable" }, 502);
   }
 }

@@ -123,6 +123,10 @@ export async function finalizeRazorpayPayment(payment: RazorpayPayment, receipt?
     order = orders.find((candidate) => candidate.razorpayOrderId && candidate.razorpayOrderId === payment.order_id);
   }
   if (!order) {
+    const notedOrderId = typeof payment.notes?.fanzzy_order_id === "string" ? payment.notes.fanzzy_order_id.trim() : "";
+    if (notedOrderId) order = orders.find((candidate) => candidate.id === notedOrderId);
+  }
+  if (!order) {
     order = {
       id: asOrderId(payment, receipt),
       date: payment.created_at ? new Date(payment.created_at * 1000).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10),

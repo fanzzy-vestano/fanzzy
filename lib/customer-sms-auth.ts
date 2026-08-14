@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 export type CustomerSmsIdentity = { id: string; phone: string };
 
-type PendingOtp = { phone: string; sessionId: string; expiresAt: number };
+type PendingOtp = { phone: string; sessionId: string; expiresAt: number; developmentCode?: string };
 type SignedValue = CustomerSmsIdentity | PendingOtp;
 
 const pendingCookie = "fanzzy_customer_otp";

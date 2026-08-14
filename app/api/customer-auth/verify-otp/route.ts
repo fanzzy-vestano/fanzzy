@@ -25,13 +25,19 @@ export async function POST(request: Request) {
   }
   if (code.length !== 6) return json({ error: "Enter the SMS code" }, 400);
 
+  if (pending.developmentCode) {
+    if (code !== pending.developmentCode) return json({ error: "Invalid development OTP. Use the code shown above." }, 401);
+    return new Response(JSON.stringify({ user: { id: `phone:${pending.phone}`, phone: `+${pending.phone}` } }), {
+      status: 200,
+      headers: sessionHeaders(pending.phone),
+    });
+  }
+
   const apiKey = getTwoFactorApiKey();
   if (!apiKey) return json({ error: "SMS login is not configured yet" }, 503);
 
   try {
-    const response = await fetch(`https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/VERIFY/${encodeURIComponent(pending.sessionId)}/${code}`, {
-      signal: AbortSignal.timeout(15_000),
-    });
+    const response = await fetch(`https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/VERIFY/${encodeURIComponent(pending.sessionId)}/${code}`);
     const raw = await response.text();
     let result: Record<string, unknown> = {};
     try {
@@ -54,7 +60,8 @@ export async function POST(request: Request) {
       status: 200,
       headers: sessionHeaders(pending.phone),
     });
-  } catch {
+  } catch (error) {
+    console.error("Customer SMS OTP verification failed", error);
     return json({ error: "The code could not be verified. Please try again." }, 502);
   }
 }

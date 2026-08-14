@@ -6,6 +6,7 @@ import {
   fetchCatalogProducts,
   fetchStoreOrders,
   fetchStoreSetting,
+  decrementCatalogStock,
   saveStoreOrders,
   saveStoreSetting,
 } from "../lib/supabase/catalog";
@@ -26,12 +27,14 @@ type Product = {
   tag?: string;
   tone: string;
   variants?: ProductVariant[];
+  sizes?: string[];
+  sizeStock?: Record<string, number>;
   billName?: string;
   imageAdjustments?: ImageAdjustments;
   hoverImageAdjustments?: ImageAdjustments;
 };
 type ImageAdjustments = { zoom: number; x: number; y: number; rotate: number };
-type ProductVariant = { name: string; image: string; adjustments?: ImageAdjustments };
+type ProductVariant = { name: string; image: string; stock?: number; adjustments?: ImageAdjustments };
 type ProductImageAdjustments = {
   image?: ImageAdjustments;
   hoverImage?: ImageAdjustments;
@@ -55,7 +58,7 @@ type CustomerOrder = {
   paymentStatus?: "pending" | "paid";
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
-  items?: Array<{ name: string; quantity: number; price: string; productId?: string; image?: string; variantName?: string; variantImage?: string }>;
+  items?: Array<{ name: string; quantity: number; price: string; productId?: string; image?: string; variantName?: string; variantImage?: string; size?: string }>;
 };
 type AssistantMessage = { role: "user" | "assistant"; text: string; productIds?: string[] };
 type RazorpayCheckoutResponse = {
@@ -90,11 +93,26 @@ const isDemoProduct = (product: { name?: string; sku?: string }) =>
   demoProductNames.has(String(product.name ?? "").trim().toLowerCase()) ||
   /^LST-(AUR|SOL|MUS|ORB)-\d+$/i.test(String(product.sku ?? ""));
 const isDemoOrder = (order: { id?: string }) => /^#FZ-104[4-8]$/.test(String(order.id ?? ""));
+const normalizePhone = (value?: string) => String(value || "").replace(/\D/g, "").replace(/^0+/, "");
 
 const formatINR = (value: number) => `₹${(Number.isFinite(value) ? value : 0).toLocaleString("en-IN")}`;
 const CUSTOMER_PRICE_MULTIPLIER = 1.4;
 const getCustomerPrice = (product: Pick<Product, "price">) => product.price;
 const getComparePrice = (product: Pick<Product, "price">) => Math.round(product.price * CUSTOMER_PRICE_MULTIPLIER);
+const getVariantStock = (product: Pick<Product, "stock">, variant?: ProductVariant | null) => {
+  if (variant?.stock === undefined || variant.stock === null || variant.stock === "") return product.stock;
+  const stock = Number(variant.stock);
+  return Number.isFinite(stock) ? Math.max(0, Math.floor(stock)) : product.stock;
+};
+const getSizeStock = (product: Pick<Product, "stock" | "sizeStock">, size?: string | null) => {
+  if (!size) return product.stock;
+  const value = product.sizeStock?.[size];
+  return value === undefined ? product.stock : Math.max(0, Math.floor(Number(value) || 0));
+};
+const getSelectionStock = (product: Pick<Product, "stock" | "sizeStock">, variant?: ProductVariant | null, size?: string | null) =>
+  variant && variant.stock !== undefined && variant.stock !== null && variant.stock !== ""
+    ? Math.min(getVariantStock(product, variant), getSizeStock(product, size))
+    : getSizeStock(product, size);
 const loadRazorpayCheckout = () => new Promise<new (options: RazorpayCheckoutOptions) => RazorpayCheckout>((resolve, reject) => {
   const existing = (window as Window & { Razorpay?: new (options: RazorpayCheckoutOptions) => RazorpayCheckout }).Razorpay;
   if (existing) return resolve(existing);
@@ -161,9 +179,10 @@ const normalizeImageAdjustments = (value: unknown): ImageAdjustments => {
 };
 const imageAdjustmentStyle = (value?: ImageAdjustments) => {
   const adjustments = normalizeImageAdjustments(value);
+  const translation = adjustments.zoom - 1;
   return {
-    objectPosition: `${50 + adjustments.x / 2}% ${50 + adjustments.y / 2}%`,
-    transform: `scale(${adjustments.zoom}) rotate(${adjustments.rotate}deg)`,
+    objectPosition: "50% 50%",
+    transform: `translate(${adjustments.x * translation}%, ${adjustments.y * translation}%) scale(${adjustments.zoom}) rotate(${adjustments.rotate}deg)`,
   };
 };
 
@@ -182,6 +201,7 @@ function normalizeStoredProduct(value: unknown, index: number): Product | null {
         .map((variant) => ({
           name: typeof variant.name === "string" ? variant.name.trim() : "",
           image: typeof variant.image === "string" ? variant.image : "",
+          stock: variant.stock === undefined || variant.stock === null || variant.stock === "" ? undefined : Number.isFinite(Number(variant.stock)) ? Math.max(0, Math.floor(Number(variant.stock))) : undefined,
           adjustments: normalizeImageAdjustments(variant.adjustments),
         }))
         .filter((variant) => variant.name || variant.image)
@@ -200,6 +220,8 @@ function normalizeStoredProduct(value: unknown, index: number): Product | null {
     tag: typeof raw.tag === "string" ? raw.tag : undefined,
     tone: typeof raw.tone === "string" && raw.tone ? raw.tone : productTones[index % productTones.length],
     variants,
+    sizes: Array.isArray(raw.sizes) ? raw.sizes.filter((size): size is string => typeof size === "string") : [],
+    sizeStock: raw.sizeStock && typeof raw.sizeStock === "object" ? raw.sizeStock as Record<string, number> : {},
     billName: typeof raw.billName === "string" ? raw.billName.trim() : "",
     imageAdjustments: normalizeImageAdjustments(raw.imageAdjustments),
     hoverImageAdjustments: normalizeImageAdjustments(raw.hoverImageAdjustments),
@@ -207,7 +229,11 @@ function normalizeStoredProduct(value: unknown, index: number): Product | null {
 }
 
 function ProductCard({ product, wished, onWishlist, onAdd, onQuickView, onImageZoom }: { product: Product; wished: boolean; onWishlist: () => void; onAdd: () => void; onQuickView: () => void; onImageZoom: () => void }) {
-  const isOutOfStock = product.stock <= 0;
+  const isOutOfStock = product.variants?.length
+    ? product.variants.every((variant) => getVariantStock(product, variant) <= 0)
+    : product.sizes?.length
+      ? product.sizes.every((size) => getSizeStock(product, size) <= 0)
+      : product.stock <= 0;
   return (
     <article className="product-card">
       <div className="product-media" style={{ backgroundColor: product.tone }}>
@@ -240,8 +266,10 @@ export default function Home() {
   const [search, setSearch] = useState("");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [wishlist, setWishlist] = useState<string[]>([]);
+  const [savedOpen, setSavedOpen] = useState(false);
   const [cart, setCart] = useState<Record<string, number>>({});
   const [cartVariants, setCartVariants] = useState<Record<string, ProductVariant | null>>({});
+  const [cartSizes, setCartSizes] = useState<Record<string, string | null>>({});
   const cartOwnerId = useRef<string | null>(null);
   const [cartOpen, setCartOpen] = useState(false);
   const [ordersOpen, setOrdersOpen] = useState(false);
@@ -272,6 +300,7 @@ export default function Home() {
   const quickViewHistoryEntry = useRef(false);
   const [zoomedImage, setZoomedImage] = useState<{ src: string; alt: string; adjustments?: ImageAdjustments } | null>(null);
   const [selectedVariant, setSelectedVariant] = useState<ProductVariant | null>(null);
+  const [selectedSize, setSelectedSize] = useState<string | null>(null);
   const [toast, setToast] = useState("");
   const [email, setEmail] = useState("");
   const [subscribed, setSubscribed] = useState(false);
@@ -296,9 +325,13 @@ export default function Home() {
     const syncProducts = async () => {
       const remote = await fetchCatalogProducts();
       const variantsRemote = await fetchStoreSetting("productVariants");
+      const sizesRemote = await fetchStoreSetting("productSizes");
+      const sizeStockRemote = await fetchStoreSetting("productSizeStock");
       const imageAdjustmentsRemote = await fetchStoreSetting("productImageAdjustments");
       const billNameRemote = await fetchStoreSetting("productBillNames");
       let variantsMap: Record<string, ProductVariant[]> = {};
+      let sizesMap: Record<string, string[]> = {};
+      let sizeStockMap: Record<string, Record<string, number>> = {};
       let imageAdjustmentsMap: Record<string, ProductImageAdjustments> = {};
       let billNameMap: Record<string, string> = {};
       if (variantsRemote.value) {
@@ -308,6 +341,12 @@ export default function Home() {
         } catch {
           variantsMap = {};
         }
+      }
+      if (sizesRemote.value) {
+        try { const parsed = JSON.parse(sizesRemote.value) as Record<string, string[]>; if (parsed && typeof parsed === "object") sizesMap = parsed; } catch { sizesMap = {}; }
+      }
+      if (sizeStockRemote.value) {
+        try { const parsed = JSON.parse(sizeStockRemote.value) as Record<string, Record<string, number>>; if (parsed && typeof parsed === "object") sizeStockMap = parsed; } catch { sizeStockMap = {}; }
       }
       if (imageAdjustmentsRemote.value) {
         try {
@@ -352,6 +391,8 @@ export default function Home() {
             localProducts = parsed.filter((product) => !isDemoProduct(product as { name?: string; sku?: string })).map(normalizeStoredProduct).filter((product): product is Product => product !== null).map((product) => ({
               ...product,
               variants: product.variants?.length ? product.variants : localVariantsMap[product.id] || [],
+              sizes: product.sizes?.length ? product.sizes : sizesMap[product.sku || ""] || [],
+              sizeStock: product.sizeStock || sizeStockMap[product.sku || ""] || {},
             }));
           }
         } catch {
@@ -379,6 +420,8 @@ export default function Home() {
             name: variant.name || `Option ${variantIndex + 1}`,
             adjustments: normalizeImageAdjustments(savedAdjustments?.variants?.[variantIndex] || variant.adjustments),
           })),
+          sizes: sizesMap[product.sku] || [],
+          sizeStock: sizeStockMap[product.sku] || {},
           imageAdjustments: savedAdjustments?.image,
           hoverImageAdjustments: savedAdjustments?.hoverImage,
           billName: billNameMap[product.sku] || "",
@@ -407,7 +450,10 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    setSelectedVariant(quickProduct?.variants?.[0] ?? null);
+    const availableVariant = quickProduct?.variants?.find((variant) => getVariantStock(quickProduct, variant) > 0);
+    setSelectedVariant(availableVariant ?? quickProduct?.variants?.[0] ?? null);
+    const availableSize = quickProduct?.sizes?.find((size) => getSelectionStock(quickProduct, availableVariant ?? null, size) > 0);
+    setSelectedSize(availableSize ?? quickProduct?.sizes?.[0] ?? null);
   }, [quickProduct]);
 
   useEffect(() => {
@@ -467,6 +513,8 @@ export default function Home() {
 
   useEffect(() => {
     const syncOrders = async () => {
+      // Recover captured payments even when the Razorpay browser callback was interrupted.
+      await fetch("/api/razorpay/sync-payments", { method: "POST" }).catch(() => undefined);
       const userId = authUser?.id;
       if (!userId) {
         setOrders([]);
@@ -474,8 +522,9 @@ export default function Home() {
       }
       const remote = await fetchStoreOrders<CustomerOrder>();
       const merged = new Map<string, CustomerOrder>();
+      const belongsToCustomer = (order: CustomerOrder) => order.userId === userId || normalizePhone(order.userPhone || order.phone) === normalizePhone(authUser.phone);
       remote.data?.forEach((order) => {
-        if (order?.id && order.userId === userId && !isDemoOrder(order)) {
+        if (order?.id && belongsToCustomer(order) && !isDemoOrder(order)) {
           merged.set(order.id, order);
         }
       });
@@ -484,11 +533,16 @@ export default function Home() {
         const parsed = stored ? JSON.parse(stored) : [];
         if (Array.isArray(parsed)) {
           parsed.forEach((order) => {
-            if (order?.id && order.userId === userId && !isDemoOrder(order) && !merged.has(order.id)) {
+            if (order?.id && belongsToCustomer(order) && !isDemoOrder(order) && !merged.has(order.id)) {
               merged.set(order.id, order as CustomerOrder);
             }
           });
         }
+        const sharedStored = window.localStorage.getItem("fanzzy-orders");
+        const sharedParsed = sharedStored ? JSON.parse(sharedStored) : [];
+        if (Array.isArray(sharedParsed)) sharedParsed.forEach((order) => {
+          if (order?.id && belongsToCustomer(order as CustomerOrder) && !isDemoOrder(order) && !merged.has(order.id)) merged.set(order.id, order as CustomerOrder);
+        });
       } catch {
         setOrders([]);
       }
@@ -515,10 +569,16 @@ export default function Home() {
   const cartItems = Object.entries(cart).flatMap(([cartKey, quantity]) => {
     const productId = cartKey.split("::", 1)[0];
     const product = products.find((item) => item.id === productId);
-    return product ? [{ ...product, cartKey, quantity, variant: cartVariants[cartKey] ?? null }] : [];
+    return product ? [{ ...product, cartKey, quantity, variant: cartVariants[cartKey] ?? null, size: cartSizes[cartKey] ?? null }] : [];
   });
+  const cartStockIssues = cartItems.filter((product) => {
+    const availableStock = getSelectionStock(product, product.variant, product.size);
+    return availableStock <= 0 || product.quantity > availableStock;
+  });
+  const cartHasSoldOutItems = cartStockIssues.some((product) => getSelectionStock(product, product.variant, product.size) <= 0);
   const cartCount = Object.values(cart).reduce((sum, count) => sum + count, 0);
   const subtotal = cartItems.reduce((sum, product) => sum + getCustomerPrice(product) * product.quantity, 0);
+  const selectedVariantStock = quickProduct ? getSelectionStock(quickProduct, selectedVariant, selectedSize) : 0;
   const couponDiscount = appliedCoupon ? getCouponDiscount(appliedCoupon, subtotal) : 0;
   const bogoCampaign = isBogoCampaign(activeCampaign) ? activeCampaign : null;
   const bogoQuantities = getBogoQuantities(bogoCampaign);
@@ -544,6 +604,7 @@ export default function Home() {
       cartOwnerId.current = null;
       setCart({});
       setCartVariants({});
+      setCartSizes({});
       return;
     }
     const readCart = <T,>(key: string): T => {
@@ -556,6 +617,7 @@ export default function Home() {
     };
     setCart(readCart<Record<string, number>>(cartStorageKey(userId)));
     setCartVariants(readCart<Record<string, ProductVariant | null>>(cartVariantsStorageKey(userId)));
+    setCartSizes(readCart<Record<string, string | null>>(`fanzzy-cart-sizes:${userId}`));
     cartOwnerId.current = userId;
   }, [authUser?.id]);
 
@@ -564,7 +626,8 @@ export default function Home() {
     if (!userId || cartOwnerId.current !== userId) return;
     window.localStorage.setItem(cartStorageKey(userId), JSON.stringify(cart));
     window.localStorage.setItem(cartVariantsStorageKey(userId), JSON.stringify(cartVariants));
-  }, [authUser?.id, cart, cartVariants]);
+    window.localStorage.setItem(`fanzzy-cart-sizes:${userId}`, JSON.stringify(cartSizes));
+  }, [authUser?.id, cart, cartVariants, cartSizes]);
 
   useEffect(() => {
     let active = true;
@@ -756,22 +819,29 @@ export default function Home() {
     setWishlist((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
     announce(wishlist.includes(id) ? "Removed from wishlist" : "Saved to wishlist");
   };
-  const addToCart = (product: Product, variant: ProductVariant | null = null) => {
-    if (product.stock <= 0) return announce(`${product.name} is sold out`);
+  const addToCart = (product: Product, variant: ProductVariant | null = null, size: string | null = null) => {
     if (product.variants?.length && !variant) {
       setQuickProduct(product);
       return;
     }
-    const cartKey = variant ? `${product.id}::${variant.name || variant.image}` : product.id;
+    if (product.sizes?.length && !size) {
+      setQuickProduct(product);
+      return;
+    }
+    if (getSelectionStock(product, variant, size) <= 0) return announce(`${product.name}${size ? ` · Size ${size}` : ""}${variant?.name ? ` · ${variant.name}` : ""} is sold out`);
+    const cartKey = [product.id, variant ? (variant.name || variant.image) : "", size || ""].filter(Boolean).join("::");
     setCart((current) => ({ ...current, [cartKey]: (current[cartKey] ?? 0) + 1 }));
     if (variant) setCartVariants((current) => ({ ...current, [cartKey]: variant }));
+    if (size) setCartSizes((current) => ({ ...current, [cartKey]: size }));
     setCartOpen(true);
     announce(`${product.name}${variant?.name ? ` · ${variant.name}` : ""} added to cart`);
   };
   const updateQuantity = (cartKey: string, delta: number) => {
     const productId = cartKey.split("::", 1)[0];
     const product = products.find((item) => item.id === productId);
-    if (delta > 0 && product && product.stock <= 0) return announce(`${product.name} is sold out`);
+    const variant = cartVariants[cartKey];
+    const size = cartSizes[cartKey];
+    if (delta > 0 && product && getSelectionStock(product, variant, size) <= (cart[cartKey] ?? 0)) return announce(`${product.name}${size ? ` · Size ${size}` : ""} has no more stock available`);
     setCart((current) => {
       const next = Math.max(0, (current[cartKey] ?? 0) + delta);
       const updated = { ...current };
@@ -784,6 +854,7 @@ export default function Home() {
         delete updated[cartKey];
         return updated;
       });
+      setCartSizes((current) => { const updated = { ...current }; delete updated[cartKey]; return updated; });
     }
   };
   const removeFromCart = (cartKey: string) => {
@@ -797,6 +868,7 @@ export default function Home() {
       delete updated[cartKey];
       return updated;
     });
+    setCartSizes((current) => { const updated = { ...current }; delete updated[cartKey]; return updated; });
     announce("Item removed from cart");
   };
   const closeAuth = () => {
@@ -833,14 +905,14 @@ export default function Home() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ phone }),
       });
-      const result = await response.json() as { error?: string };
+      const result = await response.json() as { error?: string; developmentCode?: string; developmentOnly?: boolean };
       if (!response.ok) {
         setAuthMessage(result.error || (response.status >= 500 ? "Please try again" : "We could not send the OTP."));
         return;
       }
       setOtpSent(true);
       setOtpCooldown(60);
-      setAuthMessage("OTP sent successfully");
+      setAuthMessage(result.developmentOnly ? `SMS is unavailable on localhost. Use development code ${result.developmentCode}.` : "OTP sent successfully");
     } catch {
       setAuthMessage("Please try again");
     } finally {
@@ -881,7 +953,7 @@ export default function Home() {
   };
   const openCheckout = async () => {
     if (!cartItems.length) return announce("Add a piece to your cart first");
-    if (cartItems.some((product) => product.stock <= 0)) return announce("Remove sold out items before checkout");
+    if (cartStockIssues.length) return announce(cartHasSoldOutItems ? "Remove sold out items before checkout" : "Reduce item quantities before checkout");
     if (!authUser) {
       window.localStorage.setItem(checkoutAfterAuthKey, "1");
       setCartOpen(false);
@@ -943,6 +1015,10 @@ export default function Home() {
       order.razorpayPaymentId && order.razorpayPaymentId === newOrder.razorpayPaymentId,
     );
     if (existingPayment) {
+      const userOrders = Array.from(merged.values()).filter((order) => order.userId === authUser.id || normalizePhone(order.userPhone || order.phone) === normalizePhone(authUser.phone));
+      window.localStorage.setItem(`fanzzy-orders:${authUser.id}`, JSON.stringify(userOrders));
+      window.localStorage.setItem("fanzzy-orders", JSON.stringify(Array.from(merged.values())));
+      window.dispatchEvent(new Event("fanzzy-orders-updated"));
       setOrderConfirmation(existingPayment);
       setCart({});
       setCartVariants({});
@@ -953,6 +1029,7 @@ export default function Home() {
     }
     const nextOrders = [newOrder, ...Array.from(merged.values()).filter((order) => order.id !== newOrder.id)];
     await saveStoreOrders(nextOrders);
+    window.localStorage.setItem("fanzzy-orders", JSON.stringify(nextOrders));
     const userOrders = nextOrders.filter((order) => order.userId === authUser.id);
     window.localStorage.setItem(`fanzzy-orders:${authUser.id}`, JSON.stringify(userOrders));
     window.dispatchEvent(new Event("fanzzy-orders-updated"));
@@ -966,6 +1043,42 @@ export default function Home() {
     setIsPaying(false);
     window.dispatchEvent(new Event("fanzzy-products-updated"));
     announce(`${newOrder.id} placed successfully`);
+  };
+  const applyPaidInventory = async (items: NonNullable<CustomerOrder["items"]>) => {
+    const sizeRemote = await fetchStoreSetting("productSizeStock");
+    let sizeStock: Record<string, Record<string, number>> = {};
+    if (sizeRemote.value) {
+      try { sizeStock = JSON.parse(sizeRemote.value) as Record<string, Record<string, number>>; } catch { sizeStock = {}; }
+    }
+    const regularLines: Array<{ sku: string; quantity: number }> = [];
+    const localUpdates = new Map<string, { quantity: number; size?: string }>();
+    items.forEach((item) => {
+      const product = products.find((candidate) => candidate.id === item.productId || candidate.sku === item.productId || candidate.name === item.name.split(" · ")[0]);
+      if (!product) return;
+      const current = localUpdates.get(product.sku) || { quantity: 0 };
+      if (item.size && product.sizes?.length) {
+        const currentSizeStock = sizeStock[product.sku] || product.sizeStock || {};
+        sizeStock[product.sku] = { ...currentSizeStock, [item.size]: Math.max(0, (currentSizeStock[item.size] ?? 0) - item.quantity) };
+        localUpdates.set(product.sku, { ...current, size: item.size, quantity: current.quantity + item.quantity });
+      } else {
+        regularLines.push({ sku: product.sku, quantity: item.quantity });
+        localUpdates.set(product.sku, { ...current, quantity: current.quantity + item.quantity });
+      }
+    });
+    if (sizeRemote.value || Object.keys(sizeStock).length) await saveStoreSetting("productSizeStock", JSON.stringify(sizeStock));
+    if (regularLines.length) await decrementCatalogStock(regularLines);
+    try {
+      const stored = window.localStorage.getItem("fanzzy-products");
+      const parsed = stored ? JSON.parse(stored) : [];
+      if (Array.isArray(parsed)) {
+        window.localStorage.setItem("fanzzy-products", JSON.stringify(parsed.map((product) => {
+          const update = localUpdates.get(product.sku);
+          if (!update) return product;
+          return { ...product, stock: product.sizes?.length ? product.stock : Math.max(0, Number(product.stock || 0) - update.quantity), sizeStock: product.sizeStock ? { ...product.sizeStock, ...(sizeStock[product.sku] || {}) } : product.sizeStock };
+        })));
+        window.dispatchEvent(new Event("fanzzy-products-updated"));
+      }
+    } catch { /* inventory refresh remains available from Supabase */ }
   };
   const persistPendingOrder = async (newOrder: CustomerOrder) => {
     if (!authUser) throw new Error("Sign in before placing an order");
@@ -985,7 +1098,8 @@ export default function Home() {
     }
     const nextOrders = [newOrder, ...Array.from(merged.values()).filter((order) => order.id !== newOrder.id)];
     const saveError = await saveStoreOrders(nextOrders);
-    if (saveError) throw new Error("Could not save the order record. Please try again.");
+    // Keep a browser-local copy when Supabase is temporarily unavailable.
+    window.localStorage.setItem("fanzzy-orders", JSON.stringify(nextOrders));
     window.localStorage.setItem(
       `fanzzy-orders:${authUser.id}`,
       JSON.stringify(nextOrders.filter((order) => order.userId === authUser.id)),
@@ -1000,7 +1114,7 @@ export default function Home() {
       setAuthOpen(true);
       return;
     }
-    if (cartItems.some((product) => product.stock <= 0 || product.quantity > product.stock)) return announce("One or more cart quantities are no longer available");
+    if (cartStockIssues.length) return announce(cartHasSoldOutItems ? "Remove sold out items before checkout" : "Reduce item quantities before checkout");
     const name = checkoutForm.name.trim();
     const digits = checkoutForm.phone.replace(/\D/g, "");
     if (!name) return announce("Customer name is required");
@@ -1022,7 +1136,7 @@ export default function Home() {
       address: checkoutForm.address.trim(),
       paymentStatus: "pending",
       ...(appliedCoupon ? { coupon: appliedCoupon.code } : {}),
-      items: cartItems.map((product) => ({ productId: product.id, name: `${product.billName || product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}`, quantity: product.quantity, price: formatINR(getCustomerPrice(product)), image: product.image, variantName: product.variant?.name, variantImage: product.variant?.image })),
+      items: cartItems.map((product) => ({ productId: product.id, name: `${product.billName || product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}${product.size ? ` · Size ${product.size}` : ""}`, quantity: product.quantity, price: formatINR(getCustomerPrice(product)), image: product.image, variantName: product.variant?.name, variantImage: product.variant?.image, size: product.size || undefined })),
     };
 
     setIsPaying(true);
@@ -1063,7 +1177,9 @@ export default function Home() {
               });
               const verification = await verifyResponse.json() as { verified?: boolean; error?: string };
               if (!verifyResponse.ok || !verification.verified) throw new Error(verification.error || "Payment verification failed");
-              await persistPaidOrder({ ...pendingOrder, paymentStatus: "paid", razorpayOrderId: payment.razorpay_order_id, razorpayPaymentId: payment.razorpay_payment_id });
+              const paidOrder = { ...pendingOrder, paymentStatus: "paid" as const, razorpayOrderId: payment.razorpay_order_id, razorpayPaymentId: payment.razorpay_payment_id };
+              await persistPaidOrder(paidOrder);
+              await applyPaidInventory(paidOrder.items || []);
             } catch (error) {
               setIsPaying(false);
               announce(error instanceof Error ? error.message : "Payment could not be verified");
@@ -1176,9 +1292,9 @@ export default function Home() {
         <nav className="desktop-nav" aria-label="Main navigation"><a href="#shop">Shop</a><a href="#categories">Collections</a><a href="#story">The journal</a><a href="#footer">About</a></nav>
         <div className="header-actions">
           <label className="navbar-search"><span aria-hidden="true">⌕</span><input readOnly placeholder="Search jewellery" onFocus={openSearch} aria-label="Open search" /></label>
-          <button onClick={() => announce(`${wishlist.length} saved piece${wishlist.length === 1 ? "" : "s"}`)} aria-label="View wishlist">♡ <span className="action-label">Saved</span>{wishlist.length > 0 && <b>{wishlist.length}</b>}</button>
-          <button onClick={openOrders} aria-label="View my orders">Orders {orders.length > 0 && <b>{orders.length}</b>}</button>
-          <button onClick={() => setCartOpen(true)} aria-label="Open shopping cart">Cart <span className="bag-count">({cartCount.toString().padStart(2, "0")})</span></button>
+          <button onClick={() => setSavedOpen(true)} aria-label="View saved pieces">♡ <span className="action-label">Saved</span>{wishlist.length > 0 && <b>{wishlist.length}</b>}</button>
+          <button className="header-action-with-icon" onClick={openOrders} aria-label="View my orders"><svg className="header-action-icon" viewBox="0 0 16 16" aria-hidden="true" fill="none"><path d="M5 2.5h6v11L8 11.7 5 13.5v-11Z" /><path d="M6.6 5.4h2.8M6.6 7.7h2.1" /></svg><span className="action-label">My orders</span>{orders.length > 0 && <b>{orders.length}</b>}</button>
+          <button className="header-action-with-icon" onClick={() => setCartOpen(true)} aria-label="Open shopping cart"><svg className="header-action-icon" viewBox="0 0 16 16" aria-hidden="true" fill="none"><path d="M4 5.5h8l-.65 8H4.65L4 5.5Z" /><path d="M6.25 5.5V4.25a1.75 1.75 0 0 1 3.5 0V5.5" /></svg><span className="action-label">Cart</span><span className="bag-count">({cartCount.toString().padStart(2, "0")})</span></button>
           <button className="profile-button" onClick={() => setProfileOpen(true)} aria-label="View account profile"><span className="profile-logo" data-signed-in={authUser ? "true" : "false"} aria-hidden="true"><span /></span><span className="action-label">Profile</span></button>
         </div>
         <button className="mobile-menu" onClick={() => setMobileNavOpen((current) => !current)} aria-label={mobileNavOpen ? "Close menu" : "Open menu"} aria-expanded={mobileNavOpen}>{mobileNavOpen ? "×" : "☰"}</button>
@@ -1193,7 +1309,7 @@ export default function Home() {
         </nav>
         <div className="mobile-nav-actions">
           <button onClick={() => { setMobileNavOpen(false); openSearch(); }}>Search the collection <span>⌕</span></button>
-          <button onClick={() => { setMobileNavOpen(false); announce(`${wishlist.length} saved piece${wishlist.length === 1 ? "" : "s"}`); }}>Saved pieces <span>♡</span></button>
+          <button onClick={() => { setMobileNavOpen(false); setSavedOpen(true); }}>Saved pieces <span>♡</span></button>
           <button onClick={() => { setMobileNavOpen(false); openOrders(); }}>My orders <span>↗</span></button>
           <button onClick={() => { setMobileNavOpen(false); setProfileOpen(true); }}>Profile <span className="mobile-profile-logo" aria-hidden="true"><span /></span></button>
           <button onClick={() => { setMobileNavOpen(false); setCartOpen(true); }}>Your cart <span>({cartCount.toString().padStart(2, "0")})</span></button>
@@ -1206,7 +1322,7 @@ export default function Home() {
 
       <section className="manifesto"><p className="eyebrow">THE FANZZY STANDARD</p><h2>Jewellery with a point of view.<br /><em>Made for your everyday extraordinary.</em></h2><p className="manifesto-copy">Fanzzy is a study in contrast — soft and sculptural, familiar and unexpected. Every piece is made in small batches with considered materials and a little bit of magic.</p></section>
 
-      <section className="section-block product-section" id="shop"><div className="section-heading"><div><p className="eyebrow">CURATED FOR YOU</p><h2>Pieces worth <em>keeping.</em></h2></div><a className="text-link" href="#footer">Shop all <span>↗</span></a></div><div className="filter-row"><div className="filter-pills"><button className={activeCategory === "All pieces" ? "active" : ""} onClick={() => setActiveCategory("All pieces")}>All pieces</button>{categories.map((category) => <button className={activeCategory === category.name ? "active" : ""} key={category.name} onClick={() => setActiveCategory(category.name)}>{category.name}</button>)}</div><span className="result-count">{filteredProducts.length} pieces</span></div><div className="product-grid">{filteredProducts.map((product) => <ProductCard key={product.id} product={product} wished={wishlist.includes(product.id)} onWishlist={() => toggleWishlist(product.id)} onAdd={() => product.variants?.length ? setQuickProduct(product) : addToCart(product)} onQuickView={() => setQuickProduct(product)} onImageZoom={() => setZoomedImage({ src: product.image, alt: product.name, adjustments: product.imageAdjustments })} />)}</div></section>
+      <section className="section-block product-section" id="shop"><div className="section-heading"><div><p className="eyebrow">CURATED FOR YOU</p><h2>Pieces worth <em>keeping.</em></h2></div><a className="text-link" href="#footer">Shop all <span>↗</span></a></div><div className="filter-row"><div className="filter-pills"><button className={activeCategory === "All pieces" ? "active" : ""} onClick={() => setActiveCategory("All pieces")}>All pieces</button>{categories.map((category) => <button className={activeCategory === category.name ? "active" : ""} key={category.name} onClick={() => setActiveCategory(category.name)}>{category.name}</button>)}</div><span className="result-count">{filteredProducts.length} pieces</span></div><div className="product-grid">{filteredProducts.map((product) => <ProductCard key={product.id} product={product} wished={wishlist.includes(product.id)} onWishlist={() => toggleWishlist(product.id)} onAdd={() => product.variants?.length || product.sizes?.length ? setQuickProduct(product) : addToCart(product)} onQuickView={() => setQuickProduct(product)} onImageZoom={() => setZoomedImage({ src: product.image, alt: product.name, adjustments: product.imageAdjustments })} />)}</div></section>
 
       <section className="editorial" id="story"><div className="editorial-image"><img src="https://images.unsplash.com/photo-1515562141207-7a88fb7ce338?auto=format&fit=crop&w=1100&q=85" alt="Close-up of sculptural gold jewelry" /><span>THE ART OF<br /><em>ADORNMENT</em></span></div><div className="editorial-copy"><p className="eyebrow">A NOTE FROM THE STUDIO</p><h2>Less noise.<br /><em>More meaning.</em></h2><p>There is beauty in the in-between. The way a quiet chain layers with your favourite shirt. A ring that becomes part of your hand. Fanzzy is made for these small rituals — the ones that make a day feel like yours.</p><a className="button button-dark" href="#footer">Read our story <span>↗</span></a><div className="editorial-sign">F / 19<br /></div></div></section>
 
@@ -1229,17 +1345,19 @@ export default function Home() {
 
       {orderConfirmation && <div className="drawer-backdrop" onClick={() => setOrderConfirmation(null)}><section className="order-confirmation" role="dialog" aria-modal="true" aria-labelledby="order-confirmation-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close payment confirmation" onClick={() => setOrderConfirmation(null)}>×</button><p className="eyebrow">PAYMENT SUCCESSFUL</p><h2 id="order-confirmation-title">Your payment is complete.</h2><p>We received <strong>{orderConfirmation.total}</strong> for order <strong>{orderConfirmation.id}</strong>. Your order has been confirmed.</p>{orderConfirmation.razorpayPaymentId && <p className="payment-reference">Payment ID: {orderConfirmation.razorpayPaymentId}</p>}<div className="confirmation-actions"><button className="button button-dark" onClick={() => downloadBill(orderConfirmation)}>Download bill <span>↗</span></button><button className="save-text" onClick={() => { setOrderConfirmation(null); setOrdersOpen(true); }}>View my orders</button></div></section></div>}
 
-      {profileOpen && <div className="drawer-backdrop" onClick={() => setProfileOpen(false)}><aside className="orders-drawer profile-drawer" role="dialog" aria-modal="true" aria-labelledby="profile-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR FANZZY ACCOUNT</p><h2 id="profile-title">Profile</h2></div><button aria-label="Close profile" onClick={() => setProfileOpen(false)}>×</button></div>{authUser ? <div className="profile-content"><div className="profile-avatar" aria-hidden="true">{profileName.slice(0, 1).toUpperCase()}</div><p className="eyebrow">SIGNED IN</p><h3>{profileName}</h3><dl className="profile-details"><div><dt>Login mobile number</dt><dd>{authUser.phone}</dd></div><div><dt>Account ID</dt><dd>{authUser.id}</dd></div></dl><button className="button button-dark full-width" onClick={() => { setProfileOpen(false); setOrdersOpen(true); }}>My orders <span>↗</span></button><button className="profile-sign-out" onClick={signOut}>Sign out</button></div> : <div className="profile-content profile-signed-out"><div className="profile-avatar" aria-hidden="true">○</div><p className="eyebrow">NOT SIGNED IN</p><h3>Welcome to Fanzzy.</h3><p>Sign in with a one-time SMS code to keep your cart and orders connected to your mobile number.</p><button className="button button-dark full-width" onClick={() => { setProfileOpen(false); setAuthMessage(""); setAuthOpen(true); }}>Sign in with mobile OTP <span>↗</span></button></div>}</aside></div>}
+      {savedOpen && <div className="drawer-backdrop" onClick={() => setSavedOpen(false)}><aside className="orders-drawer saved-drawer" role="dialog" aria-modal="true" aria-labelledby="saved-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR EDIT</p><h2 id="saved-title">Saved pieces</h2></div><button aria-label="Close saved pieces" onClick={() => setSavedOpen(false)}>×</button></div>{wishlist.length ? <div className="saved-list">{wishlist.map((productId) => { const product = products.find((item) => item.id === productId); return product ? <article className="saved-card" key={product.id}><button className="saved-product" onClick={() => { setQuickProduct(product); setSavedOpen(false); }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(getCustomerPrice(product))}</small></span><b>↗</b></button><div className="saved-card-actions"><button className="module-secondary" onClick={() => { addToCart(product); setSavedOpen(false); }}>Add to cart</button><button className="saved-remove" onClick={() => toggleWishlist(product.id)}>Remove</button></div></article> : null; })}</div> : <div className="orders-empty saved-empty"><div>♡</div><h3>Your edit is waiting.</h3><p>Tap the heart on any piece to keep it close while you decide.</p><button className="button button-dark" onClick={() => { setSavedOpen(false); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}>Explore pieces <span>↗</span></button></div>}</aside></div>}
+
+      {profileOpen && <div className="drawer-backdrop" onClick={() => setProfileOpen(false)}><aside className="orders-drawer profile-drawer" role="dialog" aria-modal="true" aria-labelledby="profile-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR FANZZY ACCOUNT</p><h2 id="profile-title">Profile</h2></div><button aria-label="Close profile" onClick={() => setProfileOpen(false)}>×</button></div>{authUser ? <div className="profile-content"><div className="profile-avatar" aria-hidden="true">{profileName.slice(0, 1).toUpperCase()}</div><p className="eyebrow">SIGNED IN</p><h3>{profileName}</h3><p className="profile-welcome">Your saved pieces, cart and order history stay together here.</p><dl className="profile-details"><div><dt>Login mobile number</dt><dd>{authUser.phone}</dd></div><div><dt>Account ID</dt><dd>{authUser.id}</dd></div></dl><div className="profile-shortcuts"><button onClick={() => { setProfileOpen(false); setOrdersOpen(true); }}><span>Orders</span><b>{orders.length.toString().padStart(2, "0")} ↗</b></button><button onClick={() => { setProfileOpen(false); setSavedOpen(true); }}><span>Saved</span><b>{wishlist.length.toString().padStart(2, "0")} ♡</b></button></div><button className="button button-dark full-width" onClick={() => { setProfileOpen(false); setCartOpen(true); }}>Open my cart <span>↗</span></button><button className="profile-sign-out" onClick={signOut}>Sign out</button></div> : <div className="profile-content profile-signed-out"><div className="profile-avatar" aria-hidden="true">○</div><p className="eyebrow">NOT SIGNED IN</p><h3>Welcome to Fanzzy.</h3><p>Sign in with a one-time SMS code to keep your cart and orders connected to your mobile number.</p><button className="button button-dark full-width" onClick={() => { setProfileOpen(false); setAuthMessage(""); setAuthOpen(true); }}>Sign in with mobile OTP <span>↗</span></button></div>}</aside></div>}
 
       {ordersOpen && <div className="drawer-backdrop" onClick={() => setOrdersOpen(false)}><aside className="orders-drawer" role="dialog" aria-modal="true" aria-labelledby="orders-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR FANZZY ACCOUNT</p><h2 id="orders-title">My orders</h2></div><button aria-label="Close orders" onClick={() => setOrdersOpen(false)}>×</button></div><div className="orders-intro"><p>These are the orders placed using your signed-in account. Only you can see this account’s orders.</p></div>{visibleOrders.length ? <div className="customer-order-list">{visibleOrders.map((order) => <article className="customer-order-card" key={order.id}><div className="customer-order-head"><div><strong>{order.id}</strong><small>{formatOrderDate(order.date)} · {order.customerName}</small></div><span className={`customer-order-status ${order.status.toLowerCase()}`}>{order.status}</span></div>{order.items?.length ? <div className="customer-order-items">{order.items.map((item) => { const product = getOrderedProduct(item); return <button className="customer-order-product" key={`${order.id}-${item.name}`} onClick={() => openOrderedProduct(item)} aria-label={`View ${item.name} details`}>{product ? <img src={product.image} alt="" style={imageAdjustmentStyle(product.imageAdjustments)} /> : <span className="order-product-placeholder" aria-hidden="true">✦</span>}<span className="order-product-copy"><strong>{item.name}</strong><b>× {item.quantity}</b>{product ? <em>{product.category} · View details ↗</em> : <em>Product no longer in the collection</em>}</span><small>{item.price}</small></button>; })}</div> : <p className="customer-order-items legacy-order">Order details are available in your confirmation.</p>}<div className="customer-order-total"><span>Total paid</span><strong>{order.total}</strong></div><button className="module-secondary customer-bill-button" onClick={() => downloadBill(order)}>Download bill ↗</button></article>)}</div> : <div className="orders-empty"><div>✦</div><h3>No orders found for this account.</h3><p>Orders appear here after you complete payment while signed in to this account.</p><button className="button button-dark" onClick={() => { setOrdersOpen(false); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}>Shop the collection <span>↗</span></button></div>}</aside></div>}
 
-      {cartOpen && <div className="drawer-backdrop" onClick={() => setCartOpen(false)}><aside className="cart-drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR CART</p><h2>{cartCount ? `${cartCount} piece${cartCount > 1 ? "s" : ""}` : "A little empty"}</h2></div><button onClick={() => setCartOpen(false)}>×</button></div>{cartItems.length ? <><div className="drawer-items">{cartItems.map((product) => <div className="drawer-item" key={product.cartKey}><img src={product.variant?.image || product.image} alt="" style={imageAdjustmentStyle(product.variant?.adjustments || product.imageAdjustments)} /><div><strong>{product.name}</strong>{product.variant?.name && <small className="cart-variant-name">{product.variant.name}</small>}<small>{formatINR(getCustomerPrice(product))}</small><div className="quantity"><button onClick={() => updateQuantity(product.cartKey, -1)} aria-label={`Decrease ${product.name} quantity`}>−</button><span>{product.quantity}</span><button onClick={() => updateQuantity(product.cartKey, 1)} aria-label={`Increase ${product.name} quantity`}>+</button></div></div><div className="cart-item-actions"><b>{formatINR(getCustomerPrice(product) * product.quantity)}</b><button className="cart-remove" onClick={() => removeFromCart(product.cartKey)} aria-label={`Remove ${product.name} from cart`}>Remove</button></div></div>)}</div><div className="drawer-footer"><div><span>Subtotal</span><strong>{formatINR(subtotal)}</strong></div>{bogoDiscount > 0 && <div className="offer-total"><span>{bogoOfferLabel} discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="offer-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div><span>Delivery</span><strong>{deliveryCharge.enabled ? formatINR(deliveryTotal) : "Free"}</strong></div><div className="drawer-total"><span>Total</span><strong>{formatINR(orderTotal)}</strong></div><p>{bogoDiscount > 0 ? `${bogoOfferLabel} applied to eligible products.` : deliveryCharge.enabled ? "Delivery charge applied to this order." : "Complimentary shipping above ₹999."}</p><button className="button button-dark full-width" onClick={openCheckout}>Proceed to buy <span>↗</span></button></div></> : <div className="empty-bag"><div>✦</div><p>Your future favourites<br />belong here.</p><button className="text-link" onClick={() => setCartOpen(false)}>Continue shopping <span>↗</span></button></div>}</aside></div>}
+      {cartOpen && <div className="drawer-backdrop" onClick={() => setCartOpen(false)}><aside className="cart-drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR CART</p><h2>{cartCount ? `${cartCount} piece${cartCount > 1 ? "s" : ""}` : "A little empty"}</h2></div><button onClick={() => setCartOpen(false)}>×</button></div>{cartItems.length ? <><div className="drawer-items">{cartItems.map((product) => <div className={`drawer-item${getVariantStock(product, product.variant) <= 0 ? " drawer-item-sold-out" : ""}`} key={product.cartKey}><img src={product.variant?.image || product.image} alt="" style={imageAdjustmentStyle(product.variant?.adjustments || product.imageAdjustments)} /><div><strong>{product.name}</strong>{product.variant?.name && <small className="cart-variant-name">{product.variant.name}</small>}{product.size && <small className="cart-variant-name">Size {product.size}</small>}{getVariantStock(product, product.variant) <= 0 && <small className="cart-stock-label">Sold out</small>}<small>{formatINR(getCustomerPrice(product))}</small><div className="quantity"><button onClick={() => updateQuantity(product.cartKey, -1)} aria-label={`Decrease ${product.name} quantity`}>−</button><span>{product.quantity}</span><button onClick={() => updateQuantity(product.cartKey, 1)} aria-label={`Increase ${product.name} quantity`}>+</button></div></div><div className="cart-item-actions"><b>{formatINR(getCustomerPrice(product) * product.quantity)}</b><button className="cart-remove" onClick={() => removeFromCart(product.cartKey)} aria-label={`Remove ${product.name} from cart`}>Remove</button></div></div>)}</div><div className="drawer-footer">{cartStockIssues.length > 0 && <div className="cart-stock-warning" role="alert"><strong>Remove sold out items before checkout</strong><span>{cartHasSoldOutItems ? "This cart contains an unavailable item." : "One or more quantities are above the available stock."}</span></div>}<div><span>Subtotal</span><strong>{formatINR(subtotal)}</strong></div>{bogoDiscount > 0 && <div className="offer-total"><span>{bogoOfferLabel} discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="offer-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div><span>Delivery</span><strong>{deliveryCharge.enabled ? formatINR(deliveryTotal) : "Free"}</strong></div><div className="drawer-total"><span>Total</span><strong>{formatINR(orderTotal)}</strong></div><p>{bogoDiscount > 0 ? `${bogoOfferLabel} applied to eligible products.` : deliveryCharge.enabled ? "Delivery charge applied to this order." : "Complimentary shipping above ₹999."}</p><button className="button button-dark full-width" onClick={openCheckout}>Proceed to buy <span>↗</span></button></div></> : <div className="empty-bag"><div>✦</div><p>Your future favourites<br />belong here.</p><button className="text-link" onClick={() => setCartOpen(false)}>Continue shopping <span>↗</span></button></div>}</aside></div>}
 
       {authOpen && <div className="drawer-backdrop auth-backdrop" onClick={closeAuth}><section className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close sign in" onClick={closeAuth}>×</button><p className="eyebrow">SECURE MOBILE LOGIN</p><h2 id="auth-title">Continue with your mobile number.</h2><p className="auth-intro">Enter your mobile number and we’ll send a one-time SMS code. No password is required.</p><div className="otp-auth-form"><label>Mobile number<input type="tel" value={authPhone} onChange={(event) => { setAuthPhone(event.target.value); setAuthOtp(""); setOtpSent(false); setOtpCooldown(0); }} placeholder="+91 98765 43210" inputMode="tel" autoComplete="tel" disabled={authLoading} /></label>{otpSent && <label>6-digit SMS code<input value={authOtp} onChange={(event) => setAuthOtp(event.target.value.replace(/\D/g, "").slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" maxLength={6} placeholder="Enter 6-digit code" disabled={authLoading} onKeyDown={(event) => { if (event.key === "Enter") void verifySmsOtp(); }} /></label>}<button className="google-sign-in" type="button" onClick={() => void (otpSent ? verifySmsOtp() : sendSmsOtp())} disabled={authLoading}><span className="email-otp-mark" aria-hidden="true">✦</span>{authLoading ? "Please wait…" : otpSent ? "Verify code" : "Send SMS code"}<span aria-hidden="true">↗</span></button>{otpSent && <div className="otp-fallback-actions"><button className="auth-resend" type="button" onClick={() => void sendSmsOtp()} disabled={authLoading || otpCooldown > 0}>{otpCooldown > 0 ? `Resend OTP in ${otpCooldown}s` : "Resend OTP"}</button></div>}</div>{authMessage && <p className="auth-message" role="alert">{authMessage}</p>}<p className="auth-note">Your orders and cart are saved to this verified mobile number.</p></section></div>}
 
       {checkoutOpen && <div className="drawer-backdrop checkout-backdrop" onClick={() => setCheckoutOpen(false)}><section className="checkout-modal" role="dialog" aria-modal="true" aria-labelledby="checkout-title" onClick={(event) => event.stopPropagation()} onFocusCapture={(event) => { if (event.target instanceof HTMLInputElement) requestAnimationFrame(() => event.target.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" })); }}><div className="drawer-header"><div><p className="eyebrow">CHECKOUT</p><h2 id="checkout-title">Complete your order</h2></div><button aria-label="Close checkout" onClick={() => setCheckoutOpen(false)}>×</button></div><p className="checkout-intro">We’ll use your WhatsApp number to confirm your order and delivery updates.</p><div className="checkout-grid"><label>Customer name<input value={checkoutForm.name} onChange={(event) => setCheckoutForm((current) => ({ ...current, name: event.target.value }))} placeholder="Your full name" required /></label><label>WhatsApp number <span className="required-mark">Required</span><input type="tel" value={checkoutForm.phone} onChange={(event) => setCheckoutForm((current) => ({ ...current, phone: event.target.value }))} placeholder="+91 98765 43210" required /></label><label>Email address <span className="optional-mark">Optional</span><input type="email" value={checkoutForm.email} onChange={(event) => setCheckoutForm((current) => ({ ...current, email: event.target.value }))} placeholder="you@example.com" /></label><label className="checkout-wide">Delivery address<input value={checkoutForm.address} onChange={(event) => setCheckoutForm((current) => ({ ...current, address: event.target.value }))} placeholder="House number, street, city, pincode" required /></label><div className="checkout-coupon checkout-wide"><label htmlFor="checkout-coupon-code">Coupon code <span className="optional-mark">Optional</span></label><div className="coupon-entry"><input id="checkout-coupon-code" value={couponInput} onChange={(event) => { setCouponInput(event.target.value.toUpperCase()); setAppliedCoupon(null); }} placeholder="Enter coupon code" autoCapitalize="characters" /><button className="button button-light" type="button" onClick={applyCoupon}>Apply</button></div>{appliedCoupon && <p className="coupon-success">{appliedCoupon.code} applied · {appliedCoupon.discount} off</p>}</div></div>{bogoDiscount > 0 && <div className="checkout-total coupon-total"><span>{bogoOfferLabel} discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="checkout-total coupon-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div className="checkout-total"><span>Order total</span><strong>{formatINR(orderTotal)}</strong></div><div className="checkout-actions"><button className="button button-dark" onClick={submitCheckout}>Place order <span>↗</span></button><button className="save-text" onClick={() => setCheckoutOpen(false)}>Back to cart</button></div></section></div>}
 
-      {quickProduct && <div className="drawer-backdrop" onClick={() => setQuickProduct(null)}><div className="quick-modal" onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setQuickProduct(null)}>×</button><div className="quick-image" onClick={() => setZoomedImage({ src: selectedVariant?.image || quickProduct.image, alt: selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name, adjustments: selectedVariant?.adjustments || quickProduct.imageAdjustments })} title="Click to zoom"><img src={selectedVariant?.image || quickProduct.image} alt={selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name} style={imageAdjustmentStyle(selectedVariant?.adjustments || quickProduct.imageAdjustments)} /></div><div className="quick-copy"><p className="eyebrow">{quickProduct.category}</p><h2>{quickProduct.name}</h2><div className="price-row"><span>{formatINR(getCustomerPrice(quickProduct))}</span><del>{formatINR(getComparePrice(quickProduct))}</del></div>{quickProduct.variants?.length ? <div className="variant-picker"><span>Choose colour / series / model</span><div>{quickProduct.variants.map((variant, index) => <button key={`${quickProduct.id}-${variant.name || index}`} className={selectedVariant?.name === variant.name && selectedVariant?.image === variant.image ? "active" : ""} onClick={() => setSelectedVariant(variant)}><img src={variant.image || quickProduct.image} alt="" style={imageAdjustmentStyle(variant.adjustments)} /><span>{variant.name || `Option ${index + 1}`}</span></button>)}</div></div> : null}<p>Designed to become part of your everyday ritual. Hand-finished in small batches with a soft, lasting glow.</p><div className="quick-actions"><button className="button button-dark" disabled={quickProduct.stock <= 0} onClick={() => { addToCart(quickProduct, selectedVariant); if (quickProduct.stock > 0) setQuickProduct(null); }}>{quickProduct.stock <= 0 ? "Sold out" : <>Add selected item to cart <span>↗</span></>}</button><button className="save-text" onClick={() => toggleWishlist(quickProduct.id)}>{wishlist.includes(quickProduct.id) ? "♥ Saved" : "♡ Save for later"}</button></div></div></div></div>}
+      {quickProduct && <div className="drawer-backdrop" onClick={() => setQuickProduct(null)}><div className="quick-modal" onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setQuickProduct(null)}>×</button><div className="quick-image" onClick={() => setZoomedImage({ src: selectedVariant?.image || quickProduct.image, alt: selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name, adjustments: selectedVariant?.adjustments || quickProduct.imageAdjustments })} title="Click to zoom"><img src={selectedVariant?.image || quickProduct.image} alt={selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name} style={imageAdjustmentStyle(selectedVariant?.adjustments || quickProduct.imageAdjustments)} /></div><div className="quick-copy"><p className="eyebrow">{quickProduct.category}</p><h2>{quickProduct.name}</h2><div className="price-row"><span>{formatINR(getCustomerPrice(quickProduct))}</span><del>{formatINR(getComparePrice(quickProduct))}</del></div>{quickProduct.variants?.length ? <div className="variant-picker"><span>Choose colour / series / model</span><div>{quickProduct.variants.map((variant, index) => { const variantStock = getVariantStock(quickProduct, variant); return <button key={`${quickProduct.id}-${variant.name || index}`} disabled={variantStock <= 0} className={`${selectedVariant?.name === variant.name && selectedVariant?.image === variant.image ? "active" : ""} ${variantStock <= 0 ? "sold-out" : ""}`} onClick={() => setSelectedVariant(variant)}><img src={variant.image || quickProduct.image} alt="" style={imageAdjustmentStyle(variant.adjustments)} /><span>{variant.name || `Option ${index + 1}`} · {variantStock > 0 ? `${variantStock} available` : "Sold out"}</span></button>; })}</div></div> : null}{quickProduct.sizes?.length ? <div className="size-picker"><span>Choose size</span><div>{quickProduct.sizes.map((size) => { const stock = getSelectionStock(quickProduct, selectedVariant, size); return <button type="button" key={size} disabled={stock <= 0} className={`${selectedSize === size ? "active" : ""} ${stock <= 0 ? "sold-out" : ""}`} onClick={() => setSelectedSize(size)}>Size {size} · {stock > 0 ? `${stock} available` : "Sold out"}</button>; })}</div></div> : null}<p>Designed to become part of your everyday ritual. Hand-finished in small batches with a soft, lasting glow.</p><div className="quick-actions"><button className="button button-dark" disabled={selectedVariantStock <= 0} onClick={() => { addToCart(quickProduct, selectedVariant, selectedSize); if (selectedVariantStock > 0) setQuickProduct(null); }}>{selectedVariantStock <= 0 ? "Sold out" : <>Add selected item to cart <span>↗</span></>}</button><button className="save-text" onClick={() => toggleWishlist(quickProduct.id)}>{wishlist.includes(quickProduct.id) ? "♥ Saved" : "♡ Save for later"}</button></div></div></div></div>}
 
       {zoomedImage && <div className="drawer-backdrop image-zoom-backdrop" onClick={() => setZoomedImage(null)}><section className="image-zoom-modal" role="dialog" aria-modal="true" aria-label={`Zoomed view of ${zoomedImage.alt}`} onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setZoomedImage(null)} aria-label="Close image zoom">×</button><img src={zoomedImage.src} alt={zoomedImage.alt} style={imageAdjustmentStyle(zoomedImage.adjustments)} /></section></div>}
 
