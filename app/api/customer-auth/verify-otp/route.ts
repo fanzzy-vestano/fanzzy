@@ -25,27 +25,35 @@ export async function POST(request: Request) {
   }
   if (code.length !== 6) return json({ error: "Enter the SMS code" }, 400);
 
-  if (pending.developmentCode) {
-    if (code !== pending.developmentCode) return json({ error: "Invalid development OTP. Use the code shown above." }, 401);
-    return new Response(JSON.stringify({ user: { id: `phone:${pending.phone}`, phone: `+${pending.phone}` } }), {
-      status: 200,
-      headers: sessionHeaders(pending.phone),
-    });
-  }
-
   const apiKey = getTwoFactorApiKey();
-  if (!apiKey) return json({ error: "SMS login is not configured yet" }, 503);
+  if (!apiKey) return json({ error: "2Factor SMS login is not configured." }, 503);
 
   try {
+    const endpointPath = "/API/V1/[redacted]/SMS/VERIFY/{session_id}/{otp}";
+    console.info("otp.provider.request", {
+      function: "app/api/customer-auth/verify-otp",
+      provider: "2Factor.in",
+      endpoint: endpointPath,
+      channel: "SMS",
+      sessionId: pending.sessionId,
+    });
     const response = await fetch(`https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/VERIFY/${encodeURIComponent(pending.sessionId)}/${code}`);
     const raw = await response.text();
     let result: Record<string, unknown> = {};
     try {
       result = JSON.parse(raw) as Record<string, unknown>;
     } catch {
-      return json({ error: "We could not verify the code. Please try again." }, 502);
+      return json({ error: "2Factor could not verify the SMS code." }, 502);
     }
     const status = String(result.Status ?? result.status ?? "").toLowerCase();
+    console.info("otp.provider.response", {
+      function: "app/api/customer-auth/verify-otp",
+      provider: "2Factor.in",
+      endpoint: endpointPath,
+      channel: "SMS",
+      status: `${response.status}:${status || "unknown"}`,
+      sessionId: pending.sessionId,
+    });
     if (!response.ok || status !== "success") {
       const details = String(result.Details ?? result.details ?? result.Errors ?? result.errors ?? "").toLowerCase();
       if (details.includes("expired") || details.includes("invalid session") || details.includes("session not found")) {
@@ -54,14 +62,14 @@ export async function POST(request: Request) {
       if (details.includes("mismatch") || details.includes("invalid otp") || details.includes("incorrect")) {
         return json({ error: "Invalid OTP. Please try again." }, 401);
       }
-      return json({ error: "We could not verify the code. Please try again." }, 502);
+      const providerError = String(result.Details ?? result.details ?? result.Message ?? result.message ?? "").trim();
+      return json({ error: providerError || "2Factor could not verify the SMS code." }, 502);
     }
     return new Response(JSON.stringify({ user: { id: `phone:${pending.phone}`, phone: `+${pending.phone}` } }), {
       status: 200,
       headers: sessionHeaders(pending.phone),
     });
-  } catch (error) {
-    console.error("Customer SMS OTP verification failed", error);
-    return json({ error: "The code could not be verified. Please try again." }, 502);
+  } catch {
+    return json({ error: "2Factor SMS service could not be reached." }, 502);
   }
 }

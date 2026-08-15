@@ -942,14 +942,14 @@ export default function Home() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ phone }),
       });
-      const result = await response.json() as { error?: string; developmentCode?: string; developmentOnly?: boolean };
+      const result = await response.json() as { error?: string };
       if (!response.ok) {
         setAuthMessage(result.error || (response.status >= 500 ? "Please try again" : "We could not send the OTP."));
         return;
       }
       setOtpSent(true);
       setOtpCooldown(60);
-      setAuthMessage(result.developmentOnly ? `SMS is unavailable on localhost. Use development code ${result.developmentCode}.` : "OTP sent successfully");
+      setAuthMessage("OTP sent successfully by SMS");
     } catch {
       setAuthMessage("Please try again");
     } finally {

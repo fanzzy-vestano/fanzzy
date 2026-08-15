@@ -2,21 +2,20 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 export type CustomerSmsIdentity = { id: string; phone: string };
 
-type PendingOtp = { phone: string; sessionId: string; expiresAt: number; developmentCode?: string };
+type PendingOtp = { phone: string; sessionId: string; expiresAt: number };
 type SignedValue = CustomerSmsIdentity | PendingOtp;
 
 const pendingCookie = "fanzzy_customer_otp";
 const sessionCookie = "fanzzy_customer_session";
 const isProduction = process.env.NODE_ENV === "production";
 
-// Keep the new name canonical, but accept the legacy spelling so an existing
-// deployment does not silently disable customer SMS login during a rollout.
 export const getTwoFactorApiKey = () =>
-  process.env.TWO_FACTOR_API_KEY?.trim() || process.env.TWOFACTOR_API_KEY?.trim() || "";
+  process.env.TWO_FACTOR_API_KEY?.trim() || "";
 
 const secret = () => process.env.CUSTOMER_AUTH_SECRET || getTwoFactorApiKey();
 
 export const OTP_RESEND_COOLDOWN_SECONDS = 60;
+export const OTP_EXPIRES_MS = 5 * 60 * 1000;
 const OTP_WINDOW_MS = 15 * 60 * 1000;
 const OTP_MAX_REQUESTS_PER_WINDOW = 5;
 const OTP_VERIFY_WINDOW_MS = 10 * 60 * 1000;

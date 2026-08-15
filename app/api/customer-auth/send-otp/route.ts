@@ -1,4 +1,4 @@
-import { consumeOtpSendRateLimit, createPendingOtpCookie, getTwoFactorApiKey, normalizeMobileNumber, OTP_RESEND_COOLDOWN_SECONDS } from "../../../../lib/customer-sms-auth";
+import { consumeOtpSendRateLimit, createPendingOtpCookie, getTwoFactorApiKey, normalizeMobileNumber, OTP_EXPIRES_MS, OTP_RESEND_COOLDOWN_SECONDS } from "../../../../lib/customer-sms-auth";
 
 const json = (body: Record<string, unknown>, status = 200, headers?: HeadersInit) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
@@ -21,28 +21,22 @@ export async function POST(request: Request) {
       { "retry-after": String(rateLimit.retryAfter) },
     );
   }
-
-  const developmentOtp = () => {
-    const code = process.env.CUSTOMER_SMS_DEV_CODE?.trim() || "123456";
-    return json(
-      { sent: true, developmentCode: code, developmentOnly: true },
-      200,
-      { "set-cookie": createPendingOtpCookie({ phone, sessionId: "local-development", developmentCode: code, expiresAt: Date.now() + 10 * 60 * 1000 }) },
-    );
-  };
-
-  if (!apiKey) {
-    if (process.env.NODE_ENV === "development") return developmentOtp();
-    return json({ error: "SMS login is not configured yet" }, 503);
-  }
+  if (!apiKey) return json({ error: "2Factor SMS login is not configured." }, 503);
 
   try {
-    // AUTOGEN works with the provider's default OTP template. Only add the
-    // optional custom template when it has explicitly been configured in the
-    // environment; an invented template name makes the provider reject the
-    // request before it can send anything.
-    const templateName = process.env.TWO_FACTOR_OTP_TEMPLATE_NAME?.trim();
-    const endpoint = `https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${phone}/AUTOGEN${templateName ? `/${encodeURIComponent(templateName)}` : ""}`;
+    const templateName = "Fanzzy Login OTP";
+    const approvedSenderId = "FANZZY";
+    // 2Factor selects the sender configured on this approved template; it must be mapped to FANZZY.
+    const endpointPath = "/API/V1/[redacted]/SMS/{phone}/AUTOGEN/Fanzzy%20Login%20OTP";
+    const endpoint = `https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${phone}/AUTOGEN/${encodeURIComponent(templateName)}`;
+    console.info("otp.provider.request", {
+      function: "app/api/customer-auth/send-otp",
+      provider: "2Factor.in",
+      endpoint: endpointPath,
+      channel: "SMS",
+      template: templateName,
+      senderId: approvedSenderId,
+    });
     const response = await fetch(endpoint, {
       method: "POST",
     });
@@ -55,13 +49,20 @@ export async function POST(request: Request) {
     }
     const status = String(result.Status ?? result.status ?? "").toLowerCase();
     const sessionId = String(result.Details ?? result.details ?? "").trim();
+    console.info("otp.provider.response", {
+      function: "app/api/customer-auth/send-otp",
+      provider: "2Factor.in",
+      endpoint: endpointPath,
+      channel: "SMS",
+      status: `${response.status}:${status || "unknown"}`,
+      sessionId: sessionId || null,
+    });
     if (!response.ok || status !== "success" || !sessionId) {
-      return json({ error: "We could not send the SMS code. Please try again." }, 502);
+      const providerError = String(result.Details ?? result.details ?? result.Message ?? result.message ?? "").trim();
+      return json({ error: providerError || "2Factor could not send the SMS code." }, 502);
     }
-    return json({ sent: true }, 200, { "set-cookie": createPendingOtpCookie({ phone, sessionId, expiresAt: Date.now() + 10 * 60 * 1000 }) });
-  } catch (error) {
-    console.error("Customer SMS OTP send failed", error);
-    if (process.env.NODE_ENV === "development") return developmentOtp();
-    return json({ error: "The SMS code could not be sent. Please try again." }, 502);
+    return json({ sent: true }, 200, { "set-cookie": createPendingOtpCookie({ phone, sessionId, expiresAt: Date.now() + OTP_EXPIRES_MS }) });
+  } catch {
+    return json({ error: "2Factor SMS service could not be reached." }, 502);
   }
 }
