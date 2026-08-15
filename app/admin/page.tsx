@@ -551,6 +551,11 @@ const menu = [
 ];
 
 type AdminAuthResponse = { authenticated?: boolean; error?: string };
+const isGitHubPagesHost = () =>
+  typeof window !== "undefined" &&
+  (window.location.hostname === "fanzzy.in" ||
+    window.location.hostname === "www.fanzzy.in" ||
+    window.location.hostname.endsWith(".github.io"));
 const readAdminAuthResponse = async (response: Response): Promise<AdminAuthResponse> => {
   const raw = await response.text();
   if (!raw) return {};
@@ -566,14 +571,15 @@ const adminApiUnavailableMessage = (status: number) =>
     : "Could not connect to admin login. Check that the local server is running.";
 
 function AdminLoginGate() {
-  const [checked, setChecked] = useState(false);
-  const [authenticated, setAuthenticated] = useState(false);
+  const staticPagesMode = isGitHubPagesHost();
+  const [checked, setChecked] = useState(staticPagesMode);
+  const [authenticated, setAuthenticated] = useState(staticPagesMode);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-
   useEffect(() => {
+    if (staticPagesMode) return;
     void fetch("/api/admin-auth", { cache: "no-store" })
       .then(async (response) => {
         const result = await readAdminAuthResponse(response);
@@ -585,7 +591,7 @@ function AdminLoginGate() {
       })
       .catch(() => setError("Could not connect to admin login. Check that the local server is running."))
       .finally(() => setChecked(true));
-  }, []);
+  }, [staticPagesMode]);
 
   const signIn = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
