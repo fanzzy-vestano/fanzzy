@@ -122,7 +122,8 @@ const sendOtp = async (phone: string) => {
 const sendVoiceOtp = async (phone: string, code: string) => {
   const apiKey = Deno.env.get("TWO_FACTOR_API_KEY")?.trim() || "";
   if (!apiKey) throw new Error("Voice OTP service is not configured.");
-  const providerResponse = await fetch(`${TWO_FACTOR_BASE_URL}/${encodeURIComponent(apiKey)}/VOICE/${encodeURIComponent(phone)}/${encodeURIComponent(code)}`, {
+  const voicePhone = phone.startsWith("91") ? phone.slice(2) : phone;
+  const providerResponse = await fetch(`${TWO_FACTOR_BASE_URL}/${encodeURIComponent(apiKey)}/VOICE/${encodeURIComponent(voicePhone)}/${encodeURIComponent(code)}`, {
     method: "GET",
     headers: { accept: "application/json" },
   });

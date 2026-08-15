@@ -65,7 +65,8 @@ export const sendTwoFactorOtp = async (phone: string, code: string) => {
 };
 
 export const sendTwoFactorVoiceOtp = async (phone: string, code: string) => {
-  const result = await requestProvider(`/VOICE/${encodeURIComponent(phone)}/${encodeURIComponent(code)}`, "GET");
+  const voicePhone = phone.startsWith("91") ? phone.slice(2) : phone;
+  const result = await requestProvider(`/VOICE/${encodeURIComponent(voicePhone)}/${encodeURIComponent(code)}`, "GET");
   if (!result.ok || result.status !== "success" || !result.details) {
     throw new TwoFactorSmsError(result.details || "2Factor could not place the voice OTP call.", "send");
   }
