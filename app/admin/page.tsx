@@ -272,7 +272,7 @@ const adminOrders: OrderRecord[] = [];
 const isDemoOrder = (order: { id?: string }) => /^#FZ-104[4-8]$/.test(String(order.id ?? ""));
 // Orders are operational only after the Razorpay signature has been verified.
 // Pending checkout records are deliberately kept out of every Admin view.
-const hasConfirmedPayment = (order: Pick<OrderRecord, "paymentStatus">) => order.paymentStatus === "paid";
+const hasConfirmedPayment = (order: Pick<OrderRecord, "paymentStatus" | "razorpayPaymentId">) => order.paymentStatus === "paid" || Boolean(order.razorpayPaymentId);
 const siteBasePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 const siteAsset = (name: string) => `${siteBasePath}/${name}`;
 const createSku = (
@@ -524,7 +524,41 @@ const menu = [
   { label: "Announcement", icon: "▤" },
 ];
 
-export default function AdminPage() {
+function AdminLoginGate() {
+  const [checked, setChecked] = useState(false);
+  const [authenticated, setAuthenticated] = useState(false);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    void fetch("/api/admin-auth", { cache: "no-store" })
+      .then((response) => response.json() as Promise<{ authenticated?: boolean }>)
+      .then((result) => setAuthenticated(Boolean(result.authenticated)))
+      .finally(() => setChecked(true));
+  }, []);
+
+  const signIn = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setLoading(true);
+    setError("");
+    try {
+      const response = await fetch("/api/admin-auth", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email, password }) });
+      const result = await response.json() as { authenticated?: boolean; error?: string };
+      if (!response.ok) { setError(result.error || "Could not sign in."); return; }
+      setAuthenticated(Boolean(result.authenticated));
+      setPassword("");
+    } catch { setError("Could not connect to admin login."); }
+    finally { setLoading(false); }
+  };
+
+  if (!checked) return <div className="admin-auth-loading">Loading admin workspace…</div>;
+  if (authenticated) return <AdminDashboard />;
+  return <main className="admin-auth-page"><section className="admin-auth-card"><p className="eyebrow">FANZZY CONTROL ROOM</p><h1>Admin sign in</h1><p>Sign in to manage products, orders, stock, and store settings.</p><form onSubmit={signIn}><label>Email address<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" required /></label><label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required /></label>{error && <p className="admin-auth-error" role="alert">{error}</p>}<button className="module-primary" type="submit" disabled={loading}>{loading ? "Signing in…" : "Sign in"}</button></form></section></main>;
+}
+
+function AdminDashboard() {
   const [active, setActive] = useState("Overview");
   const [adminRoles, setAdminRoles] = useState<AdminRole[]>(defaultAdminRoles);
   const [activeRoleId, setActiveRoleId] = useState("vestano");
@@ -4481,6 +4515,7 @@ function ProductLibraryWorkspace({
       gstRate: "",
       costWithGst: "₹",
       sizes: "",
+      sizeStock: {},
       variants: [],
     });
     setNewProductImage(adminPlaceholderImage);
@@ -5787,3 +5822,5 @@ function parseCsv(csv: string) {
   }
   return rows;
 }
+
+export default AdminLoginGate;

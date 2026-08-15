@@ -38,7 +38,7 @@ export async function POST(request: Request) {
       senderId: approvedSenderId,
     });
     const response = await fetch(endpoint, {
-      method: "POST",
+      method: "GET",
     });
     const raw = await response.text();
     let result: Record<string, unknown> = {};
