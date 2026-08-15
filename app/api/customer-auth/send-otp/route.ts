@@ -1,4 +1,5 @@
 import { consumeOtpSendRateLimit, createPendingOtpCookie, getTwoFactorApiKey, normalizeMobileNumber, OTP_EXPIRES_MS, OTP_RESEND_COOLDOWN_SECONDS } from "../../../../lib/customer-sms-auth";
+import { sendTwoFactorOtp, TwoFactorSmsError, twoFactorTemplateName } from "../../../../lib/two-factor-sms";
 
 const json = (body: Record<string, unknown>, status = 200, headers?: HeadersInit) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
@@ -24,46 +25,18 @@ export async function POST(request: Request) {
   if (!apiKey) return json({ error: "2Factor SMS login is not configured." }, 503);
 
   try {
-    const templateName = "Fanzzy Login OTP";
-    const approvedSenderId = "FANZZY";
-    // 2Factor selects the sender configured on this approved template; it must be mapped to FANZZY.
-    const endpointPath = "/API/V1/[redacted]/SMS/{phone}/AUTOGEN/Fanzzy%20Login%20OTP";
-    const endpoint = `https://2factor.in/API/V1/${encodeURIComponent(apiKey)}/SMS/${phone}/AUTOGEN/${encodeURIComponent(templateName)}`;
-    console.info("otp.provider.request", {
-      function: "app/api/customer-auth/send-otp",
+    const sessionId = await sendTwoFactorOtp(phone);
+    console.info("otp.provider.send", {
       provider: "2Factor.in",
-      endpoint: endpointPath,
       channel: "SMS",
-      template: templateName,
-      senderId: approvedSenderId,
+      template: twoFactorTemplateName,
+      status: "success",
     });
-    const response = await fetch(endpoint, {
-      method: "POST",
-      signal: AbortSignal.timeout(15_000),
-    });
-    const raw = await response.text();
-    let result: Record<string, unknown> = {};
-    try {
-      result = JSON.parse(raw) as Record<string, unknown>;
-    } catch {
-      return json({ error: "We could not send the SMS code. Please try again." }, 502);
-    }
-    const status = String(result.Status ?? result.status ?? "").toLowerCase();
-    const sessionId = String(result.Details ?? result.details ?? "").trim();
-    console.info("otp.provider.response", {
-      function: "app/api/customer-auth/send-otp",
-      provider: "2Factor.in",
-      endpoint: endpointPath,
-      channel: "SMS",
-      status: `${response.status}:${status || "unknown"}`,
-      sessionId: sessionId || null,
-    });
-    if (!response.ok || status !== "success" || !sessionId) {
-      const providerError = String(result.Details ?? result.details ?? result.Message ?? result.message ?? "").trim();
-      return json({ error: providerError || "2Factor could not send the SMS code." }, 502);
-    }
     return json({ sent: true }, 200, { "set-cookie": createPendingOtpCookie({ phone, sessionId, expiresAt: Date.now() + OTP_EXPIRES_MS }) });
-  } catch {
+  } catch (error) {
+    if (error instanceof TwoFactorSmsError && error.kind === "send") {
+      return json({ error: error.message }, 502);
+    }
     return json({ error: "2Factor SMS service could not be reached." }, 502);
   }
 }
