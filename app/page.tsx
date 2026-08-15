@@ -97,7 +97,7 @@ const isDemoOrder = (order: { id?: string }) => /^#FZ-104[4-8]$/.test(String(ord
 const normalizePhone = (value?: string) => String(value || "").replace(/\D/g, "").replace(/^0+/, "");
 
 const formatINR = (value: number) => `₹${(Number.isFinite(value) ? value : 0).toLocaleString("en-IN")}`;
-const CUSTOMER_PRICE_MULTIPLIER = 1.4;
+const CUSTOMER_PRICE_MULTIPLIER = 2.2;
 const getCustomerPrice = (product: Pick<Product, "price">) => product.price;
 const getComparePrice = (product: Pick<Product, "price">) => Math.round(product.price * CUSTOMER_PRICE_MULTIPLIER);
 const getVariantStock = (product: Pick<Product, "stock">, variant?: ProductVariant | null) => {
