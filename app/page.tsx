@@ -114,7 +114,7 @@ const belongsToCustomer = (order: Pick<CustomerOrder, "userId" | "userPhone" | "
   return Boolean(orderPhone && orderPhone === normalizePhone(customer.phone));
 };
 const isCustomerOrder = (order: CustomerOrder, customer: CustomerAuthUser) =>
-  belongsToCustomer(order, customer) && !isDemoOrder(order) && (isPaidOrder(order) || order.paymentStatus === undefined);
+  belongsToCustomer(order, customer) && !isDemoOrder(order) && (isPaidOrder(order) || order.paymentStatus == null);
 
 const formatINR = (value: number) => `₹${(Number.isFinite(value) ? value : 0).toLocaleString("en-IN")}`;
 const CUSTOMER_PRICE_MULTIPLIER = 2.2;
