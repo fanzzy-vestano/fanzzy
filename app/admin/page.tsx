@@ -129,7 +129,7 @@ const defaultHeroImage = "";
 const defaultCategoryImages: Record<string, string> = {};
 const defaultHeroSlides: string[] = [];
 const defaultHeroSlideDuration = 5.2;
-const defaultDeliveryCharge = { enabled: false, amount: 99 };
+const defaultDeliveryCharge = { enabled: false, amount: 99, freeAboveEnabled: false, freeAbove: 999 };
 const formatAdminCurrency = (value: number) => `₹${Math.max(0, Math.round(value)).toLocaleString("en-IN")}`;
 const defaultMarketingRecords: MarketingRecord[] = [];
 const defaultImageAdjustments: ImageAdjustments = { zoom: 1, x: 0, y: 0, rotate: 0 };
@@ -3350,6 +3350,8 @@ function DeliveryChargeWorkspace({
 }) {
   const [enabled, setEnabled] = useState(defaultDeliveryCharge.enabled);
   const [amount, setAmount] = useState(String(defaultDeliveryCharge.amount));
+  const [freeAboveEnabled, setFreeAboveEnabled] = useState(false);
+  const [freeAbove, setFreeAbove] = useState("999");
 
   useEffect(() => {
     let active = true;
@@ -3362,6 +3364,8 @@ function DeliveryChargeWorkspace({
         const parsed = JSON.parse(stored) as {
           enabled?: boolean;
           amount?: number;
+          freeAboveEnabled?: boolean;
+          freeAbove?: number;
         };
         if (active) {
           setEnabled(parsed.enabled === true);
@@ -3372,6 +3376,8 @@ function DeliveryChargeWorkspace({
                 : defaultDeliveryCharge.amount,
             ),
           );
+          setFreeAboveEnabled(parsed.freeAboveEnabled === true);
+          setFreeAbove(String(Number.isFinite(parsed.freeAbove) ? parsed.freeAbove : 999));
         }
       } catch {
         window.localStorage.removeItem("fanzzy-delivery-charge");
@@ -3385,7 +3391,8 @@ function DeliveryChargeWorkspace({
 
   const saveDeliveryCharge = async () => {
     const nextAmount = Math.max(0, Number(amount) || 0);
-    const value = JSON.stringify({ enabled, amount: nextAmount });
+    const nextFreeAbove = Math.max(0, Number(freeAbove) || 0);
+    const value = JSON.stringify({ enabled, amount: nextAmount, freeAboveEnabled, freeAbove: nextFreeAbove });
     const remoteError = await saveStoreSetting("deliveryCharge", value);
     window.localStorage.setItem("fanzzy-delivery-charge", value);
     window.dispatchEvent(new Event("fanzzy-delivery-charge-updated"));
@@ -3448,6 +3455,16 @@ function DeliveryChargeWorkspace({
         />
         <small>Displayed in INR on the storefront.</small>
       </label>
+      <label className="settings-check delivery-threshold-toggle">
+        <input type="checkbox" checked={freeAboveEnabled} onChange={(event) => setFreeAboveEnabled(event.target.checked)} />
+        <span>Free delivery above an amount</span>
+        <small>Orders at or above this amount will not be charged delivery.</small>
+      </label>
+      {freeAboveEnabled && <label className="delivery-amount-field">
+        Free delivery above (₹)
+        <input type="number" min="0" value={freeAbove} onChange={(event) => setFreeAbove(event.target.value)} aria-label="Free delivery threshold" />
+        <small>Example: ₹999 means ₹999 and above get free delivery.</small>
+      </label>}
       <div className="module-summary">
         <span>
           <i
