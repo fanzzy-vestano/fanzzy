@@ -19,7 +19,6 @@ import {
 } from "../lib/customer-auth-client";
 
 type CustomerAuthUser = { id: string; phone: string };
-type OtpChannel = "sms" | "voice";
 
 type Product = {
   id: string;
@@ -109,6 +108,8 @@ const isDemoProduct = (product: { name?: string; sku?: string }) =>
 const isDemoOrder = (order: { id?: string }) => /^#FZ-104[4-8]$/.test(String(order.id ?? ""));
 const isPaidOrder = (order: Pick<CustomerOrder, "paymentStatus" | "razorpayPaymentId">) => order.paymentStatus === "paid" || Boolean(order.razorpayPaymentId);
 const normalizePhone = (value?: string) => String(value || "").replace(/\D/g, "").replace(/^0+/, "");
+const belongsToCustomer = (order: Pick<CustomerOrder, "userId" | "userPhone" | "phone">, customer: CustomerAuthUser) =>
+  order.userId === customer.id || (!order.userId && normalizePhone(order.userPhone || order.phone) === normalizePhone(customer.phone));
 
 const formatINR = (value: number) => `₹${(Number.isFinite(value) ? value : 0).toLocaleString("en-IN")}`;
 const CUSTOMER_PRICE_MULTIPLIER = 2.2;
@@ -334,7 +335,6 @@ export default function Home() {
   const [authPhone, setAuthPhone] = useState("");
   const [authOtp, setAuthOtp] = useState("");
   const [otpSent, setOtpSent] = useState(false);
-  const [otpChannel, setOtpChannel] = useState<OtpChannel>("sms");
   const [otpCooldown, setOtpCooldown] = useState(0);
   const [authJustVerified, setAuthJustVerified] = useState(false);
   const [authUser, setAuthUser] = useState<CustomerAuthUser | null>(null);
@@ -615,9 +615,8 @@ export default function Home() {
       }
       const remote = await fetchStoreOrders<CustomerOrder>();
       const merged = new Map<string, CustomerOrder>();
-      const belongsToCustomer = (order: CustomerOrder) => order.userId === userId || normalizePhone(order.userPhone || order.phone) === normalizePhone(authUser.phone);
       remote.data?.forEach((order) => {
-        if (order?.id && belongsToCustomer(order) && !isDemoOrder(order) && isPaidOrder(order)) {
+        if (order?.id && belongsToCustomer(order, authUser) && !isDemoOrder(order) && isPaidOrder(order)) {
           merged.set(order.id, order);
         }
       });
@@ -626,7 +625,7 @@ export default function Home() {
         const parsed = stored ? JSON.parse(stored) : [];
         if (Array.isArray(parsed)) {
           parsed.forEach((order) => {
-            if (order?.id && belongsToCustomer(order) && !isDemoOrder(order) && isPaidOrder(order) && !merged.has(order.id)) {
+            if (order?.id && belongsToCustomer(order, authUser) && !isDemoOrder(order) && isPaidOrder(order) && !merged.has(order.id)) {
               merged.set(order.id, order as CustomerOrder);
             }
           });
@@ -634,7 +633,7 @@ export default function Home() {
         const sharedStored = window.localStorage.getItem("fanzzy-orders");
         const sharedParsed = sharedStored ? JSON.parse(sharedStored) : [];
         if (Array.isArray(sharedParsed)) sharedParsed.forEach((order) => {
-          if (order?.id && belongsToCustomer(order as CustomerOrder) && !isDemoOrder(order) && isPaidOrder(order as CustomerOrder) && !merged.has(order.id)) merged.set(order.id, order as CustomerOrder);
+          if (order?.id && belongsToCustomer(order as CustomerOrder, authUser) && !isDemoOrder(order) && isPaidOrder(order as CustomerOrder) && !merged.has(order.id)) merged.set(order.id, order as CustomerOrder);
         });
       } catch {
         setOrders([]);
@@ -1004,7 +1003,7 @@ export default function Home() {
     setProfileOpen(false);
     announce("Signed out successfully");
   };
-  const sendOtp = async (channel: OtpChannel = "sms") => {
+  const sendOtp = async () => {
     const phone = authPhone.trim();
     if (!phone) {
       setAuthMessage("Enter your mobile number to receive a code.");
@@ -1017,7 +1016,7 @@ export default function Home() {
     setAuthLoading(true);
     setAuthMessage("");
     try {
-      const response = await customerAuthRequest(channel === "voice" ? "send-voice-otp" : "send-otp", {
+      const response = await customerAuthRequest("send-otp", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ phone }),
@@ -1035,20 +1034,19 @@ export default function Home() {
         setAuthMessage(
           result.error
             || (response.status === 404 || response.status === 405
-              ? `${channel === "voice" ? "Voice" : "SMS"} login is unavailable on this deployment. Please try again later.`
+              ? "SMS login is unavailable on this deployment. Please try again later."
               : response.status >= 500
-                ? `The ${channel === "voice" ? "voice" : "SMS"} OTP service is temporarily unavailable. Please try again in a moment.`
-                : `We could not send the ${channel === "voice" ? "voice" : "SMS"} OTP.`),
+                ? "The SMS OTP service is temporarily unavailable. Please try again in a moment."
+                : "We could not send the SMS OTP."),
         );
         return;
       }
       setOtpSent(true);
-      setOtpChannel(channel);
       saveCustomerAuthTokens(result);
       setOtpCooldown(60);
-      setAuthMessage(channel === "voice" ? "You will receive an automated call with your OTP." : "OTP sent successfully by SMS");
+      setAuthMessage("OTP sent successfully by SMS");
     } catch {
-      setAuthMessage(`Could not connect to the ${channel === "voice" ? "voice" : "SMS"} OTP service. Check your connection and try again.`);
+      setAuthMessage("Could not connect to the SMS OTP service. Check your connection and try again.");
     } finally {
       setAuthLoading(false);
     }
@@ -1056,7 +1054,7 @@ export default function Home() {
   const verifyOtp = async () => {
     const token = authOtp.trim();
     if (!token) {
-      setAuthMessage(`Enter the code from your ${otpChannel === "voice" ? "voice call" : "SMS"}.`);
+      setAuthMessage("Enter the 6-digit code from your SMS.");
       return;
     }
     setAuthLoading(true);
@@ -1108,7 +1106,7 @@ export default function Home() {
       return;
     }
     window.localStorage.setItem(ordersAfterAuthKey, "1");
-    setAuthMessage("Sign in with a one-time SMS or voice-call code to view your orders.");
+    setAuthMessage("Sign in with a one-time SMS code to view your orders.");
     setAuthOpen(true);
   };
   const applyCoupon = () => {
@@ -1129,7 +1127,7 @@ export default function Home() {
     if (!authUser) {
       setIsPaying(false);
       setCheckoutOpen(false);
-      setAuthMessage("Sign in with a one-time SMS or voice-call code before placing an order.");
+      setAuthMessage("Sign in with a one-time SMS code before placing an order.");
       setAuthOpen(true);
       return;
     }
@@ -1153,7 +1151,7 @@ export default function Home() {
       order.razorpayPaymentId && order.razorpayPaymentId === newOrder.razorpayPaymentId,
     );
     if (existingPayment) {
-      const userOrders = Array.from(merged.values()).filter((order) => order.userId === authUser.id || normalizePhone(order.userPhone || order.phone) === normalizePhone(authUser.phone));
+      const userOrders = Array.from(merged.values()).filter((order) => belongsToCustomer(order, authUser));
       window.localStorage.setItem(`fanzzy-orders:${authUser.id}`, JSON.stringify(userOrders));
       window.localStorage.setItem("fanzzy-orders", JSON.stringify(Array.from(merged.values())));
       window.dispatchEvent(new Event("fanzzy-orders-updated"));
@@ -1170,7 +1168,7 @@ export default function Home() {
     const nextOrders = [newOrder, ...Array.from(merged.values()).filter((order) => order.id !== newOrder.id)];
     await saveStoreOrders(nextOrders);
     window.localStorage.setItem("fanzzy-orders", JSON.stringify(nextOrders));
-      const userOrders = nextOrders.filter((order) => order.userId === authUser.id && isPaidOrder(order));
+    const userOrders = nextOrders.filter((order) => belongsToCustomer(order, authUser) && isPaidOrder(order));
     window.localStorage.setItem(`fanzzy-orders:${authUser.id}`, JSON.stringify(userOrders));
     window.dispatchEvent(new Event("fanzzy-orders-updated"));
     setOrderConfirmation(newOrder);
@@ -1244,7 +1242,7 @@ export default function Home() {
     window.localStorage.setItem("fanzzy-orders", JSON.stringify(nextOrders));
     window.localStorage.setItem(
       `fanzzy-orders:${authUser.id}`,
-      JSON.stringify(nextOrders.filter((order) => order.userId === authUser.id)),
+      JSON.stringify(nextOrders.filter((order) => belongsToCustomer(order, authUser))),
     );
     window.dispatchEvent(new Event("fanzzy-orders-updated"));
   };
@@ -1252,7 +1250,7 @@ export default function Home() {
     if (isPaying) return;
     if (!authUser) {
       setCheckoutOpen(false);
-      setAuthMessage("Sign in with a one-time SMS or voice-call code before placing an order.");
+      setAuthMessage("Sign in with a one-time SMS code before placing an order.");
       setAuthOpen(true);
       return;
     }
@@ -1369,8 +1367,7 @@ export default function Home() {
 
   const visibleOrders = useMemo(() => {
     if (!authUser) return [];
-    const loginPhone = authUser.phone.replace(/\D/g, "");
-    return orders.filter((order) => isPaidOrder(order) && (order.userId === authUser.id || order.userPhone?.replace(/\D/g, "") === loginPhone || order.phone.replace(/\D/g, "") === loginPhone));
+    return orders.filter((order) => isPaidOrder(order) && belongsToCustomer(order, authUser));
   }, [authUser, orders]);
   const assistantReply = (message: string) => {
     const query = message.toLowerCase();
@@ -1499,13 +1496,13 @@ export default function Home() {
 
       {savedOpen && <div className="drawer-backdrop" onClick={() => setSavedOpen(false)}><aside className="orders-drawer saved-drawer" role="dialog" aria-modal="true" aria-labelledby="saved-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR EDIT</p><h2 id="saved-title">Saved pieces</h2></div><button aria-label="Close saved pieces" onClick={() => setSavedOpen(false)}>×</button></div>{wishlist.length ? <div className="saved-list">{wishlist.map((productId) => { const product = products.find((item) => item.id === productId); return product ? <article className="saved-card" key={product.id}><button className="saved-product" onClick={() => { setQuickProduct(product); setSavedOpen(false); }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(getCustomerPrice(product))}</small></span><b>↗</b></button><div className="saved-card-actions"><button className="module-secondary" onClick={() => { addToCart(product); setSavedOpen(false); }}>Add to cart</button><button className="saved-remove" onClick={() => toggleWishlist(product.id)}>Remove</button></div></article> : null; })}</div> : <div className="orders-empty saved-empty"><div>♡</div><h3>Your edit is waiting.</h3><p>Tap the heart on any piece to keep it close while you decide.</p><button className="button button-dark" onClick={() => { setSavedOpen(false); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}>Explore pieces <span>↗</span></button></div>}</aside></div>}
 
-      {profileOpen && <div className="drawer-backdrop" onClick={() => setProfileOpen(false)}><aside className="orders-drawer profile-drawer" role="dialog" aria-modal="true" aria-labelledby="profile-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR FANZZY ACCOUNT</p><h2 id="profile-title">Profile</h2></div><button aria-label="Close profile" onClick={() => setProfileOpen(false)}>×</button></div>{authUser ? <div className="profile-content"><div className="profile-avatar" aria-hidden="true">{profileName.slice(0, 1).toUpperCase()}</div><p className="eyebrow">SIGNED IN</p><h3>{profileName}</h3><p className="profile-welcome">Your saved pieces, cart and order history stay together here.</p><dl className="profile-details"><div><dt>Login mobile number</dt><dd>{authUser.phone}</dd></div><div><dt>Account ID</dt><dd>{authUser.id}</dd></div></dl><div className="profile-shortcuts"><button onClick={() => { setProfileOpen(false); setOrdersOpen(true); }}><span>Orders</span><b>{orders.length.toString().padStart(2, "0")} ↗</b></button><button onClick={() => { setProfileOpen(false); setSavedOpen(true); }}><span>Saved</span><b>{wishlist.length.toString().padStart(2, "0")} ♡</b></button></div><button className="button button-dark full-width" onClick={() => { setProfileOpen(false); setCartOpen(true); }}>Open my cart <span>↗</span></button><button className="profile-sign-out" onClick={signOut}>Sign out</button></div> : <div className="profile-content profile-signed-out"><div className="profile-avatar" aria-hidden="true">○</div><p className="eyebrow">NOT SIGNED IN</p><h3>Welcome to Fanzzy.</h3><p>Sign in with a one-time SMS or voice-call code to keep your cart and orders connected to your mobile number.</p><button className="button button-dark full-width" onClick={() => { setProfileOpen(false); setAuthMessage(""); setAuthOpen(true); }}>Sign in with mobile OTP <span>↗</span></button></div>}</aside></div>}
+      {profileOpen && <div className="drawer-backdrop" onClick={() => setProfileOpen(false)}><aside className="orders-drawer profile-drawer" role="dialog" aria-modal="true" aria-labelledby="profile-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR FANZZY ACCOUNT</p><h2 id="profile-title">Profile</h2></div><button aria-label="Close profile" onClick={() => setProfileOpen(false)}>×</button></div>{authUser ? <div className="profile-content"><div className="profile-avatar" aria-hidden="true">{profileName.slice(0, 1).toUpperCase()}</div><p className="eyebrow">SIGNED IN</p><h3>{profileName}</h3><p className="profile-welcome">Your saved pieces, cart and order history stay together here.</p><dl className="profile-details"><div><dt>Login mobile number</dt><dd>{authUser.phone}</dd></div><div><dt>Account ID</dt><dd>{authUser.id}</dd></div></dl><div className="profile-shortcuts"><button onClick={() => { setProfileOpen(false); setOrdersOpen(true); }}><span>Orders</span><b>{orders.length.toString().padStart(2, "0")} ↗</b></button><button onClick={() => { setProfileOpen(false); setSavedOpen(true); }}><span>Saved</span><b>{wishlist.length.toString().padStart(2, "0")} ♡</b></button></div><button className="button button-dark full-width" onClick={() => { setProfileOpen(false); setCartOpen(true); }}>Open my cart <span>↗</span></button><button className="profile-sign-out" onClick={signOut}>Sign out</button></div> : <div className="profile-content profile-signed-out"><div className="profile-avatar" aria-hidden="true">○</div><p className="eyebrow">NOT SIGNED IN</p><h3>Welcome to Fanzzy.</h3><p>Sign in with a one-time SMS code to keep your cart and orders connected to your mobile number.</p><button className="button button-dark full-width" onClick={() => { setProfileOpen(false); setAuthMessage(""); setAuthOpen(true); }}>Sign in with mobile OTP <span>↗</span></button></div>}</aside></div>}
 
       {ordersOpen && <div className="drawer-backdrop" onClick={() => setOrdersOpen(false)}><aside className="orders-drawer" role="dialog" aria-modal="true" aria-labelledby="orders-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR FANZZY ACCOUNT</p><h2 id="orders-title">My orders</h2></div><button aria-label="Close orders" onClick={() => setOrdersOpen(false)}>×</button></div><div className="orders-intro"><p>These are the orders placed using your signed-in account. Only you can see this account’s orders.</p></div>{visibleOrders.length ? <div className="customer-order-list">{visibleOrders.map((order) => <article className="customer-order-card" key={order.id}><div className="customer-order-head"><div><strong>{order.id}</strong><small>{formatOrderDate(order.date)} · {order.customerName}</small></div><span className={`customer-order-status ${order.status.toLowerCase()}`}>{order.status}</span></div>{order.items?.length ? <div className="customer-order-items">{order.items.map((item) => { const product = getOrderedProduct(item); return <button className="customer-order-product" key={`${order.id}-${item.name}`} onClick={() => openOrderedProduct(item)} aria-label={`View ${item.name} details`}>{product ? <img src={product.image} alt="" style={imageAdjustmentStyle(product.imageAdjustments)} /> : <span className="order-product-placeholder" aria-hidden="true">✦</span>}<span className="order-product-copy"><strong>{item.name}</strong><b>× {item.quantity}</b>{product ? <em>{product.category} · View details ↗</em> : <em>Product no longer in the collection</em>}</span><small>{item.price}</small></button>; })}</div> : <p className="customer-order-items legacy-order">Order details are available in your confirmation.</p>}<div className="customer-order-total"><span>Total paid</span><strong>{order.total}</strong></div><button className="module-secondary customer-bill-button" onClick={() => downloadBill(order)}>Download bill ↗</button></article>)}</div> : <div className="orders-empty"><div>✦</div><h3>No orders found for this account.</h3><p>Orders appear here after you complete payment while signed in to this account.</p><button className="button button-dark" onClick={() => { setOrdersOpen(false); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}>Shop the collection <span>↗</span></button></div>}</aside></div>}
 
       {cartOpen && <div className="drawer-backdrop" onClick={() => setCartOpen(false)}><aside className="cart-drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR CART</p><h2>{cartCount ? `${cartCount} piece${cartCount > 1 ? "s" : ""}` : "A little empty"}</h2></div><button onClick={() => setCartOpen(false)}>×</button></div>{cartItems.length ? <><div className="drawer-items">{cartItems.map((product) => <div className={`drawer-item${getVariantStock(product, product.variant) <= 0 ? " drawer-item-sold-out" : ""}`} key={product.cartKey}><img src={product.variant?.image || product.image} alt="" style={imageAdjustmentStyle(product.variant?.adjustments || product.imageAdjustments)} /><div><strong>{product.name}</strong>{product.variant?.name && <small className="cart-variant-name">{product.variant.name}</small>}{product.size && <small className="cart-variant-name">Size {product.size}</small>}{getVariantStock(product, product.variant) <= 0 && <small className="cart-stock-label">Sold out</small>}<small>{formatINR(getCustomerPrice(product))}</small><div className="quantity"><button onClick={() => updateQuantity(product.cartKey, -1)} aria-label={`Decrease ${product.name} quantity`}>−</button><span>{product.quantity}</span><button onClick={() => updateQuantity(product.cartKey, 1)} aria-label={`Increase ${product.name} quantity`}>+</button></div></div><div className="cart-item-actions"><b>{formatINR(getCustomerPrice(product) * product.quantity)}</b><button className="cart-remove" onClick={() => removeFromCart(product.cartKey)} aria-label={`Remove ${product.name} from cart`}>Remove</button></div></div>)}</div><div className="drawer-footer">{cartStockIssues.length > 0 && <div className="cart-stock-warning" role="alert"><strong>Remove sold out items before checkout</strong><span>{cartHasSoldOutItems ? "This cart contains an unavailable item." : "One or more quantities are above the available stock."}</span></div>}<div><span>Subtotal</span><strong>{formatINR(subtotal)}</strong></div>{bogoDiscount > 0 && <div className="offer-total"><span>{bogoOfferLabel} discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="offer-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div><span>Delivery</span><strong>{deliveryTotal > 0 ? formatINR(deliveryTotal) : "Free"}</strong></div><div className="drawer-total"><span>Total</span><strong>{formatINR(orderTotal)}</strong></div><p>{bogoDiscount > 0 ? `${bogoOfferLabel} applied to eligible products.` : deliveryTotal > 0 ? "Delivery charge applied to this order." : deliveryCharge.freeAboveEnabled ? `Free delivery on orders above ${formatINR(deliveryCharge.freeAbove)}.` : "Complimentary shipping."}</p><button className="button button-dark full-width" onClick={openCheckout}>Proceed to buy <span>↗</span></button></div></> : <div className="empty-bag"><div>✦</div><p>Your future favourites<br />belong here.</p><button className="text-link" onClick={() => setCartOpen(false)}>Continue shopping <span>↗</span></button></div>}</aside></div>}
 
-      {authOpen && <div className="drawer-backdrop auth-backdrop" onClick={closeAuth}><section className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close sign in" onClick={closeAuth}>×</button><p className="eyebrow">SECURE MOBILE LOGIN</p><h2 id="auth-title">Continue with your mobile number.</h2><p className="auth-intro">Enter your mobile number and receive a one-time code by SMS or voice call. No password is required.</p><div className="otp-auth-form"><label>Mobile number<input type="tel" value={authPhone} onChange={(event) => { setAuthPhone(event.target.value); setAuthOtp(""); setOtpSent(false); setOtpCooldown(0); setOtpChannel("sms"); }} placeholder="+91 98765 43210" inputMode="tel" autoComplete="tel" disabled={authLoading} /></label>{otpSent && <label>6-digit {otpChannel === "voice" ? "voice-call" : "SMS"} code<input value={authOtp} onChange={(event) => setAuthOtp(event.target.value.replace(/\D/g, "").slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" maxLength={6} placeholder="Enter 6-digit code" disabled={authLoading} onKeyDown={(event) => { if (event.key === "Enter") void verifyOtp(); }} /></label>}{otpSent ? <><button className="google-sign-in" type="button" onClick={() => void verifyOtp()} disabled={authLoading}><span className="email-otp-mark" aria-hidden="true">✦</span>{authLoading ? "Please wait…" : "Verify code"}<span aria-hidden="true">↗</span></button><div className="otp-fallback-actions"><button className="auth-resend" type="button" onClick={() => void sendOtp(otpChannel)} disabled={authLoading || otpCooldown > 0}>{otpCooldown > 0 ? `Resend OTP in ${otpCooldown}s` : `Resend ${otpChannel === "voice" ? "voice call" : "SMS"} OTP`}</button></div></> : <div className="otp-channel-actions"><button className="google-sign-in" type="button" onClick={() => void sendOtp("sms")} disabled={authLoading}><span className="email-otp-mark" aria-hidden="true">✦</span>{authLoading ? "Please wait…" : "Send SMS code"}<span aria-hidden="true">↗</span></button><button className="google-sign-in auth-voice-button" type="button" onClick={() => void sendOtp("voice")} disabled={authLoading}><span className="email-otp-mark" aria-hidden="true">☎</span>{authLoading ? "Please wait…" : "Call me with code"}<span aria-hidden="true">↗</span></button></div>}</div>{authMessage && <p className="auth-message" role="alert">{authMessage}</p>}<p className="auth-note">Your orders and cart are saved to this verified mobile number.</p></section></div>}
+      {authOpen && <div className="drawer-backdrop auth-backdrop" onClick={closeAuth}><section className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close sign in" onClick={closeAuth}>×</button><p className="eyebrow">SECURE MOBILE LOGIN</p><h2 id="auth-title">Continue with your mobile number.</h2><p className="auth-intro">Enter your mobile number and receive a one-time code by SMS. No password is required.</p><div className="otp-auth-form"><label>Mobile number<input type="tel" value={authPhone} onChange={(event) => { setAuthPhone(event.target.value); setAuthOtp(""); setOtpSent(false); setOtpCooldown(0); }} placeholder="+91 98765 43210" inputMode="tel" autoComplete="tel" disabled={authLoading} /></label>{otpSent && <label>6-digit SMS code<input value={authOtp} onChange={(event) => setAuthOtp(event.target.value.replace(/\D/g, "").slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" maxLength={6} placeholder="Enter 6-digit code" disabled={authLoading} onKeyDown={(event) => { if (event.key === "Enter") void verifyOtp(); }} /></label>}{otpSent ? <><button className="google-sign-in" type="button" onClick={() => void verifyOtp()} disabled={authLoading}><span className="email-otp-mark" aria-hidden="true">✦</span>{authLoading ? "Please wait…" : "Verify code"}<span aria-hidden="true">↗</span></button><div className="otp-fallback-actions"><button className="auth-resend" type="button" onClick={() => void sendOtp()} disabled={authLoading || otpCooldown > 0}>{otpCooldown > 0 ? `Resend SMS in ${otpCooldown}s` : "Resend SMS OTP"}</button></div></> : <div className="otp-channel-actions"><button className="google-sign-in" type="button" onClick={() => void sendOtp()} disabled={authLoading}><span className="email-otp-mark" aria-hidden="true">✦</span>{authLoading ? "Please wait…" : "Send SMS code"}<span aria-hidden="true">↗</span></button></div>}</div>{authMessage && <p className="auth-message" role="alert">{authMessage}</p>}<p className="auth-note">Your orders and cart are saved to this verified mobile number.</p></section></div>}
 
       {checkoutOpen && <div className="drawer-backdrop checkout-backdrop" onClick={() => setCheckoutOpen(false)}><section className="checkout-modal" role="dialog" aria-modal="true" aria-labelledby="checkout-title" onClick={(event) => event.stopPropagation()} onFocusCapture={(event) => { if (event.target instanceof HTMLInputElement) requestAnimationFrame(() => event.target.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" })); }}><div className="drawer-header"><div><p className="eyebrow">CHECKOUT</p><h2 id="checkout-title">Complete your order</h2></div><button aria-label="Close checkout" onClick={() => setCheckoutOpen(false)}>×</button></div><p className="checkout-intro">We’ll use your WhatsApp number to confirm your order and delivery updates.</p><div className="checkout-grid"><label>Customer name<input value={checkoutForm.name} onChange={(event) => setCheckoutForm((current) => ({ ...current, name: event.target.value }))} placeholder="Your full name" required /></label><label>WhatsApp number <span className="required-mark">Required</span><input type="tel" value={checkoutForm.phone} onChange={(event) => setCheckoutForm((current) => ({ ...current, phone: event.target.value }))} placeholder="+91 98765 43210" required /></label><label>Email address <span className="optional-mark">Optional</span><input type="email" value={checkoutForm.email} onChange={(event) => setCheckoutForm((current) => ({ ...current, email: event.target.value }))} placeholder="you@example.com" /></label><div className="checkout-fulfillment checkout-wide"><p className="field-label">How would you like to receive your order?</p><div className="fulfillment-options"><label><input type="radio" name="fulfillment-method" checked={fulfillmentMethod === "delivery"} onChange={() => setFulfillmentMethod("delivery")} /> <span>Home delivery<small>Delivery charges apply as configured.</small></span></label><label className={!pickupHubs.length ? "disabled" : ""}><input type="radio" name="fulfillment-method" checked={fulfillmentMethod === "pickup"} onChange={() => { setFulfillmentMethod("pickup"); if (!selectedPickupHubId && pickupHubs[0]) setSelectedPickupHubId(pickupHubs[0].id); }} disabled={!pickupHubs.length} /> <span>Pick up from a hub<small>{pickupHubs.length ? "No delivery charges." : "Add a hub in Admin → Hub to enable pickup."}</small></span></label></div></div>{fulfillmentMethod === "pickup" && pickupHubs.length > 0 && <label className="checkout-wide pickup-hub-select">Pickup hub<select value={selectedPickupHubId} onChange={(event) => setSelectedPickupHubId(event.target.value)}><option value="">Select a pickup hub</option>{pickupHubs.map((hub) => <option key={hub.id} value={hub.id}>{hub.name} · {hub.place}</option>)}</select><small className="pickup-hub-details">{selectedPickupHub ? `${selectedPickupHub.name} · ${selectedPickupHub.place}` : "Choose where you will collect your order."}</small></label>}{fulfillmentMethod === "delivery" && <label className="checkout-wide">Delivery address<input value={checkoutForm.address} onChange={(event) => setCheckoutForm((current) => ({ ...current, address: event.target.value }))} placeholder="House number, street, city, pincode" required /></label>}<div className="checkout-coupon checkout-wide"><label htmlFor="checkout-coupon-code">Coupon code <span className="optional-mark">Optional</span></label><div className="coupon-entry"><input id="checkout-coupon-code" value={couponInput} onChange={(event) => { setCouponInput(event.target.value.toUpperCase()); setAppliedCoupon(null); }} placeholder="Enter coupon code" autoCapitalize="characters" /><button className="button button-light" type="button" onClick={applyCoupon}>Apply</button></div>{appliedCoupon && <p className="coupon-success">{appliedCoupon.code} applied · {appliedCoupon.discount} off</p>}</div></div>{bogoDiscount > 0 && <div className="checkout-total coupon-total"><span>{bogoOfferLabel} discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="checkout-total coupon-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div className="checkout-total"><span>{fulfillmentMethod === "pickup" ? "Pickup" : "Delivery"}</span><strong>{fulfillmentMethod === "pickup" ? "Free" : deliveryTotal > 0 ? formatINR(deliveryTotal) : "Free"}</strong></div><div className="checkout-total"><span>Order total</span><strong>{formatINR(orderTotal)}</strong></div><div className="checkout-actions"><button className="button button-dark" onClick={submitCheckout}>Place order <span>↗</span></button><button className="save-text" onClick={() => setCheckoutOpen(false)}>Back to cart</button></div></section></div>}
 

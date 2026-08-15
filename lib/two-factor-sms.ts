@@ -1,4 +1,5 @@
 const TWO_FACTOR_BASE_URL = "https://2factor.in/API/V1";
+const TWO_FACTOR_SMS_TEMPLATE = "Fanzzy Login SMS OTP";
 const TWO_FACTOR_TIMEOUT_MS = 15_000;
 
 type TwoFactorResponse = {
@@ -55,20 +56,14 @@ const requestProvider = async (path: string, method: "GET" | "POST", payload?: R
 };
 
 export const sendTwoFactorOtp = async (phone: string, code: string) => {
-  // Use 2Factor's dedicated OTP endpoint so the provider generates the
-  // approved OTP message instead of treating this as a bulk SMS request.
-  const result = await requestProvider(`/SMS/${encodeURIComponent(phone)}/${encodeURIComponent(code)}`, "POST");
+  const result = await requestProvider("/ADDON_SERVICES/SEND/TSMS", "POST", {
+    From: "FANZZY",
+    To: phone,
+    TemplateName: TWO_FACTOR_SMS_TEMPLATE,
+    VAR1: code,
+  });
   if (!result.ok || result.status !== "success" || !result.details) {
     throw new TwoFactorSmsError(result.details || "2Factor could not send the SMS code.", "send");
-  }
-  return result.details;
-};
-
-export const sendTwoFactorVoiceOtp = async (phone: string, code: string) => {
-  const voicePhone = phone.startsWith("91") ? phone.slice(2) : phone;
-  const result = await requestProvider(`/VOICE/${encodeURIComponent(voicePhone)}/${encodeURIComponent(code)}`, "GET");
-  if (!result.ok || result.status !== "success" || !result.details) {
-    throw new TwoFactorSmsError(result.details || "2Factor could not place the voice OTP call.", "send");
   }
   return result.details;
 };
