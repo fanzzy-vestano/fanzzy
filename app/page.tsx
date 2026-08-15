@@ -108,8 +108,13 @@ const isDemoProduct = (product: { name?: string; sku?: string }) =>
 const isDemoOrder = (order: { id?: string }) => /^#FZ-104[4-8]$/.test(String(order.id ?? ""));
 const isPaidOrder = (order: Pick<CustomerOrder, "paymentStatus" | "razorpayPaymentId">) => order.paymentStatus === "paid" || Boolean(order.razorpayPaymentId);
 const normalizePhone = (value?: string) => String(value || "").replace(/\D/g, "").replace(/^0+/, "");
-const belongsToCustomer = (order: Pick<CustomerOrder, "userId" | "userPhone" | "phone">, customer: CustomerAuthUser) =>
-  order.userId === customer.id || (!order.userId && normalizePhone(order.userPhone || order.phone) === normalizePhone(customer.phone));
+const belongsToCustomer = (order: Pick<CustomerOrder, "userId" | "userPhone" | "phone">, customer: CustomerAuthUser) => {
+  if (order.userId === customer.id) return true;
+  const orderPhone = normalizePhone(order.userPhone) || normalizePhone(order.phone);
+  return Boolean(orderPhone && orderPhone === normalizePhone(customer.phone));
+};
+const isCustomerOrder = (order: CustomerOrder, customer: CustomerAuthUser) =>
+  belongsToCustomer(order, customer) && !isDemoOrder(order) && (isPaidOrder(order) || order.paymentStatus === undefined);
 
 const formatINR = (value: number) => `₹${(Number.isFinite(value) ? value : 0).toLocaleString("en-IN")}`;
 const CUSTOMER_PRICE_MULTIPLIER = 2.2;
@@ -616,7 +621,7 @@ export default function Home() {
       const remote = await fetchStoreOrders<CustomerOrder>();
       const merged = new Map<string, CustomerOrder>();
       remote.data?.forEach((order) => {
-        if (order?.id && belongsToCustomer(order, authUser) && !isDemoOrder(order) && isPaidOrder(order)) {
+        if (order?.id && isCustomerOrder(order, authUser)) {
           merged.set(order.id, order);
         }
       });
@@ -625,7 +630,7 @@ export default function Home() {
         const parsed = stored ? JSON.parse(stored) : [];
         if (Array.isArray(parsed)) {
           parsed.forEach((order) => {
-            if (order?.id && belongsToCustomer(order, authUser) && !isDemoOrder(order) && isPaidOrder(order) && !merged.has(order.id)) {
+            if (order?.id && isCustomerOrder(order as CustomerOrder, authUser) && !merged.has(order.id)) {
               merged.set(order.id, order as CustomerOrder);
             }
           });
@@ -633,7 +638,7 @@ export default function Home() {
         const sharedStored = window.localStorage.getItem("fanzzy-orders");
         const sharedParsed = sharedStored ? JSON.parse(sharedStored) : [];
         if (Array.isArray(sharedParsed)) sharedParsed.forEach((order) => {
-          if (order?.id && belongsToCustomer(order as CustomerOrder, authUser) && !isDemoOrder(order) && isPaidOrder(order as CustomerOrder) && !merged.has(order.id)) merged.set(order.id, order as CustomerOrder);
+          if (order?.id && isCustomerOrder(order as CustomerOrder, authUser) && !merged.has(order.id)) merged.set(order.id, order as CustomerOrder);
         });
       } catch {
         setOrders([]);
@@ -1404,7 +1409,7 @@ export default function Home() {
 
   const visibleOrders = useMemo(() => {
     if (!authUser) return [];
-    return orders.filter((order) => isPaidOrder(order) && belongsToCustomer(order, authUser));
+    return orders.filter((order) => isCustomerOrder(order, authUser));
   }, [authUser, orders]);
   const assistantReply = (message: string) => {
     const query = message.toLowerCase();
