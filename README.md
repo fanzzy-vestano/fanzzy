@@ -28,4 +28,14 @@ The current implementation is a polished, interactive vertical slice with a cent
 
 The UI is ready to connect to Prisma/Drizzle models for products, variants, inventory, carts, orders, coupons, shipping rules, reviews, banners, homepage sections, and audit logs. Keep secrets in environment variables and perform authoritative pricing, coupon, inventory, and payment verification on the server.
 
+## GitHub Pages customer OTP
+
+GitHub Pages serves the storefront statically and cannot execute the app's `/api/customer-auth` routes. The static build therefore uses `CUSTOMER_AUTH_API_URL` when it is set, normally:
+
+```text
+https://pdrcrkxeyqxqgpwfxqpu.supabase.co/functions/v1/customer-auth
+```
+
+Deploy `supabase/functions/customer-auth/index.ts` to the existing Supabase project and configure the function secrets `TWO_FACTOR_API_KEY` and `CUSTOMER_AUTH_SECRET`. Keep the 2Factor key in the function secrets; never put it in `NEXT_PUBLIC_*` variables or the GitHub Pages build.
+
 

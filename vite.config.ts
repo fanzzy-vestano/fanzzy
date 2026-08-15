@@ -51,6 +51,9 @@ export default defineConfig(async () => {
       "process.env.NEXT_PUBLIC_STATIC_ADMIN_PASSWORD": JSON.stringify(
         process.env.GITHUB_PAGES === "true" ? process.env.ADMIN_LOGIN_PASSWORD ?? "" : "",
       ),
+      "process.env.NEXT_PUBLIC_CUSTOMER_AUTH_API_URL": JSON.stringify(
+        process.env.GITHUB_PAGES === "true" ? process.env.CUSTOMER_AUTH_API_URL?.trim() ?? "" : "",
+      ),
     },
     server: isCodexSeatbeltSandbox
       ? { watch: { useFsEvents: false, usePolling: true } }

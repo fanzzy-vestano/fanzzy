@@ -11,6 +11,12 @@ import {
   saveStoreSetting,
 } from "../lib/supabase/catalog";
 import { printOrderBill } from "../lib/order-bill";
+import {
+  clearCustomerAuthTokens,
+  clearPendingCustomerAuthToken,
+  customerAuthRequest,
+  saveCustomerAuthTokens,
+} from "../lib/customer-auth-client";
 
 type CustomerAuthUser = { id: string; phone: string };
 
@@ -741,7 +747,7 @@ export default function Home() {
     let active = true;
     const loadCustomerSession = async () => {
       try {
-        const response = await fetch("/api/customer-auth/session", { cache: "no-store" });
+        const response = await customerAuthRequest("session", { cache: "no-store" });
         const result = await response.json() as { user?: CustomerAuthUser | null };
         if (!active) return;
         const user = result.user || null;
@@ -990,7 +996,8 @@ export default function Home() {
     setAuthJustVerified(false);
   };
   const signOut = async () => {
-    await fetch("/api/customer-auth/sign-out", { method: "POST" });
+    await customerAuthRequest("sign-out", { method: "POST" });
+    clearCustomerAuthTokens();
     setAuthUser(null);
     setProfileOpen(false);
     announce("Signed out successfully");
@@ -1008,13 +1015,13 @@ export default function Home() {
     setAuthLoading(true);
     setAuthMessage("");
     try {
-      const response = await fetch("/api/customer-auth/send-otp", {
+      const response = await customerAuthRequest("send-otp", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ phone }),
       });
       const responseText = await response.text();
-      let result: { error?: string } = {};
+      let result: { error?: string; pendingToken?: string } = {};
       if (responseText) {
         try {
           result = JSON.parse(responseText) as { error?: string };
@@ -1034,6 +1041,7 @@ export default function Home() {
         return;
       }
       setOtpSent(true);
+      saveCustomerAuthTokens(result);
       setOtpCooldown(60);
       setAuthMessage("OTP sent successfully by SMS");
     } catch {
@@ -1051,16 +1059,18 @@ export default function Home() {
     setAuthLoading(true);
     setAuthMessage("");
     try {
-      const response = await fetch("/api/customer-auth/verify-otp", {
+      const response = await customerAuthRequest("verify-otp", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ code: token }),
       });
-      const result = await response.json() as { error?: string; user?: CustomerAuthUser };
+      const result = await response.json() as { error?: string; user?: CustomerAuthUser; sessionToken?: string };
       if (!response.ok || !result.user) {
         setAuthMessage(result.error || (response.status === 410 ? "OTP expired" : "Invalid OTP"));
         return;
       }
+      saveCustomerAuthTokens(result);
+      clearPendingCustomerAuthToken();
       setAuthUser(result.user);
       setCheckoutForm((current) => ({ ...current, phone: current.phone || result.user!.phone }));
       setAuthOtp("");
