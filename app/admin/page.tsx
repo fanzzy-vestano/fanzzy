@@ -556,6 +556,12 @@ const isGitHubPagesHost = () =>
   (window.location.hostname === "fanzzy.in" ||
     window.location.hostname === "www.fanzzy.in" ||
     window.location.hostname.endsWith(".github.io"));
+const staticAdminEmail = process.env.NEXT_PUBLIC_STATIC_ADMIN_EMAIL ?? "";
+const staticAdminPassword = process.env.NEXT_PUBLIC_STATIC_ADMIN_PASSWORD ?? "";
+const staticAdminSessionKey = "fanzzy-github-pages-admin-authenticated";
+const hasStaticAdminSession = () =>
+  typeof window !== "undefined" &&
+  window.localStorage.getItem(staticAdminSessionKey) === "true";
 const readAdminAuthResponse = async (response: Response): Promise<AdminAuthResponse> => {
   const raw = await response.text();
   if (!raw) return {};
@@ -572,14 +578,18 @@ const adminApiUnavailableMessage = (status: number) =>
 
 function AdminLoginGate() {
   const staticPagesMode = isGitHubPagesHost();
-  const [checked, setChecked] = useState(staticPagesMode);
-  const [authenticated, setAuthenticated] = useState(staticPagesMode);
+  const [checked, setChecked] = useState(false);
+  const [authenticated, setAuthenticated] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   useEffect(() => {
-    if (staticPagesMode) return;
+    if (staticPagesMode) {
+      setAuthenticated(hasStaticAdminSession());
+      setChecked(true);
+      return;
+    }
     void fetch("/api/admin-auth", { cache: "no-store" })
       .then(async (response) => {
         const result = await readAdminAuthResponse(response);
@@ -597,6 +607,22 @@ function AdminLoginGate() {
     event.preventDefault();
     setLoading(true);
     setError("");
+    if (staticPagesMode) {
+      const isValid =
+        email.trim().toLowerCase() === staticAdminEmail.trim().toLowerCase() &&
+        password === staticAdminPassword &&
+        Boolean(staticAdminEmail && staticAdminPassword);
+      if (!isValid) {
+        setError("Invalid admin email or password.");
+        setLoading(false);
+        return;
+      }
+      window.localStorage.setItem(staticAdminSessionKey, "true");
+      setAuthenticated(true);
+      setPassword("");
+      setLoading(false);
+      return;
+    }
     try {
       const response = await fetch("/api/admin-auth", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email, password }) });
       const result = await readAdminAuthResponse(response);

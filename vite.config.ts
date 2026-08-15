@@ -44,6 +44,14 @@ export default defineConfig(async () => {
   const { cloudflare } = await import("@cloudflare/vite-plugin");
 
   return {
+    define: {
+      "process.env.NEXT_PUBLIC_STATIC_ADMIN_EMAIL": JSON.stringify(
+        process.env.GITHUB_PAGES === "true" ? process.env.ADMIN_LOGIN_EMAIL?.trim() ?? "" : "",
+      ),
+      "process.env.NEXT_PUBLIC_STATIC_ADMIN_PASSWORD": JSON.stringify(
+        process.env.GITHUB_PAGES === "true" ? process.env.ADMIN_LOGIN_PASSWORD ?? "" : "",
+      ),
+    },
     server: isCodexSeatbeltSandbox
       ? { watch: { useFsEvents: false, usePolling: true } }
       : undefined,
