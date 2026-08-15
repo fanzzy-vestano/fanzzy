@@ -41,6 +41,8 @@ type ProductImageAdjustments = {
   variants?: ImageAdjustments[];
 };
 type DeliveryCharge = { enabled: boolean; amount: number; freeAboveEnabled: boolean; freeAbove: number };
+type PickupHub = { id: string; name: string; place: string };
+type FulfillmentMethod = "delivery" | "pickup";
 type MarketingRecord = { kind: "Campaign" | "Coupon" | "Newsletter"; name: string; detail: string; status: "Active" | "Scheduled" | "Draft"; code?: string; discount?: string; offerType?: "bogo"; buyQuantity?: number; getQuantity?: number; eligibleProductIds?: string[] };
 type OrderStatus = "Processing" | "Packed" | "Shipped" | "Delivered" | "Cancelled";
 type CustomerOrder = {
@@ -55,6 +57,10 @@ type CustomerOrder = {
   phone: string;
   email?: string;
   address?: string;
+  fulfillmentMethod?: FulfillmentMethod;
+  pickupHubId?: string;
+  pickupHubName?: string;
+  pickupHubPlace?: string;
   coupon?: string;
   paymentStatus?: "pending" | "paid";
   razorpayOrderId?: string;
@@ -133,6 +139,7 @@ const blockedHeroImage = "photo-1599643478518-a784e5dc4c8f";
 const initialHeroSlides: string[] = [];
 const defaultHeroSlideDuration = 5.2;
 const defaultDeliveryCharge: DeliveryCharge = { enabled: false, amount: 99, freeAboveEnabled: false, freeAbove: 999 };
+const defaultPickupHubs: PickupHub[] = [];
 const parseDeliveryCharge = (value: string | null | undefined): DeliveryCharge => {
   if (!value) return defaultDeliveryCharge;
   try {
@@ -145,6 +152,23 @@ const parseDeliveryCharge = (value: string | null | undefined): DeliveryCharge =
     };
   } catch {
     return defaultDeliveryCharge;
+  }
+};
+const parsePickupHubs = (value: string | null | undefined): PickupHub[] => {
+  if (!value) return defaultPickupHubs;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return defaultPickupHubs;
+    return parsed
+      .filter((hub): hub is Partial<PickupHub> => Boolean(hub && typeof hub === "object"))
+      .map((hub, index) => ({
+        id: typeof hub.id === "string" && hub.id ? hub.id : `hub-${index + 1}`,
+        name: typeof hub.name === "string" ? hub.name.trim() : "",
+        place: typeof hub.place === "string" ? hub.place.trim() : "",
+      }))
+      .filter((hub) => hub.name && hub.place);
+  } catch {
+    return defaultPickupHubs;
   }
 };
 const siteBasePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
@@ -284,6 +308,7 @@ export default function Home() {
   const [cartVariants, setCartVariants] = useState<Record<string, ProductVariant | null>>({});
   const [cartSizes, setCartSizes] = useState<Record<string, string | null>>({});
   const cartOwnerId = useRef<string | null>(null);
+  const [cartReadyOwner, setCartReadyOwner] = useState<string | null>(null);
   const [cartOpen, setCartOpen] = useState(false);
   const [ordersOpen, setOrdersOpen] = useState(false);
   const [orders, setOrders] = useState<CustomerOrder[]>([]);
@@ -323,6 +348,9 @@ export default function Home() {
   const [privacyOpen, setPrivacyOpen] = useState(false);
   const [announcementText, setAnnouncementText] = useState("Complimentary shipping on orders above ₹999");
   const [deliveryCharge, setDeliveryCharge] = useState<DeliveryCharge>(defaultDeliveryCharge);
+  const [pickupHubs, setPickupHubs] = useState<PickupHub[]>(defaultPickupHubs);
+  const [fulfillmentMethod, setFulfillmentMethod] = useState<FulfillmentMethod>("delivery");
+  const [selectedPickupHubId, setSelectedPickupHubId] = useState("");
   const [activeCampaign, setActiveCampaign] = useState<MarketingRecord | null>(null);
   const [heroSlides, setHeroSlides] = useState(initialHeroSlides);
   const [heroSlideIndex, setHeroSlideIndex] = useState(0);
@@ -353,6 +381,28 @@ export default function Home() {
       active = false;
       window.removeEventListener("fanzzy-delivery-charge-updated", refreshDeliveryCharge);
       window.removeEventListener("storage", refreshDeliveryCharge);
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const loadPickupHubs = async () => {
+      const remote = await fetchStoreSetting("pickupHubs");
+      const remoteHubs = parsePickupHubs(remote.value);
+      const localHubs = parsePickupHubs(window.localStorage.getItem("fanzzy-pickup-hubs"));
+      if (active) setPickupHubs(remoteHubs.length ? remoteHubs : localHubs);
+    };
+    const refreshPickupHubs = () => {
+      setPickupHubs(parsePickupHubs(window.localStorage.getItem("fanzzy-pickup-hubs")));
+      void loadPickupHubs();
+    };
+    void loadPickupHubs();
+    window.addEventListener("fanzzy-pickup-hubs-updated", refreshPickupHubs);
+    window.addEventListener("storage", refreshPickupHubs);
+    return () => {
+      active = false;
+      window.removeEventListener("fanzzy-pickup-hubs-updated", refreshPickupHubs);
+      window.removeEventListener("storage", refreshPickupHubs);
     };
   }, []);
 
@@ -633,18 +683,13 @@ export default function Home() {
     .reduce((sum, price) => sum + price, 0);
   const discountedSubtotal = Math.max(0, subtotal - couponDiscount - bogoDiscount);
   const thresholdReached = deliveryCharge.freeAboveEnabled && discountedSubtotal >= deliveryCharge.freeAbove;
-  const deliveryTotal = deliveryCharge.enabled && !thresholdReached ? deliveryCharge.amount : 0;
+  const selectedPickupHub = pickupHubs.find((hub) => hub.id === selectedPickupHubId) || null;
+  const deliveryTotal = fulfillmentMethod === "pickup" ? 0 : deliveryCharge.enabled && !thresholdReached ? deliveryCharge.amount : 0;
   const orderTotal = Math.max(0, subtotal - couponDiscount - bogoDiscount + deliveryTotal);
 
   useEffect(() => {
     const userId = authUser?.id;
-    if (!userId) {
-      cartOwnerId.current = null;
-      setCart({});
-      setCartVariants({});
-      setCartSizes({});
-      return;
-    }
+    const ownerId = userId || "guest";
     const readCart = <T,>(key: string): T => {
       try {
         const parsed = JSON.parse(window.localStorage.getItem(key) || "{}");
@@ -653,19 +698,44 @@ export default function Home() {
         return {} as T;
       }
     };
-    setCart(readCart<Record<string, number>>(cartStorageKey(userId)));
-    setCartVariants(readCart<Record<string, ProductVariant | null>>(cartVariantsStorageKey(userId)));
-    setCartSizes(readCart<Record<string, string | null>>(`fanzzy-cart-sizes:${userId}`));
-    cartOwnerId.current = userId;
+
+    setCartReadyOwner(null);
+    if (!userId) {
+      setCart(readCart<Record<string, number>>(cartStorageKey(ownerId)));
+      setCartVariants(readCart<Record<string, ProductVariant | null>>(cartVariantsStorageKey(ownerId)));
+      setCartSizes(readCart<Record<string, string | null>>(`fanzzy-cart-sizes:${ownerId}`));
+      cartOwnerId.current = ownerId;
+      setCartReadyOwner(ownerId);
+      return;
+    }
+
+    const guestCart = readCart<Record<string, number>>(cartStorageKey("guest"));
+    const userCart = readCart<Record<string, number>>(cartStorageKey(userId));
+    const guestVariants = readCart<Record<string, ProductVariant | null>>(cartVariantsStorageKey("guest"));
+    const userVariants = readCart<Record<string, ProductVariant | null>>(cartVariantsStorageKey(userId));
+    const guestSizes = readCart<Record<string, string | null>>(`fanzzy-cart-sizes:guest`);
+    const userSizes = readCart<Record<string, string | null>>(`fanzzy-cart-sizes:${userId}`);
+    const mergedCart = { ...userCart };
+    Object.entries(guestCart).forEach(([cartKey, quantity]) => {
+      mergedCart[cartKey] = (mergedCart[cartKey] ?? 0) + quantity;
+    });
+    setCart(mergedCart);
+    setCartVariants({ ...guestVariants, ...userVariants });
+    setCartSizes({ ...guestSizes, ...userSizes });
+    window.localStorage.removeItem(cartStorageKey("guest"));
+    window.localStorage.removeItem(cartVariantsStorageKey("guest"));
+    window.localStorage.removeItem("fanzzy-cart-sizes:guest");
+    cartOwnerId.current = ownerId;
+    setCartReadyOwner(ownerId);
   }, [authUser?.id]);
 
   useEffect(() => {
-    const userId = authUser?.id;
-    if (!userId || cartOwnerId.current !== userId) return;
-    window.localStorage.setItem(cartStorageKey(userId), JSON.stringify(cart));
-    window.localStorage.setItem(cartVariantsStorageKey(userId), JSON.stringify(cartVariants));
-    window.localStorage.setItem(`fanzzy-cart-sizes:${userId}`, JSON.stringify(cartSizes));
-  }, [authUser?.id, cart, cartVariants, cartSizes]);
+    const ownerId = authUser?.id || "guest";
+    if (cartReadyOwner !== ownerId || cartOwnerId.current !== ownerId) return;
+    window.localStorage.setItem(cartStorageKey(ownerId), JSON.stringify(cart));
+    window.localStorage.setItem(cartVariantsStorageKey(ownerId), JSON.stringify(cartVariants));
+    window.localStorage.setItem(`fanzzy-cart-sizes:${ownerId}`, JSON.stringify(cartSizes));
+  }, [authUser?.id, cartReadyOwner, cart, cartVariants, cartSizes]);
 
   useEffect(() => {
     let active = true;
@@ -943,16 +1013,31 @@ export default function Home() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ phone }),
       });
-      const result = await response.json() as { error?: string };
+      const responseText = await response.text();
+      let result: { error?: string } = {};
+      if (responseText) {
+        try {
+          result = JSON.parse(responseText) as { error?: string };
+        } catch {
+          // Static hosts can return an HTML/empty error page instead of JSON.
+        }
+      }
       if (!response.ok) {
-        setAuthMessage(result.error || (response.status >= 500 ? "Please try again" : "We could not send the OTP."));
+        setAuthMessage(
+          result.error
+            || (response.status === 404 || response.status === 405
+              ? "SMS login is unavailable on this deployment. Please try again later."
+              : response.status >= 500
+                ? "The SMS service is temporarily unavailable. Please try again in a moment."
+                : "We could not send the OTP."),
+        );
         return;
       }
       setOtpSent(true);
       setOtpCooldown(60);
       setAuthMessage("OTP sent successfully by SMS");
     } catch {
-      setAuthMessage("Please try again");
+      setAuthMessage("Could not connect to the SMS service. Check your connection and try again.");
     } finally {
       setAuthLoading(false);
     }
@@ -1000,6 +1085,8 @@ export default function Home() {
       return;
     }
     setCartOpen(false);
+    setFulfillmentMethod("delivery");
+    setSelectedPickupHubId("");
     setCheckoutOpen(true);
   };
   const openOrders = () => {
@@ -1061,6 +1148,8 @@ export default function Home() {
       setCart({});
       setCartVariants({});
       setCheckoutOpen(false);
+      setFulfillmentMethod("delivery");
+      setSelectedPickupHubId("");
       setIsPaying(false);
       announce(`${existingPayment.id} was already confirmed`);
       return;
@@ -1075,6 +1164,8 @@ export default function Home() {
     setCart({});
     setCartVariants({});
     setCheckoutOpen(false);
+    setFulfillmentMethod("delivery");
+    setSelectedPickupHubId("");
     setCheckoutForm({ name: "", phone: "", email: "", address: "" });
     setCouponInput("");
     setAppliedCoupon(null);
@@ -1157,7 +1248,11 @@ export default function Home() {
     const digits = checkoutForm.phone.replace(/\D/g, "");
     if (!name) return announce("Customer name is required");
     if (digits.length < 10) return announce("A valid WhatsApp number is mandatory");
-    if (!checkoutForm.address.trim()) return announce("Delivery address is required");
+    if (fulfillmentMethod === "pickup" && !selectedPickupHub) return announce("Select a pickup hub");
+    if (fulfillmentMethod === "delivery" && !checkoutForm.address.trim()) return announce("Delivery address is required");
+    const orderAddress = fulfillmentMethod === "pickup" && selectedPickupHub
+      ? `Pickup from ${selectedPickupHub.name} · ${selectedPickupHub.place}`
+      : checkoutForm.address.trim();
 
     const orderToken = globalThis.crypto?.randomUUID?.().replace(/-/g, "").slice(-6).toUpperCase() || "000000";
     const orderId = `#FZ-${orderToken}`;
@@ -1171,7 +1266,13 @@ export default function Home() {
       customerName: name,
       phone: checkoutForm.phone.trim(),
       email: checkoutForm.email.trim(),
-      address: checkoutForm.address.trim(),
+      address: orderAddress,
+      fulfillmentMethod,
+      ...(fulfillmentMethod === "pickup" && selectedPickupHub ? {
+        pickupHubId: selectedPickupHub.id,
+        pickupHubName: selectedPickupHub.name,
+        pickupHubPlace: selectedPickupHub.place,
+      } : {}),
       paymentStatus: "pending",
       ...(appliedCoupon ? { coupon: appliedCoupon.code } : {}),
       items: cartItems.map((product) => ({ productId: product.id, name: `${product.billName || product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}${product.size ? ` · Size ${product.size}` : ""}`, quantity: product.quantity, price: formatINR(getCustomerPrice(product)), image: product.image, variantName: product.variant?.name, variantImage: product.variant?.image, size: product.size || undefined })),
@@ -1199,7 +1300,7 @@ export default function Home() {
         description: `Fanzzy order ${orderId}`,
         order_id: razorpayOrder.id,
         prefill: { name, contact: checkoutForm.phone.trim(), ...(checkoutForm.email.trim() ? { email: checkoutForm.email.trim() } : {}) },
-        notes: { address: checkoutForm.address.trim(), fanzzy_order_id: orderId },
+        notes: { address: orderAddress, fanzzy_order_id: orderId },
         theme: { color: "#4b1c2b" },
         handler: (payment) => {
           void (async () => {
@@ -1381,7 +1482,7 @@ export default function Home() {
 
       {searchOpen && <div className="overlay search-overlay" role="dialog" aria-modal="true" aria-label="Search"><div className="overlay-top"><span className="wordmark"><img src={siteAsset("fanzzy-mark.png")} alt="Fanzzy" className="brand-logo" /></span><button onClick={closeSearch}>Close&nbsp; ×</button></div><div className="search-content"><p className="eyebrow">SEARCH THE COLLECTION</p><div className="large-search"><input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Try “gold hoops”" /><span>⌕</span></div>{search && <div className="search-results">{filteredProducts.length ? filteredProducts.map((product) => <button key={product.id} onClick={() => { setQuickProduct(product); closeSearch(); }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(getCustomerPrice(product))}</small></span><b>↗</b></button>) : <p className="muted">No pieces found. Try another search.</p>}</div>}{!search && <div className="search-suggestions"><span>Trending now</span><button onClick={() => setSearch("hoops")}>Hoops</button><button onClick={() => setSearch("pearl")}>Pearls</button><button onClick={() => setSearch("chain")}>Chains</button></div>}</div></div>}
 
-      {orderConfirmation && <div className="drawer-backdrop" onClick={() => setOrderConfirmation(null)}><section className="order-confirmation" role="dialog" aria-modal="true" aria-labelledby="order-confirmation-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close payment confirmation" onClick={() => setOrderConfirmation(null)}>×</button><p className="eyebrow">PAYMENT SUCCESSFUL</p><h2 id="order-confirmation-title">Your payment is complete.</h2><p>We received <strong>{orderConfirmation.total}</strong> for order <strong>{orderConfirmation.id}</strong>. Your order has been confirmed.</p>{orderConfirmation.razorpayPaymentId && <p className="payment-reference">Payment ID: {orderConfirmation.razorpayPaymentId}</p>}<div className="confirmation-actions"><button className="button button-dark" onClick={() => downloadBill(orderConfirmation)}>Download bill <span>↗</span></button><button className="save-text" onClick={() => { setOrderConfirmation(null); setOrdersOpen(true); }}>View my orders</button></div></section></div>}
+      {orderConfirmation && <div className="drawer-backdrop" onClick={() => setOrderConfirmation(null)}><section className="order-confirmation" role="dialog" aria-modal="true" aria-labelledby="order-confirmation-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close payment confirmation" onClick={() => setOrderConfirmation(null)}>×</button><p className="eyebrow">PAYMENT SUCCESSFUL</p><h2 id="order-confirmation-title">Your payment is complete.</h2><p>We received <strong>{orderConfirmation.total}</strong> for order <strong>{orderConfirmation.id}</strong>. Your order has been confirmed.</p>{orderConfirmation.fulfillmentMethod === "pickup" && <p className="pickup-confirmation"><strong>Pickup from {orderConfirmation.pickupHubName || "hub"}</strong><br />{orderConfirmation.pickupHubPlace || "Pickup place saved with your order."}<br /><small>No delivery charges.</small></p>}{orderConfirmation.razorpayPaymentId && <p className="payment-reference">Payment ID: {orderConfirmation.razorpayPaymentId}</p>}<div className="confirmation-actions"><button className="button button-dark" onClick={() => downloadBill(orderConfirmation)}>Download bill <span>↗</span></button><button className="save-text" onClick={() => { setOrderConfirmation(null); setOrdersOpen(true); }}>View my orders</button></div></section></div>}
 
       {savedOpen && <div className="drawer-backdrop" onClick={() => setSavedOpen(false)}><aside className="orders-drawer saved-drawer" role="dialog" aria-modal="true" aria-labelledby="saved-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR EDIT</p><h2 id="saved-title">Saved pieces</h2></div><button aria-label="Close saved pieces" onClick={() => setSavedOpen(false)}>×</button></div>{wishlist.length ? <div className="saved-list">{wishlist.map((productId) => { const product = products.find((item) => item.id === productId); return product ? <article className="saved-card" key={product.id}><button className="saved-product" onClick={() => { setQuickProduct(product); setSavedOpen(false); }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(getCustomerPrice(product))}</small></span><b>↗</b></button><div className="saved-card-actions"><button className="module-secondary" onClick={() => { addToCart(product); setSavedOpen(false); }}>Add to cart</button><button className="saved-remove" onClick={() => toggleWishlist(product.id)}>Remove</button></div></article> : null; })}</div> : <div className="orders-empty saved-empty"><div>♡</div><h3>Your edit is waiting.</h3><p>Tap the heart on any piece to keep it close while you decide.</p><button className="button button-dark" onClick={() => { setSavedOpen(false); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}>Explore pieces <span>↗</span></button></div>}</aside></div>}
 
@@ -1393,7 +1494,7 @@ export default function Home() {
 
       {authOpen && <div className="drawer-backdrop auth-backdrop" onClick={closeAuth}><section className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close sign in" onClick={closeAuth}>×</button><p className="eyebrow">SECURE MOBILE LOGIN</p><h2 id="auth-title">Continue with your mobile number.</h2><p className="auth-intro">Enter your mobile number and we’ll send a one-time SMS code. No password is required.</p><div className="otp-auth-form"><label>Mobile number<input type="tel" value={authPhone} onChange={(event) => { setAuthPhone(event.target.value); setAuthOtp(""); setOtpSent(false); setOtpCooldown(0); }} placeholder="+91 98765 43210" inputMode="tel" autoComplete="tel" disabled={authLoading} /></label>{otpSent && <label>6-digit SMS code<input value={authOtp} onChange={(event) => setAuthOtp(event.target.value.replace(/\D/g, "").slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" maxLength={6} placeholder="Enter 6-digit code" disabled={authLoading} onKeyDown={(event) => { if (event.key === "Enter") void verifySmsOtp(); }} /></label>}<button className="google-sign-in" type="button" onClick={() => void (otpSent ? verifySmsOtp() : sendSmsOtp())} disabled={authLoading}><span className="email-otp-mark" aria-hidden="true">✦</span>{authLoading ? "Please wait…" : otpSent ? "Verify code" : "Send SMS code"}<span aria-hidden="true">↗</span></button>{otpSent && <div className="otp-fallback-actions"><button className="auth-resend" type="button" onClick={() => void sendSmsOtp()} disabled={authLoading || otpCooldown > 0}>{otpCooldown > 0 ? `Resend OTP in ${otpCooldown}s` : "Resend OTP"}</button></div>}</div>{authMessage && <p className="auth-message" role="alert">{authMessage}</p>}<p className="auth-note">Your orders and cart are saved to this verified mobile number.</p></section></div>}
 
-      {checkoutOpen && <div className="drawer-backdrop checkout-backdrop" onClick={() => setCheckoutOpen(false)}><section className="checkout-modal" role="dialog" aria-modal="true" aria-labelledby="checkout-title" onClick={(event) => event.stopPropagation()} onFocusCapture={(event) => { if (event.target instanceof HTMLInputElement) requestAnimationFrame(() => event.target.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" })); }}><div className="drawer-header"><div><p className="eyebrow">CHECKOUT</p><h2 id="checkout-title">Complete your order</h2></div><button aria-label="Close checkout" onClick={() => setCheckoutOpen(false)}>×</button></div><p className="checkout-intro">We’ll use your WhatsApp number to confirm your order and delivery updates.</p><div className="checkout-grid"><label>Customer name<input value={checkoutForm.name} onChange={(event) => setCheckoutForm((current) => ({ ...current, name: event.target.value }))} placeholder="Your full name" required /></label><label>WhatsApp number <span className="required-mark">Required</span><input type="tel" value={checkoutForm.phone} onChange={(event) => setCheckoutForm((current) => ({ ...current, phone: event.target.value }))} placeholder="+91 98765 43210" required /></label><label>Email address <span className="optional-mark">Optional</span><input type="email" value={checkoutForm.email} onChange={(event) => setCheckoutForm((current) => ({ ...current, email: event.target.value }))} placeholder="you@example.com" /></label><label className="checkout-wide">Delivery address<input value={checkoutForm.address} onChange={(event) => setCheckoutForm((current) => ({ ...current, address: event.target.value }))} placeholder="House number, street, city, pincode" required /></label><div className="checkout-coupon checkout-wide"><label htmlFor="checkout-coupon-code">Coupon code <span className="optional-mark">Optional</span></label><div className="coupon-entry"><input id="checkout-coupon-code" value={couponInput} onChange={(event) => { setCouponInput(event.target.value.toUpperCase()); setAppliedCoupon(null); }} placeholder="Enter coupon code" autoCapitalize="characters" /><button className="button button-light" type="button" onClick={applyCoupon}>Apply</button></div>{appliedCoupon && <p className="coupon-success">{appliedCoupon.code} applied · {appliedCoupon.discount} off</p>}</div></div>{bogoDiscount > 0 && <div className="checkout-total coupon-total"><span>{bogoOfferLabel} discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="checkout-total coupon-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div className="checkout-total"><span>Delivery</span><strong>{deliveryTotal > 0 ? formatINR(deliveryTotal) : "Free"}</strong></div><div className="checkout-total"><span>Order total</span><strong>{formatINR(orderTotal)}</strong></div><div className="checkout-actions"><button className="button button-dark" onClick={submitCheckout}>Place order <span>↗</span></button><button className="save-text" onClick={() => setCheckoutOpen(false)}>Back to cart</button></div></section></div>}
+      {checkoutOpen && <div className="drawer-backdrop checkout-backdrop" onClick={() => setCheckoutOpen(false)}><section className="checkout-modal" role="dialog" aria-modal="true" aria-labelledby="checkout-title" onClick={(event) => event.stopPropagation()} onFocusCapture={(event) => { if (event.target instanceof HTMLInputElement) requestAnimationFrame(() => event.target.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" })); }}><div className="drawer-header"><div><p className="eyebrow">CHECKOUT</p><h2 id="checkout-title">Complete your order</h2></div><button aria-label="Close checkout" onClick={() => setCheckoutOpen(false)}>×</button></div><p className="checkout-intro">We’ll use your WhatsApp number to confirm your order and delivery updates.</p><div className="checkout-grid"><label>Customer name<input value={checkoutForm.name} onChange={(event) => setCheckoutForm((current) => ({ ...current, name: event.target.value }))} placeholder="Your full name" required /></label><label>WhatsApp number <span className="required-mark">Required</span><input type="tel" value={checkoutForm.phone} onChange={(event) => setCheckoutForm((current) => ({ ...current, phone: event.target.value }))} placeholder="+91 98765 43210" required /></label><label>Email address <span className="optional-mark">Optional</span><input type="email" value={checkoutForm.email} onChange={(event) => setCheckoutForm((current) => ({ ...current, email: event.target.value }))} placeholder="you@example.com" /></label><div className="checkout-fulfillment checkout-wide"><p className="field-label">How would you like to receive your order?</p><div className="fulfillment-options"><label><input type="radio" name="fulfillment-method" checked={fulfillmentMethod === "delivery"} onChange={() => setFulfillmentMethod("delivery")} /> <span>Home delivery<small>Delivery charges apply as configured.</small></span></label><label className={!pickupHubs.length ? "disabled" : ""}><input type="radio" name="fulfillment-method" checked={fulfillmentMethod === "pickup"} onChange={() => { setFulfillmentMethod("pickup"); if (!selectedPickupHubId && pickupHubs[0]) setSelectedPickupHubId(pickupHubs[0].id); }} disabled={!pickupHubs.length} /> <span>Pick up from a hub<small>{pickupHubs.length ? "No delivery charges." : "Add a hub in Admin → Hub to enable pickup."}</small></span></label></div></div>{fulfillmentMethod === "pickup" && pickupHubs.length > 0 && <label className="checkout-wide pickup-hub-select">Pickup hub<select value={selectedPickupHubId} onChange={(event) => setSelectedPickupHubId(event.target.value)}><option value="">Select a pickup hub</option>{pickupHubs.map((hub) => <option key={hub.id} value={hub.id}>{hub.name} · {hub.place}</option>)}</select><small className="pickup-hub-details">{selectedPickupHub ? `${selectedPickupHub.name} · ${selectedPickupHub.place}` : "Choose where you will collect your order."}</small></label>}{fulfillmentMethod === "delivery" && <label className="checkout-wide">Delivery address<input value={checkoutForm.address} onChange={(event) => setCheckoutForm((current) => ({ ...current, address: event.target.value }))} placeholder="House number, street, city, pincode" required /></label>}<div className="checkout-coupon checkout-wide"><label htmlFor="checkout-coupon-code">Coupon code <span className="optional-mark">Optional</span></label><div className="coupon-entry"><input id="checkout-coupon-code" value={couponInput} onChange={(event) => { setCouponInput(event.target.value.toUpperCase()); setAppliedCoupon(null); }} placeholder="Enter coupon code" autoCapitalize="characters" /><button className="button button-light" type="button" onClick={applyCoupon}>Apply</button></div>{appliedCoupon && <p className="coupon-success">{appliedCoupon.code} applied · {appliedCoupon.discount} off</p>}</div></div>{bogoDiscount > 0 && <div className="checkout-total coupon-total"><span>{bogoOfferLabel} discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="checkout-total coupon-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div className="checkout-total"><span>{fulfillmentMethod === "pickup" ? "Pickup" : "Delivery"}</span><strong>{fulfillmentMethod === "pickup" ? "Free" : deliveryTotal > 0 ? formatINR(deliveryTotal) : "Free"}</strong></div><div className="checkout-total"><span>Order total</span><strong>{formatINR(orderTotal)}</strong></div><div className="checkout-actions"><button className="button button-dark" onClick={submitCheckout}>Place order <span>↗</span></button><button className="save-text" onClick={() => setCheckoutOpen(false)}>Back to cart</button></div></section></div>}
 
       {quickProduct && <div className="drawer-backdrop" onClick={() => setQuickProduct(null)}><div className="quick-modal" onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setQuickProduct(null)}>×</button><div className="quick-image" onClick={() => setZoomedImage({ src: selectedVariant?.image || quickProduct.image, alt: selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name, adjustments: selectedVariant?.adjustments || quickProduct.imageAdjustments })} title="Click to zoom"><img src={selectedVariant?.image || quickProduct.image} alt={selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name} style={imageAdjustmentStyle(selectedVariant?.adjustments || quickProduct.imageAdjustments)} /></div><div className="quick-copy"><p className="eyebrow">{quickProduct.category}</p><h2>{quickProduct.name}</h2><div className="price-row"><span>{formatINR(getCustomerPrice(quickProduct))}</span><del>{formatINR(getComparePrice(quickProduct))}</del></div>{quickProduct.variants?.length ? <div className="variant-picker"><span>Choose colour / series / model</span><div>{quickProduct.variants.map((variant, index) => { const variantStock = getVariantStock(quickProduct, variant); return <button key={`${quickProduct.id}-${variant.name || index}`} disabled={variantStock <= 0} className={`${selectedVariant?.name === variant.name && selectedVariant?.image === variant.image ? "active" : ""} ${variantStock <= 0 ? "sold-out" : ""}`} onClick={() => setSelectedVariant(variant)}><img src={variant.image || quickProduct.image} alt="" style={imageAdjustmentStyle(variant.adjustments)} /><span>{variant.name || `Option ${index + 1}`} · {variantStock > 0 ? `${variantStock} available` : "Sold out"}</span></button>; })}</div></div> : null}{quickProduct.sizes?.length ? <div className="size-picker"><span>Choose size</span><div>{quickProduct.sizes.map((size) => { const stock = getSelectionStock(quickProduct, selectedVariant, size); return <button type="button" key={size} disabled={stock <= 0} className={`${selectedSize === size ? "active" : ""} ${stock <= 0 ? "sold-out" : ""}`} onClick={() => setSelectedSize(size)}>Size {size} · {stock > 0 ? `${stock} available` : "Sold out"}</button>; })}</div></div> : null}<p>Designed to become part of your everyday ritual. Hand-finished in small batches with a soft, lasting glow.</p><div className="quick-actions"><button className="button button-dark" disabled={selectedVariantStock <= 0} onClick={() => { addToCart(quickProduct, selectedVariant, selectedSize); if (selectedVariantStock > 0) setQuickProduct(null); }}>{selectedVariantStock <= 0 ? "Sold out" : <>Add selected item to cart <span>↗</span></>}</button><button className="save-text" onClick={() => toggleWishlist(quickProduct.id)}>{wishlist.includes(quickProduct.id) ? "♥ Saved" : "♡ Save for later"}</button></div></div></div></div>}
 

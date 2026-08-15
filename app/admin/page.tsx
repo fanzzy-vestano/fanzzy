@@ -87,6 +87,7 @@ type AdminPermission =
   | "Marketing"
   | "Homepage"
   | "Delivery charge"
+  | "Hub"
   | "Reports"
   | "Announcement"
   | "Settings";
@@ -106,6 +107,7 @@ const allAdminPermissions: AdminPermission[] = [
   "Marketing",
   "Homepage",
   "Delivery charge",
+  "Hub",
   "Reports",
   "Announcement",
   "Settings",
@@ -130,6 +132,25 @@ const defaultCategoryImages: Record<string, string> = {};
 const defaultHeroSlides: string[] = [];
 const defaultHeroSlideDuration = 5.2;
 const defaultDeliveryCharge = { enabled: false, amount: 99, freeAboveEnabled: false, freeAbove: 999 };
+type PickupHub = { id: string; name: string; place: string };
+const defaultPickupHubs: PickupHub[] = [];
+const parseAdminPickupHubs = (value: string | null | undefined): PickupHub[] => {
+  if (!value) return defaultPickupHubs;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return defaultPickupHubs;
+    return parsed
+      .filter((hub): hub is Partial<PickupHub> => Boolean(hub && typeof hub === "object"))
+      .map((hub, index) => ({
+        id: typeof hub.id === "string" && hub.id ? hub.id : `hub-${index + 1}`,
+        name: typeof hub.name === "string" ? hub.name.trim() : "",
+        place: typeof hub.place === "string" ? hub.place.trim() : "",
+      }))
+      .filter((hub) => hub.name && hub.place);
+  } catch {
+    return defaultPickupHubs;
+  }
+};
 const formatAdminCurrency = (value: number) => `₹${Math.max(0, Math.round(value)).toLocaleString("en-IN")}`;
 const defaultMarketingRecords: MarketingRecord[] = [];
 const defaultImageAdjustments: ImageAdjustments = { zoom: 1, x: 0, y: 0, rotate: 0 };
@@ -262,6 +283,10 @@ type OrderRecord = {
   phone: string;
   email?: string;
   address?: string;
+  fulfillmentMethod?: "delivery" | "pickup";
+  pickupHubId?: string;
+  pickupHubName?: string;
+  pickupHubPlace?: string;
   coupon?: string;
   paymentStatus?: "pending" | "paid";
   razorpayOrderId?: string;
@@ -520,9 +545,25 @@ const menu = [
   { label: "Marketing", icon: "◈" },
   { label: "Homepage", icon: "⌂" },
   { label: "Delivery charge", icon: "₹" },
+  { label: "Hub", icon: "⌖" },
   { label: "Reports", icon: "▥" },
   { label: "Announcement", icon: "▤" },
 ];
+
+type AdminAuthResponse = { authenticated?: boolean; error?: string };
+const readAdminAuthResponse = async (response: Response): Promise<AdminAuthResponse> => {
+  const raw = await response.text();
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as AdminAuthResponse;
+  } catch {
+    return {};
+  }
+};
+const adminApiUnavailableMessage = (status: number) =>
+  status === 404 || status === 405
+    ? "Admin login API is unavailable. Run the app locally with pnpm dev."
+    : "Could not connect to admin login. Check that the local server is running.";
 
 function AdminLoginGate() {
   const [checked, setChecked] = useState(false);
@@ -534,8 +575,15 @@ function AdminLoginGate() {
 
   useEffect(() => {
     void fetch("/api/admin-auth", { cache: "no-store" })
-      .then((response) => response.json() as Promise<{ authenticated?: boolean }>)
-      .then((result) => setAuthenticated(Boolean(result.authenticated)))
+      .then(async (response) => {
+        const result = await readAdminAuthResponse(response);
+        if (!response.ok) {
+          setError(adminApiUnavailableMessage(response.status));
+          return;
+        }
+        setAuthenticated(Boolean(result.authenticated));
+      })
+      .catch(() => setError("Could not connect to admin login. Check that the local server is running."))
       .finally(() => setChecked(true));
   }, []);
 
@@ -545,11 +593,11 @@ function AdminLoginGate() {
     setError("");
     try {
       const response = await fetch("/api/admin-auth", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email, password }) });
-      const result = await response.json() as { authenticated?: boolean; error?: string };
-      if (!response.ok) { setError(result.error || "Could not sign in."); return; }
+      const result = await readAdminAuthResponse(response);
+      if (!response.ok) { setError(result.error || adminApiUnavailableMessage(response.status)); return; }
       setAuthenticated(Boolean(result.authenticated));
       setPassword("");
-    } catch { setError("Could not connect to admin login."); }
+    } catch { setError("Could not connect to admin login. Check that the local server is running."); }
     finally { setLoading(false); }
   };
 
@@ -1286,6 +1334,7 @@ function ModuleWorkspace({
   if (module === "Homepage") return <HomepageWorkspace onNotify={onNotify} />;
   if (module === "Delivery charge")
     return <DeliveryChargeWorkspace onNotify={onNotify} />;
+  if (module === "Hub") return <HubWorkspace onNotify={onNotify} />;
   if (module === "Marketing") return <MarketingWorkspace onNotify={onNotify} />;
   if (module === "Collections")
     return <CollectionsWorkspace onNotify={onNotify} />;
@@ -3320,7 +3369,7 @@ function OrdersWorkspace({
                 {formatOrderDate(selectedOrder.date)} · {selectedOrder.total}
               </p>
               <p className="product-detail-meta">Payment: {selectedOrder.paymentStatus === "paid" ? "Paid" : "Awaiting Razorpay confirmation"}{selectedOrder.razorpayPaymentId ? ` · Razorpay payment ${selectedOrder.razorpayPaymentId}` : selectedOrder.razorpayOrderId ? ` · Razorpay order ${selectedOrder.razorpayOrderId}` : ""}</p>
-              <section className="admin-customer-details"><p className="eyebrow">CUSTOMER DETAILS</p><dl><div><dt>Name</dt><dd>{selectedOrder.customerName || "Not provided"}</dd></div><div><dt>Email</dt><dd>{selectedOrder.email || selectedOrder.userEmail || "Not provided"}</dd></div><div><dt>WhatsApp</dt><dd>{selectedOrder.phone || "Not provided"}</dd></div><div className="admin-customer-address"><dt>Delivery address</dt><dd>{selectedOrder.address || "Not provided"}</dd></div>{selectedOrder.userId && <div className="admin-customer-account"><dt>Account ID</dt><dd>{selectedOrder.userId}</dd></div>}</dl>{selectedOrder.razorpayPaymentId && <button className="module-secondary admin-restore-payment-details" type="button" onClick={() => void restoreOrderDetailsFromRazorpay()}>Restore delivery details from Razorpay</button>}</section>
+              <section className="admin-customer-details"><p className="eyebrow">CUSTOMER DETAILS</p><dl><div><dt>Name</dt><dd>{selectedOrder.customerName || "Not provided"}</dd></div><div><dt>Email</dt><dd>{selectedOrder.email || selectedOrder.userEmail || "Not provided"}</dd></div><div><dt>WhatsApp</dt><dd>{selectedOrder.phone || "Not provided"}</dd></div><div><dt>Fulfilment</dt><dd>{selectedOrder.fulfillmentMethod === "pickup" ? `Pickup from ${selectedOrder.pickupHubName || "hub"}` : "Delivery"}</dd></div><div className="admin-customer-address"><dt>{selectedOrder.fulfillmentMethod === "pickup" ? "Pickup hub / place" : "Delivery address"}</dt><dd>{selectedOrder.fulfillmentMethod === "pickup" ? `${selectedOrder.pickupHubName || "Hub"} · ${selectedOrder.pickupHubPlace || selectedOrder.address || "Place not saved"}` : selectedOrder.address || "Not provided"}</dd></div>{selectedOrder.userId && <div className="admin-customer-account"><dt>Account ID</dt><dd>{selectedOrder.userId}</dd></div>}</dl>{selectedOrder.razorpayPaymentId && <button className="module-secondary admin-restore-payment-details" type="button" onClick={() => void restoreOrderDetailsFromRazorpay()}>Restore delivery details from Razorpay</button>}</section>
               {selectedOrder.items?.length ? <section className="admin-order-items"><p className="eyebrow">ITEMS IN THIS ORDER</p><div>{selectedOrder.items.map((item) => { const product = getOrderedProduct(item); const size = item.size || item.name.match(/(?:^| · )Size (.+)$/i)?.[1] || ""; const variant = item.variantName || (item.name.includes(" · ") ? item.name.split(" · ").slice(1).filter((part) => !/^Size /i.test(part)).join(" · ") : ""); const selectedVariant = variant ? product?.variants.find((candidate) => candidate.name.trim().toLowerCase() === variant.trim().toLowerCase()) : undefined; const displayImage = item.variantImage || selectedVariant?.image || item.image || product?.image; return <article key={`${selectedOrder.id}-${item.name}`}><>{displayImage ? <img src={displayImage} alt={variant ? `${item.name} variant` : ""} /> : <span className="admin-order-item-placeholder" aria-hidden="true">✦</span>}</><span><strong>{item.name}</strong>{product ? <><small>{product.category} · SKU {product.sku}</small><small>Current stock: {product.stock} · {product.status}</small></> : <small>Product no longer in the catalog</small>}{variant && <small>Selected variant: {variant}{displayImage ? " · Variant image shown" : ""}</small>}{size && <small>Selected size: {size}</small>}<em>Quantity ordered: {item.quantity}</em></span><b>{item.price}</b></article>; })}</div></section> : <section className="admin-order-items admin-order-item-repair"><p className="eyebrow">ADD MISSING ORDER DETAILS</p><p>This older paid order has no saved product information. Select the product and variant to restore its order record.</p><div className="admin-order-item-repair-fields"><label>Product<select value={orderItemDraft.productId} onChange={(event) => { const product = catalogProducts.find((candidate) => candidate.id === event.target.value); setOrderItemDraft({ productId: event.target.value, variantName: "", quantity: "1", price: product ? `₹${product.price.toLocaleString("en-IN")}` : "" }); }}><option value="">Select product</option>{catalogProducts.map((product) => <option key={product.id} value={product.id}>{product.name} · {product.sku}</option>)}</select></label>{draftProduct?.variants.length ? <label>Variant<select value={orderItemDraft.variantName} onChange={(event) => setOrderItemDraft((current) => ({ ...current, variantName: event.target.value }))}><option value="">Select variant</option>{draftProduct.variants.map((variant, index) => <option key={`${variant.name}-${index}`} value={variant.name}>{variant.name || `Option ${index + 1}`}</option>)}</select></label> : null}<label>Quantity<input type="number" min="1" value={orderItemDraft.quantity} onChange={(event) => setOrderItemDraft((current) => ({ ...current, quantity: event.target.value }))} /></label><label>Price<input value={orderItemDraft.price} onChange={(event) => setOrderItemDraft((current) => ({ ...current, price: event.target.value }))} placeholder="₹0" /></label></div>{draftProduct && <div className="admin-order-item-repair-preview">{orderItemDraft.variantName && draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image ? <img src={draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image} alt="Selected variant preview" /> : draftProduct.image ? <img src={draftProduct.image} alt="Selected product preview" /> : null}<span>{orderItemDraft.variantName ? `Selected variant: ${orderItemDraft.variantName}` : "Select a variant if applicable"}</span></div>}<button className="module-primary" type="button" onClick={addMissingOrderItem}>Add to this order</button></section>}
               <div className="order-status-editor">
                 <label>
@@ -3373,6 +3422,110 @@ function OrdersWorkspace({
           </div>
         </div>
       )}
+    </section>
+  );
+}
+
+function HubWorkspace({
+  onNotify,
+}: {
+  onNotify: (message: string) => void;
+}) {
+  const [hubs, setHubs] = useState<PickupHub[]>(defaultPickupHubs);
+  const [name, setName] = useState("");
+  const [place, setPlace] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const loadHubs = async () => {
+      const remote = await fetchStoreSetting("pickupHubs");
+      const remoteHubs = remote.value ? parseAdminPickupHubs(remote.value) : [];
+      const localHubs = parseAdminPickupHubs(window.localStorage.getItem("fanzzy-pickup-hubs"));
+      const storedHubs = remoteHubs.length ? remoteHubs : localHubs;
+      if (active && storedHubs.length) setHubs(storedHubs);
+    };
+    void loadHubs();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const persistHubs = async (next: PickupHub[]) => {
+    const remoteError = await saveStoreSetting("pickupHubs", JSON.stringify(next));
+    window.localStorage.setItem("fanzzy-pickup-hubs", JSON.stringify(next));
+    window.dispatchEvent(new Event("fanzzy-pickup-hubs-updated"));
+    onNotify(remoteError ? "Hubs saved locally; Supabase needs its tables" : "Pickup hubs updated on storefront");
+  };
+
+  const saveHub = () => {
+    const trimmedName = name.trim();
+    const trimmedPlace = place.trim();
+    if (!trimmedName || !trimmedPlace) {
+      onNotify("Enter the hub name and place");
+      return;
+    }
+    const hub: PickupHub = {
+      id: editingId || `hub-${Date.now()}`,
+      name: trimmedName,
+      place: trimmedPlace,
+    };
+    const next = editingId ? hubs.map((item) => item.id === editingId ? hub : item) : [...hubs, hub];
+    setHubs(next);
+    setName("");
+    setPlace("");
+    setEditingId(null);
+    void persistHubs(next);
+  };
+
+  const editHub = (hub: PickupHub) => {
+    setEditingId(hub.id);
+    setName(hub.name);
+    setPlace(hub.place);
+  };
+
+  const removeHub = (hub: PickupHub) => {
+    if (!window.confirm(`Remove ${hub.name} as a pickup hub?`)) return;
+    const next = hubs.filter((item) => item.id !== hub.id);
+    setHubs(next);
+    if (editingId === hub.id) {
+      setEditingId(null);
+      setName("");
+      setPlace("");
+    }
+    void persistHubs(next);
+  };
+
+  return (
+    <section className="panel module-workspace hub-workspace">
+      <div className="module-workspace-head">
+        <div>
+          <p className="eyebrow">ORDER FULFILMENT</p>
+          <h2>Pickup hubs</h2>
+          <p>Manage the locations customers can choose for free order pickup.</p>
+        </div>
+      </div>
+      <div className="hub-form-card">
+        <p className="eyebrow">{editingId ? "EDIT PICKUP HUB" : "ADD PICKUP HUB"}</p>
+        <div className="hub-form">
+          <label>Hub name<input value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Fanzzy Koramangala Hub" /></label>
+          <label>Place / address<input value={place} onChange={(event) => setPlace(event.target.value)} placeholder="e.g. 12th Main, Bengaluru" /></label>
+          <div className="hub-form-actions">
+            <button className="module-primary" type="button" onClick={saveHub}>{editingId ? "Save hub" : "Add hub"}</button>
+            {editingId && <button className="module-secondary" type="button" onClick={() => { setEditingId(null); setName(""); setPlace(""); }}>Cancel</button>}
+          </div>
+        </div>
+      </div>
+      <div className="hub-list">
+        {hubs.map((hub) => (
+          <article className="hub-card" key={hub.id}>
+            <div><p className="eyebrow">PICKUP LOCATION</p><h3>{hub.name}</h3><p>{hub.place}</p></div>
+            <div className="hub-card-actions"><button className="module-secondary" type="button" onClick={() => editHub(hub)}>Edit</button><button className="module-secondary delete-action" type="button" onClick={() => removeHub(hub)}>Remove</button></div>
+          </article>
+        ))}
+      </div>
+      {!hubs.length && <div className="hub-empty">No pickup hubs added yet. Add one above to make pickup available at checkout.</div>}
+      <div className="module-summary"><span><i className="status-light" />Pickup option</span><span>{hubs.length ? `${hubs.length} hub${hubs.length === 1 ? "" : "s"} available` : "Not available"}</span></div>
     </section>
   );
 }
@@ -4182,6 +4335,9 @@ function ProductLibraryWorkspace({
   );
   const [isAdding, setIsAdding] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
+  const [productSearch, setProductSearch] = useState("");
+  const [productCategoryFilter, setProductCategoryFilter] = useState("all");
+  const [productVariantFilter, setProductVariantFilter] = useState("all");
   const [editValues, setEditValues] = useState({
     name: "",
     category: "",
@@ -4478,6 +4634,32 @@ function ProductLibraryWorkspace({
       active = false;
     };
   }, []);
+  const productCategories = useMemo(
+    () => Array.from(new Set(products.map((product) => product.category.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
+    [products],
+  );
+  const productVariants = useMemo(
+    () => Array.from(new Set(products.flatMap((product) => product.variants?.map((variant) => variant.name.trim()).filter(Boolean) || []))).sort((a, b) => a.localeCompare(b)),
+    [products],
+  );
+  const filteredProducts = useMemo(() => {
+    const query = productSearch.trim().toLowerCase();
+    return products.filter((product) => {
+      const variants = product.variants || [];
+      const matchesSearch = !query || [
+        product.name,
+        product.sku,
+        product.barcode,
+        product.category,
+        ...(product.sizes || []),
+        ...variants.map((variant) => variant.name),
+      ].some((value) => String(value || "").toLowerCase().includes(query));
+      const matchesCategory = productCategoryFilter === "all" || product.category.trim().toLowerCase() === productCategoryFilter.trim().toLowerCase();
+      const matchesVariant = productVariantFilter === "all"
+        || (productVariantFilter === "with-variants" ? variants.length > 0 : variants.some((variant) => variant.name.trim().toLowerCase() === productVariantFilter.trim().toLowerCase()));
+      return matchesSearch && matchesCategory && matchesVariant;
+    });
+  }, [productCategoryFilter, productSearch, productVariantFilter, products]);
   const updateField = (field: keyof typeof newProduct, value: string) =>
     setNewProduct((current) => {
       const next = {
@@ -5362,10 +5544,49 @@ function ProductLibraryWorkspace({
           <i className="status-light" />
           Live workspace
         </span>
-        <span>{products.length} active records</span>
+        <span>{filteredProducts.length} of {products.length} active records</span>
+      </div>
+      <div className="product-library-filters" role="search" aria-label="Filter products">
+        <label className="product-library-search">
+          <span aria-hidden="true">⌕</span>
+          <input
+            value={productSearch}
+            onChange={(event) => setProductSearch(event.target.value)}
+            placeholder="Search products, SKU, barcode or variant"
+            aria-label="Search products"
+          />
+        </label>
+        <label>
+          <span>Category</span>
+          <select value={productCategoryFilter} onChange={(event) => setProductCategoryFilter(event.target.value)} aria-label="Filter by category">
+            <option value="all">All categories</option>
+            {productCategories.map((category) => <option key={category} value={category}>{category}</option>)}
+          </select>
+        </label>
+        <label>
+          <span>Variant</span>
+          <select value={productVariantFilter} onChange={(event) => setProductVariantFilter(event.target.value)} aria-label="Filter by variant">
+            <option value="all">All variants</option>
+            <option value="with-variants">Variant items only</option>
+            {productVariants.map((variant) => <option key={variant} value={variant}>{variant}</option>)}
+          </select>
+        </label>
+        {(productSearch || productCategoryFilter !== "all" || productVariantFilter !== "all") && (
+          <button
+            className="product-library-filter-reset"
+            type="button"
+            onClick={() => {
+              setProductSearch("");
+              setProductCategoryFilter("all");
+              setProductVariantFilter("all");
+            }}
+          >
+            Clear
+          </button>
+        )}
       </div>
       <div className="module-list">
-        {products.map((product, index) => (
+        {filteredProducts.map((product, index) => (
           <div
             key={product.sku}
             className={`product-list-row ${selectedProduct?.sku === product.sku ? "selected" : ""}`}
@@ -5422,6 +5643,12 @@ function ProductLibraryWorkspace({
             </div>
           </div>
         ))}
+        {filteredProducts.length === 0 && (
+          <div className="product-library-empty">
+            <strong>No products match these filters</strong>
+            <span>Try another search, category, or variant.</span>
+          </div>
+        )}
       </div>
       {selectedProduct && isEditing && (
         <div className="product-form-card">

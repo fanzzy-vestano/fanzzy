@@ -38,7 +38,8 @@ export async function POST(request: Request) {
       senderId: approvedSenderId,
     });
     const response = await fetch(endpoint, {
-      method: "GET",
+      method: "POST",
+      signal: AbortSignal.timeout(15_000),
     });
     const raw = await response.text();
     let result: Record<string, unknown> = {};

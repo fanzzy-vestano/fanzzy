@@ -335,6 +335,100 @@
   background: #c2b5ae;
 }
 
+.hub-form-card {
+  background: #f5eee8;
+  border: 1px solid #e7dcd2;
+  margin-top: 24px;
+  padding: 22px;
+}
+
+.hub-form-card > .eyebrow {
+  margin-bottom: 14px;
+}
+
+.hub-form {
+  align-items: end;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: 1fr 1.4fr auto;
+}
+
+.hub-form label {
+  color: var(--wine);
+  display: flex;
+  flex-direction: column;
+  font-size: 10px;
+  gap: 8px;
+}
+
+.hub-form input {
+  background: #fffaf4;
+  border: 1px solid var(--admin-line);
+  color: var(--admin-ink);
+  font-size: 11px;
+  outline: 0;
+  padding: 12px;
+}
+
+.hub-form input:focus {
+  border-color: var(--wine);
+}
+
+.hub-form-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.hub-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.hub-card {
+  align-items: center;
+  background: #fffaf4;
+  border: 1px solid var(--admin-line);
+  display: flex;
+  gap: 18px;
+  justify-content: space-between;
+  padding: 18px;
+}
+
+.hub-card h3 {
+  color: var(--wine);
+  font-family: var(--serif);
+  font-size: 20px;
+  font-weight: 500;
+  letter-spacing: -.04em;
+  margin: -7px 0 6px;
+}
+
+.hub-card p:not(.eyebrow) {
+  color: var(--admin-muted);
+  font-size: 10px;
+  margin: 0;
+}
+
+.hub-card-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.hub-card-actions .delete-action {
+  color: #a64d4d;
+}
+
+.hub-empty {
+  border: 1px dashed var(--admin-line);
+  color: var(--admin-muted);
+  font-size: 11px;
+  margin-top: 20px;
+  padding: 24px;
+  text-align: center;
+}
+
 .product-image-upload img {
   height: 76px;
   object-fit: cover;
@@ -1348,6 +1442,100 @@
   margin-right: 6px;
 }
 
+.product-library-filters {
+  align-items: end;
+  border-bottom: 1px solid var(--admin-line);
+  display: flex;
+  gap: 12px;
+  margin-top: 20px;
+  padding-bottom: 16px;
+}
+
+.product-library-filters > label {
+  color: var(--admin-muted);
+  display: grid;
+  flex: 0 0 180px;
+  font-family: var(--mono);
+  font-size: 7px;
+  gap: 7px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.product-library-filters input,
+.product-library-filters select {
+  background: #f7f2ed;
+  border: 1px solid var(--admin-line);
+  border-radius: 0;
+  color: var(--admin-ink);
+  font-family: var(--sans);
+  font-size: 10px;
+  min-height: 37px;
+  outline: 0;
+  padding: 0 10px;
+  text-transform: none;
+}
+
+.product-library-filters input:focus,
+.product-library-filters select:focus {
+  border-color: var(--gold);
+}
+
+.product-library-search {
+  align-items: center;
+  display: flex !important;
+  flex: 1 1 auto !important;
+  gap: 8px !important;
+  position: relative;
+}
+
+.product-library-search span {
+  color: var(--wine);
+  font-size: 22px;
+  line-height: 1;
+  position: absolute;
+  left: 10px;
+  top: 30px;
+  transform: translateY(-50%);
+}
+
+.product-library-search input {
+  padding-left: 31px;
+  width: 100%;
+}
+
+.product-library-filter-reset {
+  background: transparent;
+  color: var(--wine);
+  font-family: var(--mono);
+  font-size: 8px;
+  margin-bottom: 11px;
+  padding: 4px 0;
+  text-transform: uppercase;
+}
+
+.product-library-empty {
+  align-items: center;
+  border-bottom: 1px solid #eee9e4;
+  color: var(--admin-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 38px 20px;
+  text-align: center;
+}
+
+.product-library-empty strong {
+  color: var(--wine);
+  font-family: var(--serif);
+  font-size: 18px;
+  font-weight: 500;
+}
+
+.product-library-empty span {
+  font-size: 10px;
+}
+
 .module-list {
   display: grid;
 }
@@ -2127,6 +2315,38 @@
 
   .module-actions {
     width: 100%;
+  }
+
+  .product-library-filters {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .product-library-filters > label {
+    flex-basis: auto;
+  }
+
+  .product-library-filter-reset {
+    align-self: flex-start;
+    margin-bottom: 0;
+  }
+
+  .hub-form {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .hub-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .hub-card-actions {
+    width: 100%;
+  }
+
+  .hub-card-actions button {
+    flex: 1;
   }
 
   .report-period-control,
