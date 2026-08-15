@@ -56,8 +56,7 @@ const requestProvider = async (path: string, method: "GET" | "POST", payload?: R
 };
 
 export const sendTwoFactorOtp = async (phone: string, code: string) => {
-  // Use the approved transactional SMS template. This is the account's
-  // SMS-only login route and does not request OTP voice verification.
+  // Use the approved transactional SMS template for the SMS login route.
   const result = await requestProvider("/ADDON_SERVICES/SEND/TSMS", "POST", {
     From: "FANZZY",
     To: phone,
@@ -66,6 +65,14 @@ export const sendTwoFactorOtp = async (phone: string, code: string) => {
   });
   if (!result.ok || result.status !== "success" || !result.details) {
     throw new TwoFactorSmsError(result.details || "2Factor could not send the SMS code.", "send");
+  }
+  return result.details;
+};
+
+export const sendTwoFactorVoiceOtp = async (phone: string, code: string) => {
+  const result = await requestProvider(`/VOICE/${encodeURIComponent(phone)}/${encodeURIComponent(code)}`, "GET");
+  if (!result.ok || result.status !== "success" || !result.details) {
+    throw new TwoFactorSmsError(result.details || "2Factor could not place the voice OTP call.", "send");
   }
   return result.details;
 };

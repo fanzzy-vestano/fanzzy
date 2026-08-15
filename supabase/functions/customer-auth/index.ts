@@ -121,6 +121,20 @@ const sendOtp = async (phone: string) => {
   return { code, details: providerResult.Details || "sent" };
 };
 
+const sendVoiceOtp = async (phone: string, code: string) => {
+  const apiKey = Deno.env.get("TWO_FACTOR_API_KEY")?.trim() || "";
+  if (!apiKey) throw new Error("Voice OTP service is not configured.");
+  const providerResponse = await fetch(`${TWO_FACTOR_BASE_URL}/${encodeURIComponent(apiKey)}/VOICE/${encodeURIComponent(phone)}/${encodeURIComponent(code)}`, {
+    method: "GET",
+    headers: { accept: "application/json" },
+  });
+  const providerResult = await providerResponse.json() as { Status?: string; Details?: string };
+  if (!providerResponse.ok || String(providerResult.Status || "").toLowerCase() !== "success") {
+    throw new Error(providerResult.Details || "The voice OTP provider could not place the call.");
+  }
+  return providerResult.Details || "sent";
+};
+
 const route = async (request: Request) => {
   const origin = request.headers.get("origin");
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders(origin) });
@@ -141,6 +155,20 @@ const route = async (request: Request) => {
       return response({ sent: true, pendingToken: await createToken({ kind: "pending", phone, code, expiresAt: Date.now() + OTP_EXPIRES_MS }) }, 200, origin);
     } catch (error) {
       return response({ error: error instanceof Error ? error.message : "The SMS service is unavailable." }, 502, origin);
+    }
+  }
+
+  if (action === "send-voice-otp") {
+    const phone = normalizeMobileNumber(body.phone);
+    if (!phone) return response({ error: "Enter a valid 10-digit Indian mobile number" }, 400, origin);
+    const retryAfter = checkRateLimit(sendLimits, clientKey(request, phone), OTP_WINDOW_MS, OTP_MAX_REQUESTS, OTP_RESEND_COOLDOWN_MS);
+    if (retryAfter) return response({ error: `Please wait ${retryAfter} seconds before requesting another OTP.` }, 429, origin);
+    try {
+      const code = String(Math.floor(100000 + crypto.getRandomValues(new Uint32Array(1))[0] % 900000));
+      await sendVoiceOtp(phone, code);
+      return response({ sent: true, channel: "voice", pendingToken: await createToken({ kind: "pending", phone, code, expiresAt: Date.now() + OTP_EXPIRES_MS }) }, 200, origin);
+    } catch (error) {
+      return response({ error: error instanceof Error ? error.message : "The voice OTP service is unavailable." }, 502, origin);
     }
   }
 
