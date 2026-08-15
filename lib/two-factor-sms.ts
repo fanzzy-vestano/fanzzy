@@ -1,5 +1,5 @@
 const TWO_FACTOR_BASE_URL = "https://2factor.in/API/V1";
-const TWO_FACTOR_TEMPLATE_NAME = "Fanzzy Login OTP";
+const TWO_FACTOR_TRANSACTIONAL_TEMPLATE = "Fanzzy Login SMS OTP";
 const TWO_FACTOR_TIMEOUT_MS = 15_000;
 
 type TwoFactorResponse = {
@@ -10,7 +10,7 @@ type TwoFactorResponse = {
 };
 
 export class TwoFactorSmsError extends Error {
-  constructor(message: string, public readonly kind: "send" | "verify" | "network") {
+  constructor(message: string, public readonly kind: "send" | "network") {
     super(message);
     this.name = "TwoFactorSmsError";
   }
@@ -35,14 +35,17 @@ const readProviderResponse = async (response: Response): Promise<TwoFactorRespon
   };
 };
 
-const requestProvider = async (path: string, method: "GET" | "POST"): Promise<TwoFactorResponse> => {
+const requestProvider = async (path: string, method: "GET" | "POST", payload?: Record<string, string>): Promise<TwoFactorResponse> => {
   const apiKey = getApiKey();
   if (!apiKey) throw new TwoFactorSmsError("2Factor SMS login is not configured.", "network");
 
   try {
     const response = await fetch(`${TWO_FACTOR_BASE_URL}/${encodeURIComponent(apiKey)}${path}`, {
       method,
-      headers: { accept: "application/json" },
+      headers: payload
+        ? { accept: "application/json", "content-type": "application/json" }
+        : { accept: "application/json" },
+      body: payload ? JSON.stringify(payload) : undefined,
       signal: AbortSignal.timeout(TWO_FACTOR_TIMEOUT_MS),
     });
     return await readProviderResponse(response);
@@ -52,17 +55,17 @@ const requestProvider = async (path: string, method: "GET" | "POST"): Promise<Tw
   }
 };
 
-export const sendTwoFactorOtp = async (phone: string) => {
-  const result = await requestProvider(`/SMS/${encodeURIComponent(phone)}/AUTOGEN/${encodeURIComponent(TWO_FACTOR_TEMPLATE_NAME)}`, "POST");
+export const sendTwoFactorOtp = async (phone: string, code: string) => {
+  // Use the approved transactional SMS template. This is the account's
+  // SMS-only login route and does not request OTP voice verification.
+  const result = await requestProvider("/ADDON_SERVICES/SEND/TSMS", "POST", {
+    From: "FANZZY",
+    To: phone,
+    TemplateName: TWO_FACTOR_TRANSACTIONAL_TEMPLATE,
+    VAR1: code,
+  });
   if (!result.ok || result.status !== "success" || !result.details) {
     throw new TwoFactorSmsError(result.details || "2Factor could not send the SMS code.", "send");
   }
   return result.details;
 };
-
-export const verifyTwoFactorOtp = async (sessionId: string, code: string) => {
-  const result = await requestProvider(`/SMS/VERIFY/${encodeURIComponent(sessionId)}/${encodeURIComponent(code)}`, "GET");
-  return result;
-};
-
-export const twoFactorTemplateName = TWO_FACTOR_TEMPLATE_NAME;

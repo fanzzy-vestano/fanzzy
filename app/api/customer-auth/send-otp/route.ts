@@ -1,5 +1,6 @@
+import { randomInt } from "node:crypto";
 import { consumeOtpSendRateLimit, createPendingOtpCookie, getTwoFactorApiKey, normalizeMobileNumber, OTP_EXPIRES_MS, OTP_RESEND_COOLDOWN_SECONDS } from "../../../../lib/customer-sms-auth";
-import { sendTwoFactorOtp, TwoFactorSmsError, twoFactorTemplateName } from "../../../../lib/two-factor-sms";
+import { sendTwoFactorOtp, TwoFactorSmsError } from "../../../../lib/two-factor-sms";
 
 const json = (body: Record<string, unknown>, status = 200, headers?: HeadersInit) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
@@ -25,14 +26,14 @@ export async function POST(request: Request) {
   if (!apiKey) return json({ error: "2Factor SMS login is not configured." }, 503);
 
   try {
-    const sessionId = await sendTwoFactorOtp(phone);
+    const code = String(randomInt(100000, 1_000_000));
+    await sendTwoFactorOtp(phone, code);
     console.info("otp.provider.send", {
       provider: "2Factor.in",
       channel: "SMS",
-      template: twoFactorTemplateName,
       status: "success",
     });
-    return json({ sent: true }, 200, { "set-cookie": createPendingOtpCookie({ phone, sessionId, expiresAt: Date.now() + OTP_EXPIRES_MS }) });
+    return json({ sent: true }, 200, { "set-cookie": createPendingOtpCookie({ phone, code, expiresAt: Date.now() + OTP_EXPIRES_MS }) });
   } catch (error) {
     if (error instanceof TwoFactorSmsError && error.kind === "send") {
       return json({ error: error.message }, 502);
