@@ -31,6 +31,7 @@ const corsHeaders = (origin: string | null) => ({
   ].includes(origin) ? origin : "https://fanzzy.in",
   "access-control-allow-headers": "authorization, content-type",
   "access-control-allow-methods": "GET, POST, OPTIONS",
+  "access-control-allow-credentials": "true",
   "access-control-max-age": "86400",
 });
 
