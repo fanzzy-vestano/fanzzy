@@ -1,5 +1,4 @@
 const TWO_FACTOR_BASE_URL = "https://2factor.in/API/V1";
-const TWO_FACTOR_SMS_TEMPLATE = "Fanzzy Login SMS OTP";
 const TWO_FACTOR_TIMEOUT_MS = 15_000;
 
 type TwoFactorResponse = {
@@ -56,12 +55,7 @@ const requestProvider = async (path: string, method: "GET" | "POST", payload?: R
 };
 
 export const sendTwoFactorOtp = async (phone: string, code: string) => {
-  const result = await requestProvider("/ADDON_SERVICES/SEND/TSMS", "POST", {
-    From: "FANZZY",
-    To: phone,
-    TemplateName: TWO_FACTOR_SMS_TEMPLATE,
-    VAR1: code,
-  });
+  const result = await requestProvider(`/SMS/${encodeURIComponent(phone)}/${encodeURIComponent(code)}`, "POST");
   if (!result.ok || result.status !== "success" || !result.details) {
     throw new TwoFactorSmsError(result.details || "2Factor could not send the SMS code.", "send");
   }

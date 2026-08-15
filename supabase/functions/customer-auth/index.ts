@@ -4,7 +4,6 @@ declare const Deno: {
 };
 
 const TWO_FACTOR_BASE_URL = "https://2factor.in/API/V1";
-const TWO_FACTOR_SMS_TEMPLATE = "Fanzzy Login SMS OTP";
 const OTP_EXPIRES_MS = 5 * 60 * 1000;
 const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
 const OTP_WINDOW_MS = 15 * 60 * 1000;
@@ -110,10 +109,9 @@ const sendOtp = async (phone: string) => {
   const apiKey = Deno.env.get("TWO_FACTOR_API_KEY")?.trim() || "";
   if (!apiKey) throw new Error("SMS provider is not configured.");
   const code = String(Math.floor(100000 + crypto.getRandomValues(new Uint32Array(1))[0] % 900000));
-  const providerResponse = await fetch(`${TWO_FACTOR_BASE_URL}/${encodeURIComponent(apiKey)}/ADDON_SERVICES/SEND/TSMS`, {
+  const providerResponse = await fetch(`${TWO_FACTOR_BASE_URL}/${encodeURIComponent(apiKey)}/SMS/${encodeURIComponent(phone)}/${encodeURIComponent(code)}`, {
     method: "POST",
-    headers: { accept: "application/json", "content-type": "application/json" },
-    body: JSON.stringify({ From: "FANZZY", To: phone, TemplateName: TWO_FACTOR_SMS_TEMPLATE, VAR1: code }),
+    headers: { accept: "application/json" },
   });
   const providerResult = await providerResponse.json() as { Status?: string; Details?: string; StatusCode?: string };
   if (!providerResponse.ok || String(providerResult.Status || "").toLowerCase() !== "success") {
