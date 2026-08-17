@@ -1238,8 +1238,8 @@ export default function Home() {
       document.body.scrollTop = savedScrollY;
     };
     restoreScroll();
-    [50, 200, 600].forEach((delay) => window.setTimeout(restoreScroll, delay));
-    window.setTimeout(() => window.sessionStorage.removeItem("fanzzy-overlay-scroll"), 800);
+    [50, 200, 600, 1200, 2500].forEach((delay) => window.setTimeout(restoreScroll, delay));
+    window.setTimeout(() => window.sessionStorage.removeItem("fanzzy-overlay-scroll"), 2800);
   }, []);
 
   useEffect(() => {
