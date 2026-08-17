@@ -11,6 +11,7 @@ const { d1, r2 } = hostingConfig;
 // macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 const defaultCustomerAuthApiUrl = "https://pdrcrkxeyqxqgpwfxqpu.supabase.co/functions/v1/customer-auth";
+const defaultRazorpayApiUrl = "https://fanzzy-razorpay-api.fanzzy.workers.dev";
 
 const localBindingConfig = {
   main: "./worker/index.ts",
@@ -52,6 +53,11 @@ export default defineConfig(async () => {
       "process.env.NEXT_PUBLIC_CUSTOMER_AUTH_API_URL": JSON.stringify(
         process.env.GITHUB_PAGES === "true"
           ? process.env.CUSTOMER_AUTH_API_URL?.trim() || defaultCustomerAuthApiUrl
+          : "",
+      ),
+      "process.env.NEXT_PUBLIC_RAZORPAY_API_URL": JSON.stringify(
+        process.env.GITHUB_PAGES === "true"
+          ? process.env.RAZORPAY_API_URL?.trim() || defaultRazorpayApiUrl
           : "",
       ),
     },

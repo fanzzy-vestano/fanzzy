@@ -1,0 +1,4 @@
+name = "fanzzy-razorpay-api"
+main = "worker/razorpay-api.ts"
+compatibility_date = "2026-08-17"
+workers_dev = true

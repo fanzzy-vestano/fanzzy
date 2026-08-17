@@ -179,6 +179,20 @@ const loadRazorpayCheckout = () => new Promise<new (options: RazorpayCheckoutOpt
   script.onerror = () => reject(new Error("Razorpay checkout could not load"));
   document.body.appendChild(script);
 });
+
+const razorpayApiBaseUrl = (process.env.NEXT_PUBLIC_RAZORPAY_API_URL ?? "").replace(/\/$/, "");
+const razorpayApiUrl = (path: "order" | "verify") => razorpayApiBaseUrl
+  ? `${razorpayApiBaseUrl}/${path}`
+  : `/api/razorpay/${path}`;
+
+const readRazorpayResponse = async <T extends Record<string, unknown>>(response: Response) => {
+  const body = await response.text();
+  try {
+    return JSON.parse(body || "{}") as T;
+  } catch {
+    throw new Error("Payment service is temporarily unavailable. Please try again.");
+  }
+};
 const blockedHeroImage = "photo-1599643478518-a784e5dc4c8f";
 const initialHeroSlides: string[] = [];
 const defaultHeroSlideDuration = 5.2;
@@ -1557,12 +1571,12 @@ export default function Home() {
       // Save before opening Razorpay so a completed payment can always be matched
       // in Admin Orders, even if the customer's browser closes during the callback.
       await persistPendingOrder(pendingOrder);
-      const orderResponse = await fetch("/api/razorpay/order", {
+      const orderResponse = await fetch(razorpayApiUrl("order"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ amount: Math.round(orderTotal * 100), receipt: orderId.replace("#", ""), fanzzyOrderId: orderId }),
       });
-      const razorpayOrder = await orderResponse.json() as { id?: string; amount?: number; currency?: string; keyId?: string; error?: string };
+      const razorpayOrder = await readRazorpayResponse<{ id?: string; amount?: number; currency?: string; keyId?: string; error?: string }>(orderResponse);
       if (!orderResponse.ok || !razorpayOrder.id || !razorpayOrder.keyId) throw new Error(razorpayOrder.error || "Razorpay order creation failed");
       await persistPendingOrder({ ...pendingOrder, razorpayOrderId: razorpayOrder.id });
       const Razorpay = await loadRazorpayCheckout();
@@ -1579,7 +1593,7 @@ export default function Home() {
         handler: (payment) => {
           void (async () => {
             try {
-              const verifyResponse = await fetch("/api/razorpay/verify", {
+              const verifyResponse = await fetch(razorpayApiUrl("verify"), {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -1588,7 +1602,7 @@ export default function Home() {
                   razorpaySignature: payment.razorpay_signature,
                 }),
               });
-              const verification = await verifyResponse.json() as { verified?: boolean; error?: string };
+              const verification = await readRazorpayResponse<{ verified?: boolean; error?: string }>(verifyResponse);
               if (!verifyResponse.ok || !verification.verified) throw new Error(verification.error || "Payment verification failed");
               const paidOrder = { ...pendingOrder, paymentStatus: "paid" as const, razorpayOrderId: payment.razorpay_order_id, razorpayPaymentId: payment.razorpay_payment_id, inventoryAdjusted: true };
               await persistPaidOrder(paidOrder);
