@@ -1,4 +1,4 @@
-const CACHE_NAME = "fanzzy-shell-v1";
+const CACHE_NAME = "fanzzy-shell-v2";
 const APP_SHELL = [
   "/",
   "/manifest.webmanifest",
@@ -31,11 +31,11 @@ self.addEventListener("fetch", (event) => {
         .then((response) => {
           if (response.ok) {
             const copy = response.clone();
-            void caches.open(CACHE_NAME).then((cache) => cache.put("/", copy));
+            void caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
           }
           return response;
         })
-        .catch(() => caches.match("/").then((cached) => cached || Response.error()))
+        .catch(() => caches.match(request).then((cached) => cached || Response.error()))
     );
     return;
   }
