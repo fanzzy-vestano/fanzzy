@@ -193,6 +193,12 @@ const readRazorpayResponse = async <T extends Record<string, unknown>>(response:
     throw new Error("Payment service is temporarily unavailable. Please try again.");
   }
 };
+const overlayHistoryUrl = (layers: string[]) => {
+  const url = new URL(window.location.href);
+  if (layers.length) url.searchParams.set("fanzzy-overlay", layers.join(","));
+  else url.searchParams.delete("fanzzy-overlay");
+  return url.href;
+};
 const blockedHeroImage = "photo-1599643478518-a784e5dc4c8f";
 const initialHeroSlides: string[] = [];
 const defaultHeroSlideDuration = 5.2;
@@ -1213,7 +1219,7 @@ export default function Home() {
         window.history.pushState(
           { ...window.history.state, fanzzyOverlay: activeOverlayLayers[index] },
           "",
-          window.location.href,
+          overlayHistoryUrl(activeOverlayLayers.slice(0, index + 1)),
         );
       }
     } else if (activeOverlayLayers.length < previousLayers.length && currentIsPreviousPrefix) {
@@ -1230,7 +1236,7 @@ export default function Home() {
       window.history.replaceState(
         { ...window.history.state, fanzzyOverlay: activeOverlayLayers.at(-1) },
         "",
-        window.location.href,
+        overlayHistoryUrl(activeOverlayLayers),
       );
     }
 
