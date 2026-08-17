@@ -16,9 +16,19 @@ import {
   saveCatalogProduct,
   saveStoreOrders,
   saveStoreSetting,
+  type ProductVariantType,
   uploadStoreImage,
 } from "../../lib/supabase/catalog";
 import { printOrderBill } from "../../lib/order-bill";
+import {
+  defaultPromotionForm,
+  offerTypeLabel,
+  promotionStorageKey,
+  type PromotionOffer,
+  type PromotionOfferStatus,
+  type PromotionOfferType,
+  type PromotionSelection,
+} from "../../lib/promotional-offers";
 import "../globals.css";
 import "../brand-polish.css";
 import "./admin.css";
@@ -43,11 +53,12 @@ type AdminProduct = {
   sizes?: string[];
   sizeStock?: Record<string, number>;
   variants?: ProductVariant[];
+  variantType?: ProductVariantType;
   imageAdjustments?: ImageAdjustments;
   hoverImageAdjustments?: ImageAdjustments;
 };
 type ImageAdjustments = { zoom: number; x: number; y: number; rotate: number };
-type ProductVariant = { name: string; image: string; stock?: number; adjustments?: ImageAdjustments };
+type ProductVariant = { name: string; size?: string; image: string; stock?: number; price?: number; adjustments?: ImageAdjustments };
 type ProductImageAdjustments = {
   image?: ImageAdjustments;
   hoverImage?: ImageAdjustments;
@@ -85,6 +96,7 @@ type AdminPermission =
   | "Orders"
   | "Customers"
   | "Marketing"
+  | "Buy One Get X & Bundle Offers"
   | "Homepage"
   | "Delivery charge"
   | "Hub"
@@ -105,6 +117,7 @@ const allAdminPermissions: AdminPermission[] = [
   "Orders",
   "Customers",
   "Marketing",
+  "Buy One Get X & Bundle Offers",
   "Homepage",
   "Delivery charge",
   "Hub",
@@ -279,6 +292,7 @@ type OrderRecord = {
   total: string;
   customerName: string;
   userId?: string;
+  userPhone?: string;
   userEmail?: string;
   phone: string;
   email?: string;
@@ -291,6 +305,7 @@ type OrderRecord = {
   paymentStatus?: "pending" | "paid";
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
+  inventoryAdjusted?: boolean;
   items?: Array<{ name: string; quantity: number; price: string; productId?: string; image?: string; variantName?: string; variantImage?: string; size?: string }>;
 };
 const adminOrders: OrderRecord[] = [];
@@ -321,7 +336,13 @@ const createSku = (
   return sku;
 };
 const parseMoney = (value: string) => Number(value.replace(/[^0-9.]/g, "")) || 0;
-const formatMoney = (value: number) => `₹${Math.round(value).toLocaleString("en-IN")}`;
+const formatMoney = (value: number) => {
+  const rounded = Math.round(value * 100) / 100;
+  return `₹${rounded.toLocaleString("en-IN", {
+    minimumFractionDigits: Number.isInteger(rounded) ? 0 : 2,
+    maximumFractionDigits: 2,
+  })}`;
+};
 const calculatePricing = (costValue: string, gstValue: string, markupValue: string) => {
   const cost = parseMoney(costValue);
   const gst = Number(gstValue) || 0;
@@ -375,6 +396,11 @@ const localProductVariantsKey = "fanzzy-product-variants";
 const parseProductSizes = (value: string) => Array.from(new Set(value.split(",").map((size) => size.trim()).filter(Boolean)));
 const normalizeSizeStock = (value: Record<string, number | ""> | undefined): Record<string, number> =>
   Object.fromEntries(Object.entries(value || {}).filter(([, quantity]) => quantity !== "" && Number.isFinite(Number(quantity))).map(([size, quantity]) => [size, Math.max(0, Math.floor(Number(quantity)))]));
+const hasSellableStock = (stock: string | number, variantType: ProductVariantType, sizes: string[], sizeStock: Record<string, number | ""> | undefined, variants: ProductVariant[]) => {
+  if (variantType === "normal" && variants.length) return variants.some((variant) => Number(variant.stock) > 0);
+  if (variantType === "size" && sizes.length) return sizes.some((size) => Number(sizeStock?.[size]) > 0);
+  return Number(stock) > 0;
+};
 const persistCatalog = (catalog: AdminProduct[]) => {
   if (typeof window === "undefined") return;
   const tones = ["#d9c4bc", "#dad7ce", "#d0c2b0", "#e5ddd1"];
@@ -398,6 +424,7 @@ const persistCatalog = (catalog: AdminProduct[]) => {
     sizes: product.sizes || [],
     sizeStock: product.sizeStock || {},
     variants: product.variants || [],
+    variantType: product.variantType || (product.sizes?.length ? "size" : "normal"),
     imageAdjustments: product.imageAdjustments || defaultImageAdjustments,
     hoverImageAdjustments: product.hoverImageAdjustments || defaultImageAdjustments,
     tag: product.status === "Draft" ? "Draft" : undefined,
@@ -502,6 +529,14 @@ const saveProductVariants = async (catalog: AdminProduct[]) => {
   );
   await saveStoreSetting("productVariants", JSON.stringify(variants));
 };
+const saveProductVariantTypes = async (catalog: AdminProduct[]) => {
+  const variantTypes = Object.fromEntries(
+    catalog
+      .filter((product) => product.sku)
+      .map((product) => [product.sku, product.variantType || (product.sizes?.length ? "size" : "normal")]),
+  );
+  await saveStoreSetting("productVariantType", JSON.stringify(variantTypes));
+};
 const saveProductSizes = async (catalog: AdminProduct[]) => {
   const sizes = Object.fromEntries(
     catalog
@@ -543,6 +578,7 @@ const menu = [
   { label: "Orders", icon: "↗", count: "12" },
   { label: "Customers", icon: "♧" },
   { label: "Marketing", icon: "◈" },
+  { label: "Buy One Get X & Bundle Offers", icon: "✦" },
   { label: "Homepage", icon: "⌂" },
   { label: "Delivery charge", icon: "₹" },
   { label: "Hub", icon: "⌖" },
@@ -1318,6 +1354,14 @@ const moduleContent: Record<
     secondary: "New coupon",
     rows: [],
   },
+  "Buy One Get X & Bundle Offers": {
+    eyebrow: "PROMOTIONS",
+    title: "Buy One Get X & Bundle Offers",
+    description: "Create variant-aware promotions, fixed-price bundles, and controlled free-item offers.",
+    primary: "Create offer",
+    secondary: "View report",
+    rows: [],
+  },
   Homepage: {
     eyebrow: "CONTENT",
     title: "Homepage builder",
@@ -1368,6 +1412,7 @@ function ModuleWorkspace({
     return <DeliveryChargeWorkspace onNotify={onNotify} />;
   if (module === "Hub") return <HubWorkspace onNotify={onNotify} />;
   if (module === "Marketing") return <MarketingWorkspace onNotify={onNotify} />;
+  if (module === "Buy One Get X & Bundle Offers") return <PromotionOffersWorkspace onNotify={onNotify} />;
   if (module === "Collections")
     return <CollectionsWorkspace onNotify={onNotify} />;
   if (module === "Customers") return <CustomersWorkspace onNotify={onNotify} />;
@@ -3063,6 +3108,168 @@ function MarketingWorkspace({
   );
 }
 
+type PromotionCatalogOption = {
+  id: string;
+  sku: string;
+  name: string;
+  category: string;
+  image: string;
+  price: number;
+  stock: number;
+  variants: Array<{ name: string; image?: string; stock?: number; price?: number }>;
+};
+
+function PromotionOffersWorkspace({ onNotify }: { onNotify: (message: string) => void }) {
+  const [offers, setOffers] = useState<PromotionOffer[]>([]);
+  const [catalog, setCatalog] = useState<PromotionCatalogOption[]>([]);
+  const [search, setSearch] = useState("");
+  const [formOpen, setFormOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [selected, setSelected] = useState<PromotionOffer | null>(null);
+  const [form, setForm] = useState(() => defaultPromotionForm());
+
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      const saved = await fetchStoreSetting("promotionalOffers");
+      const raw = saved.value || window.localStorage.getItem(promotionStorageKey);
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw) as unknown[];
+          const valid = Array.isArray(parsed) ? parsed.map((item) => {
+            if (!item || typeof item !== "object") return null;
+            const offer = item as Partial<PromotionOffer>;
+            return offer.id && offer.name ? offer as PromotionOffer : null;
+          }).filter((item): item is PromotionOffer => Boolean(item)) : [];
+          if (alive) setOffers(valid);
+        } catch { /* keep the empty workspace */ }
+      }
+      const [remoteCatalog, localCatalog] = await Promise.all([
+        fetchCatalogProducts(),
+        Promise.resolve(window.localStorage.getItem("fanzzy-products")),
+      ]);
+      const source = !remoteCatalog.error && remoteCatalog.data?.length ? remoteCatalog.data : (() => {
+        try { return localCatalog ? JSON.parse(localCatalog) : []; } catch { return []; }
+      })();
+      const mapped = (Array.isArray(source) ? source : []).filter((product) => !isDemoProduct(product)).map((product) => ({
+        id: String(product.sku || product.name).toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+        sku: String(product.sku || ""),
+        name: String(product.name || ""),
+        category: String(product.category || "Uncategorised"),
+        image: String(product.image || ""),
+        price: Number(product.price || 0),
+        stock: Number(product.stock || 0),
+        variants: Array.isArray(product.variants) ? product.variants : [],
+      }));
+      if (alive) setCatalog(mapped);
+    };
+    void load();
+    return () => { alive = false; };
+  }, []);
+
+  const persist = async (next: PromotionOffer[], message: string) => {
+    setOffers(next);
+    window.localStorage.setItem(promotionStorageKey, JSON.stringify(next));
+    const remoteError = await saveStoreSetting("promotionalOffers", JSON.stringify(next));
+    window.dispatchEvent(new Event("fanzzy-promotions-updated"));
+    onNotify(remoteError ? `${message} · saved locally` : message);
+  };
+  const openNew = () => {
+    setEditingId(null);
+    setForm(defaultPromotionForm());
+    setFormOpen(true);
+  };
+  const openEdit = (offer: PromotionOffer) => {
+    setSelected(null);
+    setEditingId(offer.id);
+    setForm({
+      ...defaultPromotionForm(),
+      ...offer,
+      name: String(offer.name || ""),
+      description: String(offer.description || ""),
+      couponCode: String(offer.couponCode || ""),
+      eligiblePaid: Array.isArray(offer.eligiblePaid) ? offer.eligiblePaid : [],
+      eligibleFree: Array.isArray(offer.eligibleFree) ? offer.eligibleFree : [],
+    });
+    setFormOpen(true);
+  };
+  const toggleSelection = (bucket: "eligiblePaid" | "eligibleFree", selection: PromotionSelection) => {
+    setForm((current) => {
+      const existing = current[bucket].some((item) => JSON.stringify(item) === JSON.stringify(selection));
+      return { ...current, [bucket]: existing ? current[bucket].filter((item) => JSON.stringify(item) !== JSON.stringify(selection)) : [...current[bucket], selection] };
+    });
+  };
+  const selectionForProduct = (product: PromotionCatalogOption, variant?: PromotionCatalogOption["variants"][number]): PromotionSelection => ({
+    productId: product.id,
+    sku: product.sku,
+    variantName: variant?.name,
+    price: (variant as { price?: number } | undefined)?.price ? Number((variant as { price?: number }).price) : product.price,
+    stock: variant?.stock === undefined ? product.stock : Number(variant.stock),
+  });
+  const saveOffer = async () => {
+    const name = String(form.name || "").trim();
+    const description = String(form.description || "").trim();
+    const couponCode = String(form.couponCode || "").trim().toUpperCase();
+    if (!name) return onNotify("Add an offer name before saving");
+    if (form.type === "bundle" && (form.bundleQuantity < 2 || form.fixedBundlePrice <= 0)) return onNotify("Add a valid bundle quantity and fixed price");
+    if (form.type !== "bundle" && form.freeQuantity < 1) return onNotify("Add a free quantity");
+    const now = new Date().toISOString();
+    const offer: PromotionOffer = {
+      ...form,
+      id: editingId || `offer-${Date.now()}`,
+      name,
+      description,
+      couponCode: couponCode || undefined,
+      usageCount: editingId ? (offers.find((item) => item.id === editingId)?.usageCount || 0) : 0,
+      createdAt: editingId ? (offers.find((item) => item.id === editingId)?.createdAt || now) : now,
+      updatedAt: now,
+    };
+    await persist(editingId ? offers.map((item) => item.id === editingId ? offer : item) : [offer, ...offers], editingId ? "Offer updated" : "Offer created");
+    setFormOpen(false);
+  };
+  const deleteOffer = async (offer: PromotionOffer) => {
+    if (!window.confirm(`Archive ${offer.name}? Existing orders remain linked.`)) return;
+    await persist(offers.map((item) => item.id === offer.id ? { ...item, status: "Archived", updatedAt: new Date().toISOString() } : item), "Offer archived");
+    setSelected(null);
+  };
+  const toggleOffer = async (offer: PromotionOffer) => {
+    const status: PromotionOfferStatus = offer.status === "Active" ? "Inactive" : "Active";
+    await persist(offers.map((item) => item.id === offer.id ? { ...item, status, updatedAt: new Date().toISOString() } : item), `${offer.name} ${status === "Active" ? "activated" : "deactivated"}`);
+    setSelected((current) => current?.id === offer.id ? { ...offer, status } : current);
+  };
+  const visibleCatalog = catalog.filter((product) => `${product.name} ${product.sku} ${product.category}`.toLowerCase().includes(search.toLowerCase()));
+  const selectedCount = form.eligiblePaid.length + form.eligibleFree.length;
+
+  return (
+    <section className="panel module-workspace promotion-workspace">
+      <div className="module-workspace-head">
+        <div><p className="eyebrow">PROMOTIONS</p><h2>Buy One Get X &amp; Bundle Offers</h2><p>Create offers that understand products, variants, colour, size, stock, customer limits, and linked cart lines.</p></div>
+        <div className="module-actions"><button className="module-secondary" onClick={() => onNotify("Offer report is ready from usage data")}>View report ↗</button><button className="module-primary" onClick={openNew}>+ Create offer</button></div>
+      </div>
+      <div className="offer-capability-strip"><span>9 offer modes</span><span>Variant-aware selection</span><span>Linked cart groups</span><span>Inventory-safe lines</span></div>
+      <div className="promotion-list">
+        {offers.length ? offers.map((offer, index) => (
+          <div className="promotion-list-row" key={offer.id}>
+            <button className="promotion-list-main" onClick={() => setSelected(offer)}><span className="module-row-number">{String(index + 1).padStart(2, "0")}</span><span><strong>{offer.name}</strong><small>{offerTypeLabel(offer)} · {offer.eligiblePaid.length + offer.eligibleFree.length || "All catalog"} eligible selections</small></span><i className={`status-pill ${offer.status.toLowerCase()}`}>{offer.status}</i><b>↗</b></button>
+            <div className="product-row-actions"><button onClick={() => openEdit(offer)} aria-label={`Edit ${offer.name}`}><Pencil size={15} /></button><button className="delete-action" onClick={() => void deleteOffer(offer)} aria-label={`Archive ${offer.name}`}><Trash2 size={15} /></button></div>
+          </div>
+        )) : <div className="promotion-empty"><span>✦</span><h3>No promotional offers yet</h3><p>Create Buy 1 Get 1, Buy 1 Get 3, cheapest-free, or Pick Any X bundles from one form.</p><button className="module-primary" onClick={openNew}>Create your first offer</button></div>}
+      </div>
+      <div className="promotion-footnote"><strong>Operational safeguards</strong><span>Offers are stored with reusable product/variant IDs. Status, dates, usage limits, and selection rules are checked before a storefront application is accepted.</span></div>
+
+      {selected && <div className="product-modal-backdrop" onClick={() => setSelected(null)}><div className="product-detail-card promotion-detail-modal" onClick={(event) => event.stopPropagation()}><p className="eyebrow">{offerTypeLabel(selected)}</p><h3>{selected.name}</h3><p className="product-detail-meta">{selected.description || "No description added."}</p><div className="promotion-detail-grid"><span><small>Status</small><strong>{selected.status}</strong></span><span><small>Usage</small><strong>{selected.usageCount}{selected.maxTotalUsage ? ` / ${selected.maxTotalUsage}` : ""}</strong></span><span><small>Paid scope</small><strong>{selected.eligiblePaid.length || "All"}</strong></span><span><small>Free scope</small><strong>{selected.eligibleFree.length || "Same product"}</strong></span></div><p className="promotion-rules">{selected.allowMultipleQualifyingSets ? "Multiple qualifying sets enabled" : "Applies once per cart"} · {selected.allowSameVariantMultipleTimes ? "Repeat variants allowed" : "Unique variants only"} · {selected.automatic ? "Automatic" : `Coupon ${selected.couponCode || "required"}`}</p><div className="product-detail-actions"><button className="module-primary" onClick={() => openEdit(selected)}>Edit offer</button><button className="module-secondary" onClick={() => void toggleOffer(selected)}>{selected.status === "Active" ? "Deactivate" : "Activate"}</button><button className="module-secondary" onClick={() => setSelected(null)}>Close</button></div></div></div>}
+
+      {formOpen && <div className="product-modal-backdrop" onClick={() => setFormOpen(false)}><div className="product-form-card product-modal-card promotion-form-modal" onClick={(event) => event.stopPropagation()}><button className="product-modal-close" onClick={() => setFormOpen(false)} aria-label="Close offer form">×</button><p className="eyebrow">{editingId ? "EDIT OFFER" : "NEW OFFER"}</p><h3>{editingId ? "Edit promotional offer" : "Build a promotional offer"}</h3><p className="promotion-form-intro">Every selection below points to an existing product or variant ID. No duplicate catalog records are created.</p>
+        <div className="promotion-form-section"><h4>Offer basics</h4><div className="product-form-grid"><label>Offer name<input value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="e.g. Bracelet · Buy 1 Get 3" /></label><label>Offer type<select value={form.type} onChange={(event) => setForm((current) => ({ ...current, type: event.target.value as PromotionOfferType }))}><option value="bogo">Buy X Get Y</option><option value="cheapest-free">Cheapest eligible item free</option><option value="bundle">Pick Any X Items for a Fixed Price</option></select></label><label className="marketing-form-wide">Offer description<input value={form.description} onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))} placeholder="Explain what customers receive." /></label><label>Active status<select value={form.status} onChange={(event) => setForm((current) => ({ ...current, status: event.target.value as PromotionOfferStatus }))}><option>Active</option><option>Inactive</option><option>Archived</option></select></label><label>Start date/time<input type="datetime-local" value={form.startsAt} onChange={(event) => setForm((current) => ({ ...current, startsAt: event.target.value }))} /></label><label>End date/time<input type="datetime-local" value={form.endsAt} onChange={(event) => setForm((current) => ({ ...current, endsAt: event.target.value }))} /></label></div></div>
+        <div className="promotion-form-section"><h4>{form.type === "bundle" ? "Fixed-price bundle" : "Buy / get rules"}</h4><div className="product-form-grid">{form.type !== "bundle" && <><label>Buy quantity<input type="number" min="1" value={form.buyQuantity} onChange={(event) => setForm((current) => ({ ...current, buyQuantity: Math.max(1, Number(event.target.value)) }))} /></label><label>Free quantity<input type="number" min="1" value={form.freeQuantity} onChange={(event) => setForm((current) => ({ ...current, freeQuantity: Math.max(1, Number(event.target.value)) }))} /></label></>}{form.type === "bundle" && <><label>Required bundle quantity<input type="number" min="2" value={form.bundleQuantity} onChange={(event) => setForm((current) => ({ ...current, bundleQuantity: Math.max(2, Number(event.target.value)) }))} /></label><label>Fixed bundle price<input type="number" min="0" value={form.fixedBundlePrice} onChange={(event) => setForm((current) => ({ ...current, fixedBundlePrice: Math.max(0, Number(event.target.value)) }))} /></label></>}<label>Minimum cart value<input type="number" min="0" value={form.minCartValue} onChange={(event) => setForm((current) => ({ ...current, minCartValue: Math.max(0, Number(event.target.value)) }))} /></label><label>Per-customer usage limit<input type="number" min="0" value={form.perCustomerLimit} onChange={(event) => setForm((current) => ({ ...current, perCustomerLimit: Math.max(0, Number(event.target.value)) }))} placeholder="0 = unlimited" /></label><label>Maximum total usage<input type="number" min="0" value={form.maxTotalUsage} onChange={(event) => setForm((current) => ({ ...current, maxTotalUsage: Math.max(0, Number(event.target.value)) }))} placeholder="0 = unlimited" /></label><label className="promotion-check"><input type="checkbox" checked={form.automatic} onChange={(event) => setForm((current) => ({ ...current, automatic: event.target.checked }))} /> Automatic offer</label>{!form.automatic && <label>Coupon code<input value={form.couponCode} onChange={(event) => setForm((current) => ({ ...current, couponCode: event.target.value.toUpperCase() }))} placeholder="FANZZYBOGO" /></label>}</div></div>
+        <div className="promotion-form-section"><h4>Variant and bundle controls</h4><div className="promotion-toggle-grid">{([["allowMixVariants", "Allow customers to mix variants"],["allowDifferentColours", "Allow different colours"],["allowDifferentSizes", "Allow different sizes"],["allowSameVariantMultipleTimes", "Allow same variant multiple times"],["requireExactFreeQuantity", "Require exact free-item quantity"],["allowDifferentProducts", "Allow paid/free from different products"],["allowMixProducts", "Allow mixing products in bundles"],["allowMultipleBundles", "Allow multiple bundles per cart"],["allowMultipleQualifyingSets", "Allow offer multiplication"],["allowOtherCoupons", "Allow other coupons"],["allowOtherDiscounts", "Allow other discounts"],["autoSelectOnlyOption", "Auto-select when one option exists"]] as Array<[keyof ReturnType<typeof defaultPromotionForm>, string]>).map(([key, label]) => <label key={String(key)}><input type="checkbox" checked={Boolean(form[key])} onChange={(event) => setForm((current) => ({ ...current, [key]: event.target.checked }))} />{label}</label>)}</div><label className="promotion-limit-field">Maximum quantity per variant<input type="number" min="1" value={form.maxQuantityPerVariant} onChange={(event) => setForm((current) => ({ ...current, maxQuantityPerVariant: Math.max(1, Number(event.target.value)) }))} /></label></div>
+        <div className="promotion-form-section"><div className="promotion-selector-header"><div><h4>Eligible products and variants</h4><p>Search by product name or SKU. Choose paid and free scopes separately.</p></div><strong>{selectedCount} selections</strong></div><input className="promotion-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search product, SKU, colour, size…" /><div className="promotion-selector-list">{visibleCatalog.length ? visibleCatalog.map((product) => { const productSelection = selectionForProduct(product); return <div className="promotion-selector-product" key={product.id}><div className="promotion-product-heading"><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.sku} · {product.stock} in stock · ₹{product.price.toLocaleString("en-IN")}</small></span></div><div className="promotion-selection-row"><label><input type="checkbox" checked={form.eligiblePaid.some((item) => JSON.stringify(item) === JSON.stringify(productSelection))} onChange={() => toggleSelection("eligiblePaid", productSelection)} /> Paid product</label><label><input type="checkbox" checked={form.eligibleFree.some((item) => JSON.stringify(item) === JSON.stringify(productSelection))} onChange={() => toggleSelection("eligibleFree", productSelection)} /> Free product</label></div>{product.variants.length ? <div className="promotion-variant-grid">{product.variants.map((variant) => { const selection = selectionForProduct(product, variant); return <div className="promotion-variant-option" key={`${product.id}-${variant.name}`}><img src={variant.image || product.image} alt="" /><span><strong>{variant.name}</strong><small>{variant.stock ?? product.stock} stock · ₹{(Number(variant.price) || product.price).toLocaleString("en-IN")}</small></span><label title="Eligible paid variant"><input type="checkbox" checked={form.eligiblePaid.some((item) => JSON.stringify(item) === JSON.stringify(selection))} onChange={() => toggleSelection("eligiblePaid", selection)} />Paid</label><label title="Eligible free variant"><input type="checkbox" checked={form.eligibleFree.some((item) => JSON.stringify(item) === JSON.stringify(selection))} onChange={() => toggleSelection("eligibleFree", selection)} />Free</label></div>; })}</div> : null}</div>; }) : <p className="variant-empty">No products found. Add products in Products first, then return here.</p>}</div></div>
+        <div className="promotion-form-actions"><button className="module-primary" onClick={() => void saveOffer()}>Save offer</button><button className="module-secondary" onClick={() => setFormOpen(false)}>Cancel</button></div>
+      </div></div>}
+    </section>
+  );
+}
+
 function OrdersWorkspace({
   onNotify,
 }: {
@@ -3078,9 +3285,11 @@ function OrdersWorkspace({
   const [orderItemDraft, setOrderItemDraft] = useState({ productId: "", variantName: "", quantity: "1", price: "" });
 
   useEffect(() => {
-    const syncOrders = async () => {
+    const syncOrders = async (recoverCapturedPayments = false) => {
       // Recover captured payments even when the customer's browser callback was interrupted.
-      await fetch("/api/razorpay/sync-payments", { method: "POST" }).catch(() => undefined);
+      if (recoverCapturedPayments) {
+        await fetch("/api/razorpay/sync-payments", { method: "POST" }).catch(() => undefined);
+      }
       const remote = await fetchStoreOrders<OrderRecord>();
       const merged = new Map<string, OrderRecord>();
       remote.data?.forEach((order) => { if (order?.id && !isDemoOrder(order)) merged.set(order.id, order); });
@@ -3093,7 +3302,7 @@ function OrdersWorkspace({
       } catch {
         window.localStorage.removeItem("fanzzy-orders");
       }
-      if (merged.size) setOrders(Array.from(merged.values()).filter(hasConfirmedPayment));
+      setOrders(Array.from(merged.values()).filter(hasConfirmedPayment));
       const [catalog, variantsRemote] = await Promise.all([fetchCatalogProducts(), fetchStoreSetting("productVariants")]);
       let variantsMap: Record<string, ProductVariant[]> = {};
       if (variantsRemote.value) {
@@ -3118,12 +3327,15 @@ function OrdersWorkspace({
         })));
       }
     };
-    void syncOrders();
-    window.addEventListener("storage", syncOrders);
-    window.addEventListener("fanzzy-orders-updated", syncOrders);
+    const syncLiveOrders = () => { void syncOrders(false); };
+    void syncOrders(true);
+    const liveOrderTimer = window.setInterval(syncLiveOrders, 5000);
+    window.addEventListener("storage", syncLiveOrders);
+    window.addEventListener("fanzzy-orders-updated", syncLiveOrders);
     return () => {
-      window.removeEventListener("storage", syncOrders);
-      window.removeEventListener("fanzzy-orders-updated", syncOrders);
+      window.clearInterval(liveOrderTimer);
+      window.removeEventListener("storage", syncLiveOrders);
+      window.removeEventListener("fanzzy-orders-updated", syncLiveOrders);
     };
   }, []);
 
@@ -3170,7 +3382,7 @@ function OrdersWorkspace({
   };
   const getOrderedProduct = (item: NonNullable<OrderRecord["items"]>[number]) => {
     const itemName = item.name.split(" · ")[0].trim().toLowerCase();
-    return catalogProducts.find((product) => product.id === item.productId || product.name.trim().toLowerCase() === itemName);
+    return catalogProducts.find((product) => product.id === item.productId || product.sku === item.productId || product.name.trim().toLowerCase() === itemName);
   };
   const draftProduct = catalogProducts.find((product) => product.id === orderItemDraft.productId);
   const addMissingOrderItem = () => {
@@ -3360,8 +3572,9 @@ function OrdersWorkspace({
             <span>
               <strong>{order.id}</strong>
               <small>{formatOrderDate(order.date)}</small>
+              <small className="order-list-products">Customer ID: {order.userId || "Legacy / guest"} · {order.customerName}</small>
               <small className="order-list-products">{order.items?.map((item) => item.name).join(", ") || "No saved item details"}</small>
-              <small className="order-list-products">Payment: {order.paymentStatus === "paid" ? "Paid" : "Awaiting Razorpay confirmation"}</small>
+              <small className="order-list-products">Payment: {order.paymentStatus === "paid" ? "Paid" : "Awaiting Razorpay confirmation"} · Inventory: {order.inventoryAdjusted === false ? "Pending" : "Updated"}</small>
             </span>
             <i className={`status-pill ${order.status.toLowerCase()}`}>
               {order.status}
@@ -3401,8 +3614,8 @@ function OrdersWorkspace({
                 {formatOrderDate(selectedOrder.date)} · {selectedOrder.total}
               </p>
               <p className="product-detail-meta">Payment: {selectedOrder.paymentStatus === "paid" ? "Paid" : "Awaiting Razorpay confirmation"}{selectedOrder.razorpayPaymentId ? ` · Razorpay payment ${selectedOrder.razorpayPaymentId}` : selectedOrder.razorpayOrderId ? ` · Razorpay order ${selectedOrder.razorpayOrderId}` : ""}</p>
-              <section className="admin-customer-details"><p className="eyebrow">CUSTOMER DETAILS</p><dl><div><dt>Name</dt><dd>{selectedOrder.customerName || "Not provided"}</dd></div><div><dt>Email</dt><dd>{selectedOrder.email || selectedOrder.userEmail || "Not provided"}</dd></div><div><dt>WhatsApp</dt><dd>{selectedOrder.phone || "Not provided"}</dd></div><div><dt>Fulfilment</dt><dd>{selectedOrder.fulfillmentMethod === "pickup" ? `Pickup from ${selectedOrder.pickupHubName || "hub"}` : "Delivery"}</dd></div><div className="admin-customer-address"><dt>{selectedOrder.fulfillmentMethod === "pickup" ? "Pickup hub / place" : "Delivery address"}</dt><dd>{selectedOrder.fulfillmentMethod === "pickup" ? `${selectedOrder.pickupHubName || "Hub"} · ${selectedOrder.pickupHubPlace || selectedOrder.address || "Place not saved"}` : selectedOrder.address || "Not provided"}</dd></div>{selectedOrder.userId && <div className="admin-customer-account"><dt>Account ID</dt><dd>{selectedOrder.userId}</dd></div>}</dl>{selectedOrder.razorpayPaymentId && <button className="module-secondary admin-restore-payment-details" type="button" onClick={() => void restoreOrderDetailsFromRazorpay()}>Restore delivery details from Razorpay</button>}</section>
-              {selectedOrder.items?.length ? <section className="admin-order-items"><p className="eyebrow">ITEMS IN THIS ORDER</p><div>{selectedOrder.items.map((item) => { const product = getOrderedProduct(item); const size = item.size || item.name.match(/(?:^| · )Size (.+)$/i)?.[1] || ""; const variant = item.variantName || (item.name.includes(" · ") ? item.name.split(" · ").slice(1).filter((part) => !/^Size /i.test(part)).join(" · ") : ""); const selectedVariant = variant ? product?.variants.find((candidate) => candidate.name.trim().toLowerCase() === variant.trim().toLowerCase()) : undefined; const displayImage = item.variantImage || selectedVariant?.image || item.image || product?.image; return <article key={`${selectedOrder.id}-${item.name}`}><>{displayImage ? <img src={displayImage} alt={variant ? `${item.name} variant` : ""} /> : <span className="admin-order-item-placeholder" aria-hidden="true">✦</span>}</><span><strong>{item.name}</strong>{product ? <><small>{product.category} · SKU {product.sku}</small><small>Current stock: {product.stock} · {product.status}</small></> : <small>Product no longer in the catalog</small>}{variant && <small>Selected variant: {variant}{displayImage ? " · Variant image shown" : ""}</small>}{size && <small>Selected size: {size}</small>}<em>Quantity ordered: {item.quantity}</em></span><b>{item.price}</b></article>; })}</div></section> : <section className="admin-order-items admin-order-item-repair"><p className="eyebrow">ADD MISSING ORDER DETAILS</p><p>This older paid order has no saved product information. Select the product and variant to restore its order record.</p><div className="admin-order-item-repair-fields"><label>Product<select value={orderItemDraft.productId} onChange={(event) => { const product = catalogProducts.find((candidate) => candidate.id === event.target.value); setOrderItemDraft({ productId: event.target.value, variantName: "", quantity: "1", price: product ? `₹${product.price.toLocaleString("en-IN")}` : "" }); }}><option value="">Select product</option>{catalogProducts.map((product) => <option key={product.id} value={product.id}>{product.name} · {product.sku}</option>)}</select></label>{draftProduct?.variants.length ? <label>Variant<select value={orderItemDraft.variantName} onChange={(event) => setOrderItemDraft((current) => ({ ...current, variantName: event.target.value }))}><option value="">Select variant</option>{draftProduct.variants.map((variant, index) => <option key={`${variant.name}-${index}`} value={variant.name}>{variant.name || `Option ${index + 1}`}</option>)}</select></label> : null}<label>Quantity<input type="number" min="1" value={orderItemDraft.quantity} onChange={(event) => setOrderItemDraft((current) => ({ ...current, quantity: event.target.value }))} /></label><label>Price<input value={orderItemDraft.price} onChange={(event) => setOrderItemDraft((current) => ({ ...current, price: event.target.value }))} placeholder="₹0" /></label></div>{draftProduct && <div className="admin-order-item-repair-preview">{orderItemDraft.variantName && draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image ? <img src={draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image} alt="Selected variant preview" /> : draftProduct.image ? <img src={draftProduct.image} alt="Selected product preview" /> : null}<span>{orderItemDraft.variantName ? `Selected variant: ${orderItemDraft.variantName}` : "Select a variant if applicable"}</span></div>}<button className="module-primary" type="button" onClick={addMissingOrderItem}>Add to this order</button></section>}
+              <section className="admin-customer-details"><p className="eyebrow">CUSTOMER &amp; ORDER IDS</p><dl><div><dt>Order ID</dt><dd>{selectedOrder.id}</dd></div><div className="admin-customer-account"><dt>Customer Account ID</dt><dd>{selectedOrder.userId || "Legacy / guest order"}</dd></div><div><dt>Name</dt><dd>{selectedOrder.customerName || "Not provided"}</dd></div><div><dt>Login mobile</dt><dd>{selectedOrder.userPhone || selectedOrder.phone || "Not provided"}</dd></div><div><dt>Email</dt><dd>{selectedOrder.email || selectedOrder.userEmail || "Not provided"}</dd></div><div><dt>WhatsApp</dt><dd>{selectedOrder.phone || "Not provided"}</dd></div><div><dt>Fulfilment</dt><dd>{selectedOrder.fulfillmentMethod === "pickup" ? `Pickup from ${selectedOrder.pickupHubName || "hub"}` : "Delivery"}</dd></div><div className="admin-customer-address"><dt>{selectedOrder.fulfillmentMethod === "pickup" ? "Pickup hub / place" : "Delivery address"}</dt><dd>{selectedOrder.fulfillmentMethod === "pickup" ? `${selectedOrder.pickupHubName || "Hub"} · ${selectedOrder.pickupHubPlace || selectedOrder.address || "Place not saved"}` : selectedOrder.address || "Not provided"}</dd></div></dl>{selectedOrder.razorpayPaymentId && <button className="module-secondary admin-restore-payment-details" type="button" onClick={() => void restoreOrderDetailsFromRazorpay()}>Restore delivery details from Razorpay</button>}</section>
+              {selectedOrder.items?.length ? <section className="admin-order-items"><p className="eyebrow">ITEMS IN THIS ORDER</p><div>{selectedOrder.items.map((item) => { const product = getOrderedProduct(item); const size = item.size || item.name.match(/(?:^| · )Size (.+)$/i)?.[1] || ""; const variant = item.variantName || (item.name.includes(" · ") ? item.name.split(" · ").slice(1).filter((part) => !/^Size /i.test(part)).join(" · ") : ""); const selectedVariant = size ? product?.variants.find((candidate) => String(candidate.size || candidate.name).trim().replace(/^size\s+/i, "").toLowerCase() === size.trim().replace(/^size\s+/i, "").toLowerCase()) : variant ? product?.variants.find((candidate) => candidate.name.trim().toLowerCase() === variant.trim().toLowerCase()) : undefined; const selectionStock = selectedVariant?.stock ?? product?.stock; const displayImage = item.variantImage || selectedVariant?.image || item.image || product?.image; return <article key={`${selectedOrder.id}-${item.name}`}><>{displayImage ? <img src={displayImage} alt={variant ? `${item.name} variant` : ""} /> : <span className="admin-order-item-placeholder" aria-hidden="true">✦</span>}</><span><strong>{item.name}</strong>{product ? <><small>{product.category} · SKU {product.sku}</small><small>Current {size ? `size ${size}` : variant ? "variant" : "product"} stock: {selectionStock} · {product.status}</small></> : <small>Product no longer in the catalog</small>}{variant && <small>Selected variant: {variant}{displayImage ? " · Variant image shown" : ""}</small>}{size && <small>Selected size: {size}</small>}<em>Quantity ordered: {item.quantity}</em></span><b>{item.price}</b></article>; })}</div></section> : <section className="admin-order-items admin-order-item-repair"><p className="eyebrow">ADD MISSING ORDER DETAILS</p><p>This older paid order has no saved product information. Select the product and variant to restore its order record.</p><div className="admin-order-item-repair-fields"><label>Product<select value={orderItemDraft.productId} onChange={(event) => { const product = catalogProducts.find((candidate) => candidate.id === event.target.value); setOrderItemDraft({ productId: event.target.value, variantName: "", quantity: "1", price: product ? `₹${product.price.toLocaleString("en-IN")}` : "" }); }}><option value="">Select product</option>{catalogProducts.map((product) => <option key={product.id} value={product.id}>{product.name} · {product.sku}</option>)}</select></label>{draftProduct?.variants.length ? <label>Variant<select value={orderItemDraft.variantName} onChange={(event) => setOrderItemDraft((current) => ({ ...current, variantName: event.target.value }))}><option value="">Select variant</option>{draftProduct.variants.map((variant, index) => <option key={`${variant.name}-${index}`} value={variant.name}>{variant.name || `Option ${index + 1}`}</option>)}</select></label> : null}<label>Quantity<input type="number" min="1" value={orderItemDraft.quantity} onChange={(event) => setOrderItemDraft((current) => ({ ...current, quantity: event.target.value }))} /></label><label>Price<input value={orderItemDraft.price} onChange={(event) => setOrderItemDraft((current) => ({ ...current, price: event.target.value }))} placeholder="₹0" /></label></div>{draftProduct && <div className="admin-order-item-repair-preview">{orderItemDraft.variantName && draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image ? <img src={draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image} alt="Selected variant preview" /> : draftProduct.image ? <img src={draftProduct.image} alt="Selected product preview" /> : null}<span>{orderItemDraft.variantName ? `Selected variant: ${orderItemDraft.variantName}` : "Select a variant if applicable"}</span></div>}<button className="module-primary" type="button" onClick={addMissingOrderItem}>Add to this order</button></section>}
               <div className="order-status-editor">
                 <label>
                   Status
@@ -4388,6 +4601,7 @@ function ProductLibraryWorkspace({
     sizes: "",
     sizeStock: {} as Record<string, number | "">,
     variants: [] as ProductVariant[],
+    variantType: "normal" as ProductVariantType,
   });
   const [newProductImage, setNewProductImage] = useState(
     adminPlaceholderImage,
@@ -4434,6 +4648,7 @@ function ProductLibraryWorkspace({
     sizes: "",
     sizeStock: {} as Record<string, number | "">,
     variants: [] as ProductVariant[],
+    variantType: "normal" as ProductVariantType,
   });
   useEffect(() => {
     let active = true;
@@ -4444,6 +4659,7 @@ function ProductLibraryWorkspace({
       const billNameRemote = await fetchStoreSetting("productBillNames");
       const pricingRemote = await fetchStoreSetting("productPricing");
       const variantsRemote = await fetchStoreSetting("productVariants");
+      const variantTypeRemote = await fetchStoreSetting("productVariantType");
       const sizesRemote = await fetchStoreSetting("productSizes");
       const sizeStockRemote = await fetchStoreSetting("productSizeStock");
       const imageAdjustmentsRemote = await fetchStoreSetting("productImageAdjustments");
@@ -4452,6 +4668,7 @@ function ProductLibraryWorkspace({
       let billNameMap: Record<string, string> = {};
       let pricingMap: Record<string, { gstRate?: number; markup?: number }> = {};
       let variantsMap: Record<string, ProductVariant[]> = {};
+      let variantTypeMap: Record<string, ProductVariantType> = {};
       let sizesMap: Record<string, string[]> = {};
       let sizeStockMap: Record<string, Record<string, number>> = {};
       let imageAdjustmentsMap: Record<string, ProductImageAdjustments> = {};
@@ -4505,6 +4722,18 @@ function ProductLibraryWorkspace({
           if (parsed && typeof parsed === "object") variantsMap = parsed;
         } catch {
           variantsMap = {};
+        }
+      }
+      if (variantTypeRemote.value) {
+        try {
+          const parsed = JSON.parse(variantTypeRemote.value) as Record<string, unknown>;
+          if (parsed && typeof parsed === "object") {
+            variantTypeMap = Object.fromEntries(
+              Object.entries(parsed).filter((entry): entry is [string, ProductVariantType] => entry[1] === "normal" || entry[1] === "size"),
+            );
+          }
+        } catch {
+          variantTypeMap = {};
         }
       }
       if (sizesRemote.value) {
@@ -4584,9 +4813,10 @@ function ProductLibraryWorkspace({
           gstRate: pricingMap[product.sku]?.gstRate || 0,
           markup: pricingMap[product.sku]?.markup || 0,
           costWithGst: calculatePricing(`₹${(product.cost ?? 0).toLocaleString("en-IN")}`, String(pricingMap[product.sku]?.gstRate || 0), String(pricingMap[product.sku]?.markup || 0)).costWithGst,
-          sizes,
-          sizeStock: sizeStockMap[product.sku] || {},
-          variants: variants.map((variant, index) => ({
+           sizes,
+           sizeStock: sizeStockMap[product.sku] || {},
+           variantType: variantTypeMap[product.sku] || (sizes.length ? "size" : "normal"),
+           variants: variants.map((variant, index) => ({
             ...variant,
             adjustments: normalizeImageAdjustments(savedAdjustments?.variants?.[index] || variant.adjustments),
           })),
@@ -4650,9 +4880,10 @@ function ProductLibraryWorkspace({
                   gstRate: product.gstRate ?? pricingMap[sku]?.gstRate ?? 0,
                   markup: product.markup ?? pricingMap[sku]?.markup ?? 0,
                   costWithGst: product.costWithGst || calculatePricing(String(rawCost ?? "₹0"), String(product.gstRate ?? pricingMap[sku]?.gstRate ?? 0), String(product.markup ?? pricingMap[sku]?.markup ?? 0)).costWithGst,
-          sizes: product.sizes?.length ? product.sizes : sizesMap[sku]?.length ? sizesMap[sku] : localSizesMap[sku] || [],
-          sizeStock: product.sizeStock || sizeStockMap[sku] || {},
-          variants: product.variants?.length ? product.variants : variantsMap[sku]?.length ? variantsMap[sku] : localVariantsMap[sku] || [],
+           sizes: product.sizes?.length ? product.sizes : sizesMap[sku]?.length ? sizesMap[sku] : localSizesMap[sku] || [],
+           sizeStock: product.sizeStock || sizeStockMap[sku] || {},
+           variantType: product.variantType || variantTypeMap[sku] || (product.sizes?.length || sizesMap[sku]?.length ? "size" : "normal"),
+           variants: product.variants?.length ? product.variants : variantsMap[sku]?.length ? variantsMap[sku] : localVariantsMap[sku] || [],
                 };
               }),
           );
@@ -4731,6 +4962,7 @@ function ProductLibraryWorkspace({
       sizes: "",
       sizeStock: {},
       variants: [],
+      variantType: "normal",
     });
     setNewProductImage(adminPlaceholderImage);
     setNewProductFile(null);
@@ -4781,6 +5013,12 @@ function ProductLibraryWorkspace({
         else imageSavedLocally = true;
       }
     }
+    const newProductSizes = newProduct.variantType === "size" && newProduct.variants.length
+      ? newProduct.variants.map((variant) => (variant.size || variant.name).trim()).filter(Boolean)
+      : parseProductSizes(newProduct.sizes);
+    const newProductSizeStock = newProduct.variantType === "size" && newProduct.variants.length
+      ? Object.fromEntries(newProduct.variants.filter((variant) => (variant.size || variant.name).trim()).map((variant) => [(variant.size || variant.name).trim(), variant.stock === undefined ? "" : variant.stock])) as Record<string, number | "">
+      : newProduct.sizeStock;
     const product: AdminProduct = {
       name: newProduct.name.trim(),
       sku: productSku,
@@ -4788,7 +5026,7 @@ function ProductLibraryWorkspace({
       stock: Number(newProduct.stock) || 0,
       price: newProduct.price.trim() || "₹0",
       cost: newProduct.cost.trim() || "₹0",
-      status: Number(newProduct.stock) > 0 ? "Published" : "Draft",
+       status: hasSellableStock(newProduct.stock, newProduct.variantType, newProductSizes, newProductSizeStock, newProduct.variants) ? "Published" : "Draft",
       image: productImage,
       hoverImage: productHoverImage,
       barcode: newProduct.barcode.trim(),
@@ -4797,8 +5035,9 @@ function ProductLibraryWorkspace({
       gstRate: Number(newProduct.gstRate) || 0,
       markup: Number(newProduct.markup) || 0,
       costWithGst: newProduct.costWithGst,
-      sizes: parseProductSizes(newProduct.sizes),
-      sizeStock: normalizeSizeStock(newProduct.sizeStock),
+       sizes: newProductSizes,
+       sizeStock: normalizeSizeStock(newProductSizeStock),
+      variantType: newProduct.variantType,
       variants: newVariantAdjustmentsEnabled
         ? newProduct.variants
         : newProduct.variants.map((variant) => ({ ...variant, adjustments: defaultImageAdjustments })),
@@ -4816,6 +5055,7 @@ function ProductLibraryWorkspace({
       void saveProductSizes(next);
       void saveProductSizeStock(next);
       void saveProductVariants(next);
+      void saveProductVariantTypes(next);
       void saveProductImageAdjustments(next);
       return next;
     });
@@ -4835,6 +5075,7 @@ function ProductLibraryWorkspace({
       sizes: "",
       sizeStock: {},
       variants: [],
+      variantType: "normal",
     });
     setNewProductImage(adminPlaceholderImage);
     setNewProductFile(null);
@@ -5017,14 +5258,17 @@ function ProductLibraryWorkspace({
       barcode: product.barcode || "",
       hsnCode: product.hsnCode || "",
       billName: product.billName || "",
-      markup: parseMoney(product.cost) > 0
-        ? String(Math.max(0, Math.round((parseMoney(product.price) / parseMoney(product.cost) - 1) * 100)))
-        : "",
+      markup: calculateMarkupFromSellingPrice(product.cost, String(product.gstRate || 0), product.price),
       gstRate: String(product.gstRate || 0),
       costWithGst: product.costWithGst || product.cost,
       sizes: product.sizes?.join(", ") || "",
       sizeStock: product.sizeStock || {},
-      variants: product.variants || [],
+      variants: product.variants?.length
+        ? product.variants.map((variant) => product.variantType === "size" && !variant.size ? { ...variant, name: "", size: variant.name } : variant)
+        : product.variantType === "size" && product.sizes?.length
+          ? product.sizes.map((size) => ({ name: "", size, image: "", stock: product.sizeStock?.[size] }))
+          : [],
+      variantType: product.variantType || (product.sizes?.length ? "size" : "normal"),
     });
     setEditImageAdjustments(product.imageAdjustments || defaultImageAdjustments);
     setEditHoverAdjustments(product.hoverImageAdjustments || defaultImageAdjustments);
@@ -5064,6 +5308,12 @@ function ProductLibraryWorkspace({
         else remoteImageError = true;
       }
     }
+    const editProductSizes = editValues.variantType === "size" && editValues.variants.length
+      ? editValues.variants.map((variant) => (variant.size || variant.name).trim()).filter(Boolean)
+      : parseProductSizes(editValues.sizes);
+    const editProductSizeStock = editValues.variantType === "size" && editValues.variants.length
+      ? Object.fromEntries(editValues.variants.filter((variant) => (variant.size || variant.name).trim()).map((variant) => [(variant.size || variant.name).trim(), variant.stock === undefined ? "" : variant.stock])) as Record<string, number | "">
+      : editValues.sizeStock;
     const updated: AdminProduct = {
       ...selectedProduct,
       name: editValues.name.trim(),
@@ -5072,7 +5322,7 @@ function ProductLibraryWorkspace({
       cost: editValues.cost.trim() || "₹0",
       stock: Number(editValues.stock) || 0,
       sku: editValues.sku.trim() || selectedProduct.sku,
-      status: Number(editValues.stock) > 0 ? "Published" : "Draft",
+       status: hasSellableStock(editValues.stock, editValues.variantType, editProductSizes, editProductSizeStock, editValues.variants) ? "Published" : "Draft",
       image,
       hoverImage,
       barcode: editValues.barcode.trim(),
@@ -5081,8 +5331,9 @@ function ProductLibraryWorkspace({
       gstRate: Number(editValues.gstRate) || 0,
       markup: Number(editValues.markup) || 0,
       costWithGst: editValues.costWithGst,
-      sizes: parseProductSizes(editValues.sizes),
-      sizeStock: normalizeSizeStock(editValues.sizeStock),
+       sizes: editProductSizes,
+       sizeStock: normalizeSizeStock(editProductSizeStock),
+      variantType: editValues.variantType,
       variants: editVariantAdjustmentsEnabled
         ? editValues.variants
         : editValues.variants.map((variant) => ({ ...variant, adjustments: defaultImageAdjustments })),
@@ -5104,6 +5355,7 @@ function ProductLibraryWorkspace({
       void saveProductSizes(next);
       void saveProductSizeStock(next);
       void saveProductVariants(next);
+      void saveProductVariantTypes(next);
       void saveProductImageAdjustments(next);
       return next;
     });
@@ -5339,11 +5591,21 @@ function ProductLibraryWorkspace({
               <PhotoAdjustmentToggle enabled={newHoverAdjustmentsEnabled} onChange={setNewHoverAdjustmentsEnabled} />
               {newHoverAdjustmentsEnabled && <ImageAdjustmentControls adjustments={newHoverAdjustments} onChange={setNewHoverAdjustments} />}
             </div>
+            <div className="variant-type-selector form-wide">
+              <label>
+                Stock tracking method
+                <select aria-label="Stock tracking method" value={newProduct.variantType} onChange={(event) => setNewProduct((current) => ({ ...current, variantType: event.target.value as ProductVariantType }))}>
+                  <option value="normal">VARIANT STOCK — colour / model wise</option>
+                  <option value="size">SIZE STOCK — add size variants</option>
+                </select>
+                <small className="field-help">Normal variants reduce the selected variant stock. Size variants reduce the selected size stock.</small>
+              </label>
+            </div>
             <div className="variant-editor">
               <div className="variant-editor-heading">
                 <div>
-                  <p className="eyebrow">COLOUR / SERIES / MODEL VARIANTS</p>
-                  <small>Add a separate customer-selectable image for each variant. Drag its preview to adjust the position.</small>
+                    <p className="eyebrow">{newProduct.variantType === "size" ? "SIZE VARIANTS" : "COLOUR / SERIES / MODEL VARIANTS"}</p>
+                    <small>{newProduct.variantType === "size" ? "Add each size as a variant with its own image and size stock." : "Add a separate customer-selectable image for each variant. Drag its preview to adjust the position."}</small>
                 </div>
                 <div className="variant-editor-actions">
                   <VariantAdjustmentToggle enabled={newVariantAdjustmentsEnabled} onChange={setNewVariantAdjustmentsEnabled} />
@@ -5354,26 +5616,43 @@ function ProductLibraryWorkspace({
                       setNewProduct((current) => ({
                         ...current,
                         stock: current.variants.length ? current.stock : "",
-                        variants: [...current.variants, { name: "", image: "", adjustments: defaultImageAdjustments }],
+                        variants: [...current.variants, { name: "", size: current.variantType === "size" ? "" : undefined, image: "", adjustments: defaultImageAdjustments }],
                       }))
                     }
                   >
-                    + Add variant
+                      {newProduct.variantType === "size" ? "+ Add size variant" : "+ Add variant"}
                   </button>
                 </div>
               </div>
               {newProduct.variants.length ? (
                 <div className="variant-editor-list">
                   {newProduct.variants.map((variant, index) => (
-                    <div className="variant-editor-row" key={`new-variant-${index}`}>
-                      <input
-                        value={variant.name}
-                        onChange={(event) => updateNewVariant(index, "name", event.target.value)}
-                        placeholder="e.g. Rose gold / Model 2"
-                        aria-label={`Variant ${index + 1} name`}
-                      />
+                    <div className={`variant-editor-row ${newProduct.variantType === "size" ? "size-variant-row" : ""}`} key={`new-variant-${index}`}>
+                      <label className="variant-name-field">
+                        Variant name
+                        <input
+                          value={variant.name}
+                          onChange={(event) => updateNewVariant(index, "name", event.target.value)}
+                          placeholder={newProduct.variantType === "size" ? "e.g. Classic" : "e.g. Rose gold / Model 2"}
+                          aria-label={`Variant ${index + 1} name`}
+                        />
+                      </label>
+                      {newProduct.variantType === "size" && (
+                        <label className="variant-size-field">
+                          Size
+                          <input
+                            value={variant.size ?? ""}
+                            onChange={(event) => setNewProduct((current) => ({
+                              ...current,
+                              variants: current.variants.map((item, variantIndex) => variantIndex === index ? { ...item, size: event.target.value } : item),
+                            }))}
+                            placeholder="e.g. 6"
+                            aria-label={`Size ${index + 1}`}
+                          />
+                        </label>
+                      )}
                       <label className="variant-stock-field">
-                        Variant stock
+                         {newProduct.variantType === "size" ? "Size stock" : "Variant stock"}
                         <input
                           type="number"
                           min="0"
@@ -5384,15 +5663,9 @@ function ProductLibraryWorkspace({
                           }))}
                           onWheel={(event) => event.currentTarget.blur()}
                           placeholder="0"
-                          aria-label={`Variant ${index + 1} stock`}
+                          aria-label={`${newProduct.variantType === "size" ? "Size" : "Variant"} ${index + 1} stock`}
                         />
                       </label>
-                      <input
-                        value={variant.image}
-                        onChange={(event) => updateNewVariant(index, "image", event.target.value)}
-                        placeholder="Image URL (optional)"
-                        aria-label={`Variant ${index + 1} image URL`}
-                      />
                       <ImageAdjustmentPreview className="variant-adjust-preview" src={variant.image} alt="Variant preview" adjustments={variant.adjustments || defaultImageAdjustments} enabled={newVariantAdjustmentsEnabled} onClick={() => newVariantImageInputRefs.current[index]?.click()} onChange={(adjustments) => updateNewVariantAdjustments(index, adjustments)} />
                       <label className="variant-upload">
                         Upload image
@@ -5487,7 +5760,7 @@ function ProductLibraryWorkspace({
                   <option>Rings</option>
                 </select>
               </label>
-              <label>
+              <label style={{ display: newProduct.variantType === "size" && !newProduct.variants.length ? undefined : "none" }}>
                 Available sizes
                 <input
                   value={newProduct.sizes}
@@ -5496,7 +5769,7 @@ function ProductLibraryWorkspace({
                 />
                 <small className="field-help">Separate multiple sizes with commas.</small>
               </label>
-              {parseProductSizes(newProduct.sizes).length > 0 && <div className="size-stock-editor form-wide"><span className="field-label">Stock by size</span><div>{parseProductSizes(newProduct.sizes).map((size) => <label key={size}>{size}<input type="number" min="0" step="1" value={newProduct.sizeStock[size] ?? ""} onChange={(event) => setNewProduct((current) => ({ ...current, sizeStock: { ...current.sizeStock, [size]: event.target.value === "" ? "" : Number(event.target.value) } }))} placeholder="Quantity" onWheel={(event) => event.currentTarget.blur()} /></label>)}</div></div>}
+              {newProduct.variantType === "size" && !newProduct.variants.length && parseProductSizes(newProduct.sizes).length > 0 && <div className="size-stock-editor form-wide"><span className="field-label">Stock by size</span><div>{parseProductSizes(newProduct.sizes).map((size) => <label key={size}>{size}<input type="number" min="0" step="1" value={newProduct.sizeStock[size] ?? ""} onChange={(event) => setNewProduct((current) => ({ ...current, sizeStock: { ...current.sizeStock, [size]: event.target.value === "" ? "" : Number(event.target.value) } }))} placeholder="Quantity" onWheel={(event) => event.currentTarget.blur()} /></label>)}</div></div>}
                 <label>
                   Cost price
                   <input
@@ -5525,16 +5798,19 @@ function ProductLibraryWorkspace({
                 </label>
                 <label>
                   Markup %
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={newProduct.markup}
-                    onChange={(event) => updateField("markup", event.target.value)}
-                    onWheel={(event) => event.currentTarget.blur()}
-                    placeholder="e.g. 25"
-                    inputMode="decimal"
-                  />
+                  <span className="percentage-input">
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={newProduct.markup}
+                      onChange={(event) => updateField("markup", event.target.value)}
+                      onWheel={(event) => event.currentTarget.blur()}
+                      placeholder="e.g. 25"
+                      inputMode="decimal"
+                    />
+                    <b>%</b>
+                  </span>
                 </label>
                 <label>
                   Selling price
@@ -5544,7 +5820,7 @@ function ProductLibraryWorkspace({
                     placeholder="Calculated from cost + markup"
                   />
                 </label>
-                    <label className={newProduct.variants.length ? "product-stock-disabled" : ""}>
+                    {!((newProduct.variantType === "normal" || newProduct.variantType === "size") && newProduct.variants.length) && <label className={newProduct.variants.length ? "product-stock-disabled" : ""}>
                   Stock {newProduct.variants.length ? <small>Use variant stock below</small> : null}
                 <input
                   type="number"
@@ -5555,7 +5831,7 @@ function ProductLibraryWorkspace({
                   placeholder="0"
                   disabled={newProduct.variants.length > 0}
                 />
-              </label>
+              </label>}
             </div>
             <div className="product-detail-actions">
               <button className="module-primary" onClick={saveProduct}>
@@ -5716,11 +5992,21 @@ function ProductLibraryWorkspace({
             <PhotoAdjustmentToggle enabled={editHoverAdjustmentsEnabled} onChange={setEditHoverAdjustmentsEnabled} />
             {editHoverAdjustmentsEnabled && <ImageAdjustmentControls adjustments={editHoverAdjustments} onChange={setEditHoverAdjustments} />}
           </div>
-          <div className="variant-editor">
+            <div className="variant-type-selector form-wide">
+              <label>
+                Stock tracking method
+                <select aria-label="Stock tracking method" value={editValues.variantType} onChange={(event) => setEditValues((current) => ({ ...current, variantType: event.target.value as ProductVariantType }))}>
+                  <option value="normal">VARIANT STOCK — colour / model wise</option>
+                  <option value="size">SIZE STOCK — add size variants</option>
+                </select>
+                <small className="field-help">Normal variants reduce the selected variant stock. Size variants reduce the selected size stock.</small>
+              </label>
+            </div>
+            <div className="variant-editor">
             <div className="variant-editor-heading">
               <div>
-                <p className="eyebrow">COLOUR / SERIES / MODEL VARIANTS</p>
-                <small>Add a separate customer-selectable image for each variant. Drag its preview to adjust the position.</small>
+                <p className="eyebrow">{editValues.variantType === "size" ? "SIZE VARIANTS" : "COLOUR / SERIES / MODEL VARIANTS"}</p>
+                <small>{editValues.variantType === "size" ? "Add each size as a variant with its own image and size stock." : "Add a separate customer-selectable image for each variant. Drag its preview to adjust the position."}</small>
               </div>
               <div className="variant-editor-actions">
                 <VariantAdjustmentToggle enabled={editVariantAdjustmentsEnabled} onChange={setEditVariantAdjustmentsEnabled} />
@@ -5731,26 +6017,43 @@ function ProductLibraryWorkspace({
                     setEditValues((current) => ({
                       ...current,
                       stock: current.variants.length ? current.stock : "",
-                      variants: [...current.variants, { name: "", image: "", adjustments: defaultImageAdjustments }],
+                      variants: [...current.variants, { name: "", size: current.variantType === "size" ? "" : undefined, image: "", adjustments: defaultImageAdjustments }],
                     }))
                   }
                 >
-                  + Add variant
+                  {editValues.variantType === "size" ? "+ Add size variant" : "+ Add variant"}
                 </button>
               </div>
             </div>
             {editValues.variants.length ? (
               <div className="variant-editor-list">
-                {editValues.variants.map((variant, index) => (
-                  <div className="variant-editor-row" key={`edit-variant-${index}`}>
-                    <input
-                      value={variant.name}
-                      onChange={(event) => updateEditVariant(index, "name", event.target.value)}
-                      placeholder="e.g. Rose gold / Model 2"
-                      aria-label={`Variant ${index + 1} name`}
-                    />
-                    <label className="variant-stock-field">
-                      Variant stock
+                  {editValues.variants.map((variant, index) => (
+                    <div className={`variant-editor-row ${editValues.variantType === "size" ? "size-variant-row" : ""}`} key={`edit-variant-${index}`}>
+                    <label className="variant-name-field">
+                      Variant name
+                      <input
+                        value={variant.name}
+                        onChange={(event) => updateEditVariant(index, "name", event.target.value)}
+                        placeholder={editValues.variantType === "size" ? "e.g. Classic" : "e.g. Rose gold / Model 2"}
+                        aria-label={`Variant ${index + 1} name`}
+                      />
+                    </label>
+                    {editValues.variantType === "size" && (
+                      <label className="variant-size-field">
+                        Size
+                        <input
+                          value={variant.size ?? ""}
+                          onChange={(event) => setEditValues((current) => ({
+                            ...current,
+                            variants: current.variants.map((item, variantIndex) => variantIndex === index ? { ...item, size: event.target.value } : item),
+                          }))}
+                          placeholder="e.g. 6"
+                          aria-label={`Size ${index + 1}`}
+                        />
+                      </label>
+                    )}
+                      <label className="variant-stock-field">
+                       {editValues.variantType === "size" ? "Size stock" : "Variant stock"}
                       <input
                         type="number"
                         min="0"
@@ -5761,15 +6064,9 @@ function ProductLibraryWorkspace({
                         }))}
                         onWheel={(event) => event.currentTarget.blur()}
                         placeholder="0"
-                        aria-label={`Variant ${index + 1} stock`}
+                        aria-label={`${editValues.variantType === "size" ? "Size" : "Variant"} ${index + 1} stock`}
                       />
                     </label>
-                    <input
-                      value={variant.image}
-                      onChange={(event) => updateEditVariant(index, "image", event.target.value)}
-                      placeholder="Image URL (optional)"
-                      aria-label={`Variant ${index + 1} image URL`}
-                    />
                     <ImageAdjustmentPreview className="variant-adjust-preview" src={variant.image} alt="Variant preview" adjustments={variant.adjustments || defaultImageAdjustments} enabled={editVariantAdjustmentsEnabled} onClick={() => editVariantImageInputRefs.current[index]?.click()} onChange={(adjustments) => updateEditVariantAdjustments(index, adjustments)} />
                     <label className="variant-upload">
                       Upload image
@@ -5890,7 +6187,7 @@ function ProductLibraryWorkspace({
                 <option>Rings</option>
               </select>
             </label>
-            <label>
+            <label style={{ display: editValues.variantType === "size" && !editValues.variants.length ? undefined : "none" }}>
               Available sizes
               <input
                 value={editValues.sizes}
@@ -5899,7 +6196,7 @@ function ProductLibraryWorkspace({
               />
               <small className="field-help">Separate multiple sizes with commas.</small>
             </label>
-            {parseProductSizes(editValues.sizes).length > 0 && <div className="size-stock-editor form-wide"><span className="field-label">Stock by size</span><div>{parseProductSizes(editValues.sizes).map((size) => <label key={size}>{size}<input type="number" min="0" step="1" value={editValues.sizeStock[size] ?? ""} onChange={(event) => setEditValues((current) => ({ ...current, sizeStock: { ...current.sizeStock, [size]: event.target.value === "" ? "" : Number(event.target.value) } }))} placeholder="Quantity" onWheel={(event) => event.currentTarget.blur()} /></label>)}</div></div>}
+            {editValues.variantType === "size" && !editValues.variants.length && parseProductSizes(editValues.sizes).length > 0 && <div className="size-stock-editor form-wide"><span className="field-label">Stock by size</span><div>{parseProductSizes(editValues.sizes).map((size) => <label key={size}>{size}<input type="number" min="0" step="1" value={editValues.sizeStock[size] ?? ""} onChange={(event) => setEditValues((current) => ({ ...current, sizeStock: { ...current.sizeStock, [size]: event.target.value === "" ? "" : Number(event.target.value) } }))} placeholder="Quantity" onWheel={(event) => event.currentTarget.blur()} /></label>)}</div></div>}
                 <label>
                   Cost price
                   <input
@@ -5928,31 +6225,29 @@ function ProductLibraryWorkspace({
                 </label>
                 <label>
                   Markup %
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={editValues.markup}
-                    onChange={(event) => updateEditField("markup", event.target.value)}
-                    onWheel={(event) => event.currentTarget.blur()}
-                    placeholder="e.g. 25"
-                    inputMode="decimal"
-                  />
+                  <span className="percentage-input">
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={editValues.markup}
+                      onChange={(event) => updateEditField("markup", event.target.value)}
+                      onWheel={(event) => event.currentTarget.blur()}
+                      placeholder="e.g. 25"
+                      inputMode="decimal"
+                    />
+                    <b>%</b>
+                  </span>
                 </label>
                 <label>
                   Selling price
                   <input
                     value={editValues.price}
-                    onChange={(event) =>
-                      setEditValues((current) => ({
-                        ...current,
-                        price: event.target.value,
-                      }))
-                    }
+                    onChange={(event) => updateEditField("price", event.target.value)}
                     placeholder="Calculated from cost + markup"
                   />
                 </label>
-                <label className={editValues.variants.length ? "product-stock-disabled" : ""}>
+                {!((editValues.variantType === "normal" || editValues.variantType === "size") && editValues.variants.length) && <label className={editValues.variants.length ? "product-stock-disabled" : ""}>
                   Stock {editValues.variants.length ? <small>Use variant stock below</small> : null}
               <input
                 type="number"
@@ -5967,7 +6262,7 @@ function ProductLibraryWorkspace({
                 disabled={editValues.variants.length > 0}
                 onWheel={(event) => event.currentTarget.blur()}
               />
-            </label>
+            </label>}
           </div>
           <div className="product-detail-actions">
             <button className="module-primary" onClick={saveEdit}>

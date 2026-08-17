@@ -1,6 +1,7 @@
 import { supabase } from "./client";
 
 export type CatalogStatus = "Published" | "Draft" | "Low stock";
+export type ProductVariantType = "normal" | "size";
 
 export type CatalogProduct = {
   name: string;
@@ -16,8 +17,9 @@ export type CatalogProduct = {
   tag?: string;
   tone?: string;
   barcode?: string;
-  variants?: Array<{ name: string; image: string; stock?: number }>;
+  variants?: Array<{ name: string; size?: string; image: string; stock?: number; price?: number }>;
   sizes?: string[];
+  variantType?: ProductVariantType;
 };
 
 export type CatalogCategory = {
@@ -44,9 +46,11 @@ const settingKeys = {
   productBillNames: "product_bill_names",
   productPricing: "product_pricing",
   productVariants: "product_variants",
+  productVariantType: "product_variant_type",
   productSizes: "product_sizes",
   productSizeStock: "product_size_stock",
   productImageAdjustments: "product_image_adjustments",
+  promotionalOffers: "promotional_offers",
 } as const;
 
 const asError = (value: unknown) => value instanceof Error ? value : new Error(String(value || "Supabase request failed"));

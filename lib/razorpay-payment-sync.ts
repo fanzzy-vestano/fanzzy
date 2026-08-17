@@ -1,6 +1,7 @@
 type StoredOrder = {
   id: string;
   userId?: string;
+  userPhone?: string;
   userEmail?: string;
   date: string;
   status: "Processing" | "Packed" | "Shipped" | "Delivered" | "Cancelled";
@@ -13,8 +14,10 @@ type StoredOrder = {
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
   inventoryAdjusted?: boolean;
-  items?: Array<{ name: string; quantity: number; price: string; productId?: string }>;
+  items?: Array<{ name: string; quantity: number; price: string; productId?: string; variantName?: string; size?: string }>;
 };
+
+type StoredVariant = { name?: string; size?: string; stock?: number; [key: string]: unknown };
 
 export type RazorpayPayment = {
   id: string;
@@ -88,13 +91,89 @@ async function writeOrders(orders: StoredOrder[]) {
   if (!response.ok) throw new Error("Could not save the paid order");
 }
 
+async function readJsonSetting<T>(key: string, fallback: T) {
+  const response = await fetch(`${supabaseUrl}/rest/v1/store_settings?key=eq.${encodeURIComponent(key)}&select=value`, { headers });
+  if (!response.ok) throw new Error(`Could not read ${key}`);
+  const rows = await response.json() as Array<{ value?: string }>;
+  try {
+    return JSON.parse(rows[0]?.value || "") as T;
+  } catch {
+    return fallback;
+  }
+}
+
+async function writeJsonSetting(key: string, value: unknown) {
+  const response = await fetch(`${supabaseUrl}/rest/v1/store_settings?on_conflict=key`, {
+    method: "POST",
+    headers: { ...headers, Prefer: "resolution=merge-duplicates,return=minimal" },
+    body: JSON.stringify([{ key, value: JSON.stringify(value), updated_at: new Date().toISOString() }]),
+  });
+  if (!response.ok) throw new Error(`Could not update ${key}`);
+}
+
+const normalizeSelection = (value?: string) => String(value || "").trim().replace(/^size\s+/i, "").toLowerCase();
+
 async function adjustInventory(order: StoredOrder) {
-  const quantities = new Map<string, number>();
+  const [savedVariants, savedSizeStock, savedVariantTypes] = await Promise.all([
+    readJsonSetting<Record<string, StoredVariant[]>>("product_variants", {}),
+    readJsonSetting<Record<string, Record<string, number>>>("product_size_stock", {}),
+    readJsonSetting<Record<string, "normal" | "size">>("product_variant_type", {}),
+  ]);
+  const variants = structuredClone(savedVariants);
+  const sizeStock = structuredClone(savedSizeStock);
+  const baseQuantities = new Map<string, number>();
+  let variantsChanged = false;
+  let sizeStockChanged = false;
+
   order.items?.forEach((item) => {
     const sku = String(item.productId || "").trim();
-    if (sku && item.quantity > 0) quantities.set(sku, (quantities.get(sku) || 0) + Math.floor(item.quantity));
+    const quantity = Math.floor(Number(item.quantity) || 0);
+    if (!sku || quantity <= 0) return;
+
+    const selectionType = savedVariantTypes[sku] || (item.size ? "size" : item.variantName ? "normal" : undefined);
+    if (selectionType === "size" && item.size) {
+      const normalizedSize = normalizeSelection(item.size);
+      const currentSizeStock = sizeStock[sku] || {};
+      const sizeKey = Object.keys(currentSizeStock).find((key) => normalizeSelection(key) === normalizedSize) || item.size;
+      const productVariants = variants[sku] || [];
+      const variantIndex = productVariants.findIndex((variant) => normalizeSelection(variant.size || variant.name) === normalizedSize);
+      const sizeVariant = variantIndex >= 0 ? productVariants[variantIndex] : undefined;
+      const available = currentSizeStock[sizeKey] ?? (Number.isFinite(Number(sizeVariant?.stock)) ? Number(sizeVariant?.stock) : undefined);
+      if (available === undefined) throw new Error(`Size stock was not found for ${sku} · Size ${item.size}`);
+
+      sizeStock[sku] = { ...currentSizeStock, [sizeKey]: Math.max(0, Math.floor(available - quantity)) };
+      sizeStockChanged = true;
+      if (sizeVariant && Number.isFinite(Number(sizeVariant.stock))) {
+        variants[sku] = productVariants.map((variant, index) => index === variantIndex
+          ? { ...variant, stock: Math.max(0, Math.floor(Number(variant.stock) - quantity)) }
+          : variant);
+        variantsChanged = true;
+      }
+      return;
+    }
+
+    if (selectionType === "normal" && item.variantName) {
+      const normalizedVariant = normalizeSelection(item.variantName);
+      const productVariants = variants[sku] || [];
+      const variantIndex = productVariants.findIndex((variant) => normalizeSelection(variant.name) === normalizedVariant);
+      const selectedVariant = variantIndex >= 0 ? productVariants[variantIndex] : undefined;
+      if (!selectedVariant || !Number.isFinite(Number(selectedVariant.stock))) {
+        throw new Error(`Variant stock was not found for ${sku} · ${item.variantName}`);
+      }
+      variants[sku] = productVariants.map((variant, index) => index === variantIndex
+        ? { ...variant, stock: Math.max(0, Math.floor(Number(variant.stock) - quantity)) }
+        : variant);
+      variantsChanged = true;
+      return;
+    }
+
+    baseQuantities.set(sku, (baseQuantities.get(sku) || 0) + quantity);
   });
-  for (const [sku, quantity] of quantities) {
+
+  if (sizeStockChanged) await writeJsonSetting("product_size_stock", sizeStock);
+  if (variantsChanged) await writeJsonSetting("product_variants", variants);
+
+  for (const [sku, quantity] of baseQuantities) {
     const productResponse = await fetch(`${supabaseUrl}/rest/v1/products?sku=eq.${encodeURIComponent(sku)}&select=sku,stock`, { headers });
     if (!productResponse.ok) throw new Error("Could not read product inventory");
     const products = await productResponse.json() as Array<{ stock?: number }>;

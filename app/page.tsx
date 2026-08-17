@@ -1,14 +1,14 @@
 ﻿"use client";
 
-import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchCatalogCategories,
   fetchCatalogProducts,
   fetchStoreOrders,
   fetchStoreSetting,
-  decrementCatalogStock,
   saveStoreOrders,
   saveStoreSetting,
+  type ProductVariantType,
 } from "../lib/supabase/catalog";
 import { printOrderBill } from "../lib/order-bill";
 import {
@@ -17,6 +17,17 @@ import {
   customerAuthRequest,
   saveCustomerAuthTokens,
 } from "../lib/customer-auth-client";
+import {
+  allocateBundlePrices,
+  isPromotionLive,
+  normalizePromotionOffer,
+  offerTypeLabel,
+  promotionStorageKey,
+  selectionKey,
+  validatePromotionSelection,
+  type PromotionOffer,
+  type PromotionSelection,
+} from "../lib/promotional-offers";
 
 type CustomerAuthUser = { id: string; phone: string };
 
@@ -35,12 +46,13 @@ type Product = {
   variants?: ProductVariant[];
   sizes?: string[];
   sizeStock?: Record<string, number>;
+  variantType?: ProductVariantType;
   billName?: string;
   imageAdjustments?: ImageAdjustments;
   hoverImageAdjustments?: ImageAdjustments;
 };
 type ImageAdjustments = { zoom: number; x: number; y: number; rotate: number };
-type ProductVariant = { name: string; image: string; stock?: number; adjustments?: ImageAdjustments };
+type ProductVariant = { name: string; size?: string; image: string; stock?: number; adjustments?: ImageAdjustments };
 type ProductImageAdjustments = {
   image?: ImageAdjustments;
   hoverImage?: ImageAdjustments;
@@ -50,6 +62,7 @@ type DeliveryCharge = { enabled: boolean; amount: number; freeAboveEnabled: bool
 type PickupHub = { id: string; name: string; place: string };
 type FulfillmentMethod = "delivery" | "pickup";
 type MarketingRecord = { kind: "Campaign" | "Coupon" | "Newsletter"; name: string; detail: string; status: "Active" | "Scheduled" | "Draft"; code?: string; discount?: string; offerType?: "bogo"; buyQuantity?: number; getQuantity?: number; eligibleProductIds?: string[] };
+type PromotionCartLine = { groupId: string; offerId: string; role: "paid" | "free" | "bundle"; label: string; regularPrice: number; linePrice: number };
 type OrderStatus = "Processing" | "Packed" | "Shipped" | "Delivered" | "Cancelled";
 type CustomerOrder = {
   id: string;
@@ -71,7 +84,8 @@ type CustomerOrder = {
   paymentStatus?: "pending" | "paid";
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
-  items?: Array<{ name: string; quantity: number; price: string; productId?: string; image?: string; variantName?: string; variantImage?: string; size?: string }>;
+  inventoryAdjusted?: boolean;
+  items?: Array<{ name: string; quantity: number; price: string; productId?: string; image?: string; variantName?: string; variantImage?: string; size?: string; promotion?: PromotionCartLine }>;
 };
 type AssistantMessage = { role: "user" | "assistant"; text: string; productIds?: string[] };
 type RazorpayCheckoutResponse = {
@@ -120,20 +134,36 @@ const formatINR = (value: number) => `₹${(Number.isFinite(value) ? value : 0).
 const CUSTOMER_PRICE_MULTIPLIER = 2.2;
 const getCustomerPrice = (product: Pick<Product, "price">) => product.price;
 const getComparePrice = (product: Pick<Product, "price">) => Math.round(product.price * CUSTOMER_PRICE_MULTIPLIER);
-const getVariantStock = (product: Pick<Product, "stock">, variant?: ProductVariant | null) => {
-  if (variant?.stock === undefined || variant.stock === null || variant.stock === "") return product.stock;
+const getProductVariantType = (product: Pick<Product, "variantType" | "sizes">): ProductVariantType => product.variantType || (product.sizes?.length ? "size" : "normal");
+const getProductSizes = (product: Pick<Product, "variantType" | "sizes" | "variants">) =>
+  getProductVariantType(product) === "size" && product.variants?.length
+    ? product.variants.map((variant) => variant.size || variant.name).filter(Boolean)
+    : product.sizes || [];
+const getSizeVariant = (product: Pick<Product, "variantType" | "sizes" | "variants">, size?: string | null) =>
+  size ? product.variants?.find((variant) => getProductVariantType(product) === "size" && (variant.size || variant.name) === size) : undefined;
+type StockProduct = Pick<Product, "stock"> & Partial<Pick<Product, "sizeStock" | "variantType" | "sizes" | "variants">> & { size?: string | null };
+const getSizeStock = (product: StockProduct, size?: string | null) => {
+  if (!size) return product.stock;
+  const normalizedSize = String(size).trim().replace(/^size\s+/i, "").toLowerCase();
+  const sizeVariant = product.variants?.find((variant) => String(variant.size || variant.name).trim().replace(/^size\s+/i, "").toLowerCase() === normalizedSize);
+  if (sizeVariant?.stock !== undefined && sizeVariant.stock !== null) {
+    const variantStock = Number(sizeVariant.stock);
+    if (Number.isFinite(variantStock)) return Math.max(0, Math.floor(variantStock));
+  }
+  const sizeStockKey = Object.keys(product.sizeStock || {}).find((key) => key.trim().replace(/^size\s+/i, "").toLowerCase() === normalizedSize);
+  const value = sizeStockKey ? product.sizeStock?.[sizeStockKey] : undefined;
+  return value === undefined ? product.stock : Math.max(0, Math.floor(Number(value) || 0));
+};
+const getVariantStock = (product: StockProduct, variant?: ProductVariant | null) => {
+  if (getProductVariantType(product) === "size" && product.size) return getSizeStock(product, product.size);
+  if (variant?.stock === undefined || variant.stock === null) return product.stock;
   const stock = Number(variant.stock);
   return Number.isFinite(stock) ? Math.max(0, Math.floor(stock)) : product.stock;
 };
-const getSizeStock = (product: Pick<Product, "stock" | "sizeStock">, size?: string | null) => {
-  if (!size) return product.stock;
-  const value = product.sizeStock?.[size];
-  return value === undefined ? product.stock : Math.max(0, Math.floor(Number(value) || 0));
+const getSelectionStock = (product: Pick<Product, "stock" | "sizeStock" | "variantType" | "sizes" | "variants">, variant?: ProductVariant | null, size?: string | null) => {
+  if (getProductVariantType(product) === "size") return getSizeStock(product, size);
+  return variant ? getVariantStock(product, variant) : product.stock;
 };
-const getSelectionStock = (product: Pick<Product, "stock" | "sizeStock">, variant?: ProductVariant | null, size?: string | null) =>
-  variant && variant.stock !== undefined && variant.stock !== null && variant.stock !== ""
-    ? Math.min(getVariantStock(product, variant), getSizeStock(product, size))
-    : getSizeStock(product, size);
 const loadRazorpayCheckout = () => new Promise<new (options: RazorpayCheckoutOptions) => RazorpayCheckout>((resolve, reject) => {
   const existing = (window as Window & { Razorpay?: new (options: RazorpayCheckoutOptions) => RazorpayCheckout }).Razorpay;
   if (existing) return resolve(existing);
@@ -245,16 +275,18 @@ function normalizeStoredProduct(value: unknown, index: number): Product | null {
   const price = typeof rawPrice === "number" ? rawPrice : Number(String(rawPrice ?? "").replace(/[^0-9.]/g, ""));
   const stock = typeof raw.stock === "number" ? raw.stock : Number(raw.stock ?? 0);
   const image = typeof raw.image === "string" ? raw.image : "";
+  const sizes = Array.isArray(raw.sizes) ? raw.sizes.filter((size): size is string => typeof size === "string") : [];
   const variants = Array.isArray(raw.variants)
     ? raw.variants
         .filter((variant): variant is Record<string, unknown> => Boolean(variant && typeof variant === "object"))
         .map((variant) => ({
           name: typeof variant.name === "string" ? variant.name.trim() : "",
+          size: typeof variant.size === "string" ? variant.size.trim() : undefined,
           image: typeof variant.image === "string" ? variant.image : "",
           stock: variant.stock === undefined || variant.stock === null || variant.stock === "" ? undefined : Number.isFinite(Number(variant.stock)) ? Math.max(0, Math.floor(Number(variant.stock))) : undefined,
           adjustments: normalizeImageAdjustments(variant.adjustments),
         }))
-        .filter((variant) => variant.name || variant.image)
+        .filter((variant) => variant.name || variant.size || variant.image)
     : [];
   const idValue = typeof raw.id === "string" ? raw.id : typeof raw.sku === "string" ? raw.sku : `${name}-${index}`;
   return {
@@ -270,19 +302,20 @@ function normalizeStoredProduct(value: unknown, index: number): Product | null {
     tag: typeof raw.tag === "string" ? raw.tag : undefined,
     tone: typeof raw.tone === "string" && raw.tone ? raw.tone : productTones[index % productTones.length],
     variants,
-    sizes: Array.isArray(raw.sizes) ? raw.sizes.filter((size): size is string => typeof size === "string") : [],
+    sizes,
     sizeStock: raw.sizeStock && typeof raw.sizeStock === "object" ? raw.sizeStock as Record<string, number> : {},
+    variantType: raw.variantType === "size" || raw.variantType === "normal" ? raw.variantType : (sizes.length ? "size" : "normal"),
     billName: typeof raw.billName === "string" ? raw.billName.trim() : "",
     imageAdjustments: normalizeImageAdjustments(raw.imageAdjustments),
     hoverImageAdjustments: normalizeImageAdjustments(raw.hoverImageAdjustments),
   };
 }
 
-function ProductCard({ product, wished, onWishlist, onAdd, onQuickView, onImageZoom }: { product: Product; wished: boolean; onWishlist: () => void; onAdd: () => void; onQuickView: () => void; onImageZoom: () => void }) {
-  const isOutOfStock = product.variants?.length
+function ProductCard({ product, wished, promotions, onWishlist, onAdd, onQuickView, onImageZoom }: { product: Product; wished: boolean; promotions: PromotionOffer[]; onWishlist: () => void; onAdd: () => void; onQuickView: () => void; onImageZoom: () => void }) {
+  const isOutOfStock = getProductVariantType(product) === "normal" && product.variants?.length
     ? product.variants.every((variant) => getVariantStock(product, variant) <= 0)
-    : product.sizes?.length
-      ? product.sizes.every((size) => getSizeStock(product, size) <= 0)
+    : getProductVariantType(product) === "size" && getProductSizes(product).length
+      ? getProductSizes(product).every((size) => getSizeStock(product, size) <= 0)
       : product.stock <= 0;
   return (
     <article className="product-card">
@@ -290,6 +323,7 @@ function ProductCard({ product, wished, onWishlist, onAdd, onQuickView, onImageZ
         <img className={`product-image product-image-zoom primary-image ${isOutOfStock ? "stock-out-image" : ""}`} src={product.image} alt={product.name} style={imageAdjustmentStyle(product.imageAdjustments)} onClick={onImageZoom} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onImageZoom(); }} role="button" tabIndex={0} title="Click to zoom" />
         <img className={`product-image product-image-zoom hover-image ${isOutOfStock ? "stock-out-image" : ""}`} src={product.hoverImage} alt="" aria-hidden="true" style={imageAdjustmentStyle(product.hoverImageAdjustments)} onClick={onImageZoom} />
         {product.tag && <span className="product-tag">{product.tag}</span>}
+        {promotions.slice(0, 1).map((offer) => <span className="promotion-badge" key={offer.id}>{offerTypeLabel(offer)}</span>)}
         {product.stock === 1 && <span className={`low-stock-badge ${product.tag ? "with-tag" : ""}`}>Only 1 available</span>}
         {isOutOfStock && <span className="stock-out-overlay">Sold out</span>}
         <button className={`wishlist-button ${wished ? "is-wished" : ""}`} onClick={onWishlist} aria-label={wished ? `Remove ${product.name} from wishlist` : `Add ${product.name} to wishlist`}>{wished ? "♥" : "♡"}</button>
@@ -302,7 +336,7 @@ function ProductCard({ product, wished, onWishlist, onAdd, onQuickView, onImageZ
         </div>
         <button className="add-to-cart-button" type="button" onClick={onAdd} disabled={isOutOfStock} aria-label={isOutOfStock ? `${product.name} is sold out` : `Add ${product.name} to cart`}>Add to cart</button>
       </div>
-      {product.variants?.length ? <button className="product-variants-preview" onClick={onQuickView} aria-label={`View ${product.name} variants`}><span>{product.variants.length} colour / model option{product.variants.length === 1 ? "" : "s"}</span><span className="product-variant-thumbs">{product.variants.slice(0, 4).map((variant) => <img key={`${product.id}-${variant.name}`} src={variant.image || product.image} alt={variant.name} style={imageAdjustmentStyle(variant.adjustments)} />)}</span><b>View ↗</b></button> : null}
+      {getProductVariantType(product) === "normal" && product.variants?.length ? <button className="product-variants-preview" onClick={onQuickView} aria-label={`View ${product.name} variants`}><span>{product.variants.length} colour / model option{product.variants.length === 1 ? "" : "s"}</span><span className="product-variant-thumbs">{product.variants.slice(0, 4).map((variant) => <img key={`${product.id}-${variant.name}`} src={variant.image || product.image} alt={variant.name} style={imageAdjustmentStyle(variant.adjustments)} />)}</span><b>View ↗</b></button> : null}
       <div className="price-row"><span>{formatINR(getCustomerPrice(product))}</span><del>{formatINR(getComparePrice(product))}</del></div>
     </article>
   );
@@ -320,6 +354,7 @@ export default function Home() {
   const [cart, setCart] = useState<Record<string, number>>({});
   const [cartVariants, setCartVariants] = useState<Record<string, ProductVariant | null>>({});
   const [cartSizes, setCartSizes] = useState<Record<string, string | null>>({});
+  const [cartPromotionLines, setCartPromotionLines] = useState<Record<string, PromotionCartLine>>({});
   const cartOwnerId = useRef<string | null>(null);
   const [cartReadyOwner, setCartReadyOwner] = useState<string | null>(null);
   const [cartOpen, setCartOpen] = useState(false);
@@ -347,11 +382,17 @@ export default function Home() {
   const [couponInput, setCouponInput] = useState("");
   const [appliedCoupon, setAppliedCoupon] = useState<MarketingRecord | null>(null);
   const [marketingRecords, setMarketingRecords] = useState<MarketingRecord[]>([]);
+  const [promotionalOffers, setPromotionalOffers] = useState<PromotionOffer[]>([]);
   const [quickProduct, setQuickProduct] = useState<Product | null>(null);
-  const quickViewHistoryEntry = useRef(false);
+  const overlayHistoryStack = useRef<string[]>([]);
+  const overlayHistoryCleanup = useRef(false);
+  const overlayClosedFromBack = useRef(false);
   const [zoomedImage, setZoomedImage] = useState<{ src: string; alt: string; adjustments?: ImageAdjustments } | null>(null);
   const [selectedVariant, setSelectedVariant] = useState<ProductVariant | null>(null);
   const [selectedSize, setSelectedSize] = useState<string | null>(null);
+  const [selectedPromotion, setSelectedPromotion] = useState<PromotionOffer | null>(null);
+  const [selectedFreeSelections, setSelectedFreeSelections] = useState<PromotionSelection[]>([]);
+  const [selectedBundleSelections, setSelectedBundleSelections] = useState<PromotionSelection[]>([]);
   const [toast, setToast] = useState("");
   const [email, setEmail] = useState("");
   const [subscribed, setSubscribed] = useState(false);
@@ -423,11 +464,13 @@ export default function Home() {
     const syncProducts = async () => {
       const remote = await fetchCatalogProducts();
       const variantsRemote = await fetchStoreSetting("productVariants");
+      const variantTypeRemote = await fetchStoreSetting("productVariantType");
       const sizesRemote = await fetchStoreSetting("productSizes");
       const sizeStockRemote = await fetchStoreSetting("productSizeStock");
       const imageAdjustmentsRemote = await fetchStoreSetting("productImageAdjustments");
       const billNameRemote = await fetchStoreSetting("productBillNames");
       let variantsMap: Record<string, ProductVariant[]> = {};
+      let variantTypeMap: Record<string, ProductVariantType> = {};
       let sizesMap: Record<string, string[]> = {};
       let sizeStockMap: Record<string, Record<string, number>> = {};
       let imageAdjustmentsMap: Record<string, ProductImageAdjustments> = {};
@@ -438,6 +481,18 @@ export default function Home() {
           if (parsed && typeof parsed === "object") variantsMap = parsed;
         } catch {
           variantsMap = {};
+        }
+      }
+      if (variantTypeRemote.value) {
+        try {
+          const parsed = JSON.parse(variantTypeRemote.value) as Record<string, unknown>;
+          if (parsed && typeof parsed === "object") {
+            variantTypeMap = Object.fromEntries(
+              Object.entries(parsed).filter((entry): entry is [string, ProductVariantType] => entry[1] === "normal" || entry[1] === "size"),
+            );
+          }
+        } catch {
+          variantTypeMap = {};
         }
       }
       if (sizesRemote.value) {
@@ -491,6 +546,7 @@ export default function Home() {
               variants: product.variants?.length ? product.variants : localVariantsMap[product.id] || [],
               sizes: product.sizes?.length ? product.sizes : sizesMap[product.sku || ""] || [],
               sizeStock: product.sizeStock || sizeStockMap[product.sku || ""] || {},
+              variantType: product.variantType || variantTypeMap[product.sku || ""] || (product.sizes?.length ? "size" : "normal"),
             }));
           }
         } catch {
@@ -520,6 +576,7 @@ export default function Home() {
           })),
           sizes: sizesMap[product.sku] || [],
           sizeStock: sizeStockMap[product.sku] || {},
+          variantType: variantTypeMap[product.sku] || (sizesMap[product.sku]?.length ? "size" : "normal"),
           imageAdjustments: savedAdjustments?.image,
           hoverImageAdjustments: savedAdjustments?.hoverImage,
           billName: billNameMap[product.sku] || "",
@@ -548,31 +605,18 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    const availableVariant = quickProduct?.variants?.find((variant) => getVariantStock(quickProduct, variant) > 0);
-    setSelectedVariant(availableVariant ?? quickProduct?.variants?.[0] ?? null);
-    const availableSize = quickProduct?.sizes?.find((size) => getSelectionStock(quickProduct, availableVariant ?? null, size) > 0);
+    const availableVariant = quickProduct && getProductVariantType(quickProduct) === "normal"
+      ? quickProduct.variants?.find((variant) => getVariantStock(quickProduct, variant) > 0)
+      : undefined;
+    setSelectedVariant(availableVariant ?? (quickProduct && getProductVariantType(quickProduct) === "normal" ? quickProduct.variants?.[0] : null) ?? null);
+    const availableSize = quickProduct && getProductVariantType(quickProduct) === "size"
+      ? getProductSizes(quickProduct).find((size) => getSelectionStock(quickProduct, null, size) > 0)
+      : undefined;
     setSelectedSize(availableSize ?? quickProduct?.sizes?.[0] ?? null);
+    setSelectedPromotion(null);
+    setSelectedFreeSelections([]);
+    setSelectedBundleSelections([]);
   }, [quickProduct]);
-
-  useEffect(() => {
-    if (!quickProduct) return;
-    // A same-page history entry lets the phone's Back button close only this
-    // quick view, retaining the customer's scroll position in the product grid.
-    window.history.pushState({ ...window.history.state, fanzzyQuickView: true }, "", window.location.href);
-    quickViewHistoryEntry.current = true;
-    const closeFromBackButton = () => {
-      quickViewHistoryEntry.current = false;
-      setQuickProduct(null);
-    };
-    window.addEventListener("popstate", closeFromBackButton);
-    return () => {
-      window.removeEventListener("popstate", closeFromBackButton);
-      if (quickViewHistoryEntry.current) {
-        quickViewHistoryEntry.current = false;
-        window.history.back();
-      }
-    };
-  }, [quickProduct?.id]);
 
   useEffect(() => {
     let active = true;
@@ -663,10 +707,24 @@ export default function Home() {
     });
   }, [activeCategory, products, search]);
 
+  const offersForProduct = (product: Product) => promotionalOffers.filter((offer) => {
+    const paidScope = offer.eligiblePaid;
+    if (!paidScope.length) return true;
+    return paidScope.some((selection) => selection.productId === product.id || selection.productId === product.sku || selection.productId === product.name.toLowerCase().replace(/[^a-z0-9]+/g, "-"));
+  });
+  const makePromotionSelection = (product: Product, variant?: ProductVariant | null, size?: string | null): PromotionSelection => ({
+    productId: product.id,
+    sku: product.sku,
+    variantName: variant?.name,
+    size: size || undefined,
+    price: getCustomerPrice(product),
+    stock: getSelectionStock(product, variant, size),
+  });
+
   const cartItems = Object.entries(cart).flatMap(([cartKey, quantity]) => {
     const productId = cartKey.split("::", 1)[0];
     const product = products.find((item) => item.id === productId);
-    return product ? [{ ...product, cartKey, quantity, variant: cartVariants[cartKey] ?? null, size: cartSizes[cartKey] ?? null }] : [];
+    return product ? [{ ...product, cartKey, quantity, variant: cartVariants[cartKey] ?? null, size: cartSizes[cartKey] ?? null, promotion: cartPromotionLines[cartKey] ?? null }] : [];
   });
   const cartStockIssues = cartItems.filter((product) => {
     const availableStock = getSelectionStock(product, product.variant, product.size);
@@ -674,7 +732,8 @@ export default function Home() {
   });
   const cartHasSoldOutItems = cartStockIssues.some((product) => getSelectionStock(product, product.variant, product.size) <= 0);
   const cartCount = Object.values(cart).reduce((sum, count) => sum + count, 0);
-  const subtotal = cartItems.reduce((sum, product) => sum + getCustomerPrice(product) * product.quantity, 0);
+  const getCartLinePrice = (product: (typeof cartItems)[number]) => product.promotion?.linePrice ?? getCustomerPrice(product);
+  const subtotal = cartItems.reduce((sum, product) => sum + getCartLinePrice(product) * product.quantity, 0);
   const selectedVariantStock = quickProduct ? getSelectionStock(quickProduct, selectedVariant, selectedSize) : 0;
   const couponDiscount = appliedCoupon ? getCouponDiscount(appliedCoupon, subtotal) : 0;
   const bogoCampaign = isBogoCampaign(activeCampaign) ? activeCampaign : null;
@@ -843,6 +902,25 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    const syncPromotions = async () => {
+      const remote = await fetchStoreSetting("promotionalOffers");
+      const stored = remote.value || window.localStorage.getItem(promotionStorageKey);
+      if (!stored) { setPromotionalOffers([]); return; }
+      try {
+        const parsed = JSON.parse(stored) as unknown[];
+        setPromotionalOffers(parsed.map(normalizePromotionOffer).filter((offer): offer is PromotionOffer => Boolean(offer && isPromotionLive(offer))));
+      } catch { setPromotionalOffers([]); }
+    };
+    void syncPromotions();
+    window.addEventListener("storage", syncPromotions);
+    window.addEventListener("fanzzy-promotions-updated", syncPromotions);
+    return () => {
+      window.removeEventListener("storage", syncPromotions);
+      window.removeEventListener("fanzzy-promotions-updated", syncPromotions);
+    };
+  }, []);
+
+  useEffect(() => {
     const syncHeroSlides = async () => {
       const remoteSlides = await fetchStoreSetting("heroSlides");
       const storedSlides = remoteSlides.value || window.localStorage.getItem("fanzzy-hero-slides");
@@ -939,12 +1017,15 @@ export default function Home() {
     setWishlist((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
     announce(wishlist.includes(id) ? "Removed from wishlist" : "Saved to wishlist");
   };
+  const closeQuickProduct = () => {
+    setQuickProduct(null);
+  };
   const addToCart = (product: Product, variant: ProductVariant | null = null, size: string | null = null) => {
-    if (product.variants?.length && !variant) {
+    if (getProductVariantType(product) === "normal" && product.variants?.length && !variant) {
       setQuickProduct(product);
       return;
     }
-    if (product.sizes?.length && !size) {
+    if (getProductVariantType(product) === "size" && getProductSizes(product).length && !size) {
       setQuickProduct(product);
       return;
     }
@@ -955,6 +1036,37 @@ export default function Home() {
     if (size) setCartSizes((current) => ({ ...current, [cartKey]: size }));
     setCartOpen(true);
     announce(`${product.name}${variant?.name ? ` · ${variant.name}` : ""} added to cart`);
+  };
+  const addPromotionToCart = (offer: PromotionOffer) => {
+    if (!quickProduct) return;
+    const paidSelection = makePromotionSelection(quickProduct, selectedVariant, selectedSize);
+    const paid = Array.from({ length: offer.type === "bundle" ? 0 : offer.buyQuantity }, () => paidSelection);
+    const free = offer.type === "bundle" ? [] : selectedFreeSelections;
+    const bundle = offer.type === "bundle" ? selectedBundleSelections : [];
+    const error = validatePromotionSelection(offer, offer.type === "bundle" ? bundle : paid, free);
+    if (error) return announce(error);
+    const chosen = offer.type === "bundle" ? bundle : [...paid, ...free];
+    if (chosen.some((selection) => (selection.stock || 0) <= 0)) return announce("One of the selected variants is out of stock");
+    const groupId = `${offer.id}-${Date.now()}`;
+    const prices = offer.type === "bundle" ? allocateBundlePrices(bundle, offer.fixedBundlePrice) : paid.map(() => 0).concat(free.map(() => 0));
+    const addLine = (selection: PromotionSelection, index: number, role: PromotionCartLine["role"], linePrice: number) => {
+      const product = products.find((item) => item.id === selection.productId || item.sku === selection.sku) || quickProduct;
+      const variant = product.variants?.find((item) => item.name === selection.variantName) || null;
+      const size = selection.size || null;
+      const cartKey = `${product.id}::${variant?.name || ""}::${size || ""}::offer-${groupId}-${index}`;
+      setCart((current) => ({ ...current, [cartKey]: 1 }));
+      if (variant) setCartVariants((current) => ({ ...current, [cartKey]: variant }));
+      if (size) setCartSizes((current) => ({ ...current, [cartKey]: size }));
+      setCartPromotionLines((current) => ({ ...current, [cartKey]: { groupId, offerId: offer.id, role, label: offerTypeLabel(offer), regularPrice: selection.price || product.price, linePrice } }));
+    };
+    if (offer.type === "bundle") bundle.forEach((selection, index) => addLine(selection, index, "bundle", prices[index] || 0));
+    else {
+      paid.forEach((selection, index) => addLine(selection, index, "paid", selection.price || 0));
+      free.forEach((selection, index) => addLine(selection, paid.length + index, "free", 0));
+    }
+    setCartOpen(true);
+    closeQuickProduct();
+    announce(`${offerTypeLabel(offer)} added to cart`);
   };
   const updateQuantity = (cartKey: string, delta: number) => {
     const productId = cartKey.split("::", 1)[0];
@@ -975,6 +1087,7 @@ export default function Home() {
         return updated;
       });
       setCartSizes((current) => { const updated = { ...current }; delete updated[cartKey]; return updated; });
+      setCartPromotionLines((current) => { const updated = { ...current }; delete updated[cartKey]; return updated; });
     }
   };
   const removeFromCart = (cartKey: string) => {
@@ -989,9 +1102,10 @@ export default function Home() {
       return updated;
     });
     setCartSizes((current) => { const updated = { ...current }; delete updated[cartKey]; return updated; });
+    setCartPromotionLines((current) => { const updated = { ...current }; delete updated[cartKey]; return updated; });
     announce("Item removed from cart");
   };
-  const closeAuth = () => {
+  const closeAuth = useCallback(() => {
     window.localStorage.removeItem(checkoutAfterAuthKey);
     window.localStorage.removeItem(ordersAfterAuthKey);
     setAuthOpen(false);
@@ -1000,7 +1114,126 @@ export default function Home() {
     setOtpSent(false);
     setOtpCooldown(0);
     setAuthJustVerified(false);
-  };
+  }, []);
+  const activeOverlayLayers = useMemo(() => [
+    mobileNavOpen && "mobileNav",
+    searchOpen && "search",
+    privacyOpen && "privacy",
+    returnPolicyOpen && "returnPolicy",
+    termsOpen && "terms",
+    assistantOpen && "assistant",
+    profileOpen && "profile",
+    savedOpen && "saved",
+    ordersOpen && "orders",
+    cartOpen && "cart",
+    authOpen && "auth",
+    checkoutOpen && "checkout",
+    orderConfirmation && "orderConfirmation",
+    quickProduct && "quickProduct",
+    zoomedImage && "zoomedImage",
+  ].filter((layer): layer is string => Boolean(layer)), [
+    mobileNavOpen,
+    searchOpen,
+    privacyOpen,
+    returnPolicyOpen,
+    termsOpen,
+    assistantOpen,
+    profileOpen,
+    savedOpen,
+    ordersOpen,
+    cartOpen,
+    authOpen,
+    checkoutOpen,
+    orderConfirmation,
+    quickProduct,
+    zoomedImage,
+  ]);
+  const activeOverlayKey = activeOverlayLayers.join("|");
+
+  useEffect(() => {
+    const previousLayers = overlayHistoryStack.current;
+
+    // State was already reduced by the Back-button handler, so no replacement
+    // history entry should be created during this render.
+    if (overlayClosedFromBack.current) {
+      overlayClosedFromBack.current = false;
+      overlayHistoryStack.current = activeOverlayLayers;
+      return;
+    }
+
+    const previousIsCurrentPrefix = previousLayers.every(
+      (layer, index) => activeOverlayLayers[index] === layer,
+    );
+    const currentIsPreviousPrefix = activeOverlayLayers.every(
+      (layer, index) => previousLayers[index] === layer,
+    );
+
+    if (activeOverlayLayers.length > previousLayers.length && previousIsCurrentPrefix) {
+      // Opening a new layer (for example product popup, then photo zoom) gets
+      // exactly one same-page history entry per layer.
+      for (let index = previousLayers.length; index < activeOverlayLayers.length; index += 1) {
+        window.history.pushState(
+          { ...window.history.state, fanzzyOverlay: activeOverlayLayers[index] },
+          "",
+          window.location.href,
+        );
+      }
+    } else if (activeOverlayLayers.length < previousLayers.length && currentIsPreviousPrefix) {
+      // An on-screen close button already removed the layer. Consume its
+      // same-page history entry without closing the next layer underneath it.
+      const removedLayerCount = previousLayers.length - activeOverlayLayers.length;
+      overlayHistoryStack.current = activeOverlayLayers;
+      overlayHistoryCleanup.current = true;
+      window.history.go(-removedLayerCount);
+      return;
+    } else if (activeOverlayKey !== previousLayers.join("|") && activeOverlayLayers.length) {
+      // Replacing one drawer with another (cart -> login, profile -> orders)
+      // reuses the current entry instead of adding a misleading extra Back step.
+      window.history.replaceState(
+        { ...window.history.state, fanzzyOverlay: activeOverlayLayers.at(-1) },
+        "",
+        window.location.href,
+      );
+    }
+
+    overlayHistoryStack.current = activeOverlayLayers;
+  }, [activeOverlayKey, activeOverlayLayers]);
+
+  useEffect(() => {
+    const closeOverlayFromBack = () => {
+      if (overlayHistoryCleanup.current) {
+        overlayHistoryCleanup.current = false;
+        return;
+      }
+
+      const topLayer = activeOverlayLayers.at(-1);
+      if (!topLayer) return;
+
+      overlayClosedFromBack.current = true;
+      overlayHistoryStack.current = activeOverlayLayers.slice(0, -1);
+
+      switch (topLayer) {
+        case "zoomedImage": setZoomedImage(null); break;
+        case "quickProduct": setQuickProduct(null); break;
+        case "orderConfirmation": setOrderConfirmation(null); break;
+        case "checkout": setCheckoutOpen(false); break;
+        case "auth": closeAuth(); break;
+        case "cart": setCartOpen(false); break;
+        case "orders": setOrdersOpen(false); break;
+        case "saved": setSavedOpen(false); break;
+        case "profile": setProfileOpen(false); break;
+        case "assistant": setAssistantOpen(false); break;
+        case "search": setSearchOpen(false); break;
+        case "terms": setTermsOpen(false); break;
+        case "returnPolicy": setReturnPolicyOpen(false); break;
+        case "privacy": setPrivacyOpen(false); break;
+        case "mobileNav": setMobileNavOpen(false); break;
+      }
+    };
+
+    window.addEventListener("popstate", closeOverlayFromBack);
+    return () => window.removeEventListener("popstate", closeOverlayFromBack);
+  }, [activeOverlayKey, activeOverlayLayers, closeAuth]);
   const signOut = async () => {
     await customerAuthRequest("sign-out", { method: "POST" });
     clearCustomerAuthTokens();
@@ -1138,8 +1371,6 @@ export default function Home() {
       return;
     }
     setCartOpen(false);
-    setFulfillmentMethod("delivery");
-    setSelectedPickupHubId("");
     setCheckoutOpen(true);
   };
   const openOrders = () => {
@@ -1200,6 +1431,7 @@ export default function Home() {
       setOrderConfirmation(existingPayment);
       setCart({});
       setCartVariants({});
+      setCartPromotionLines({});
       setCheckoutOpen(false);
       setFulfillmentMethod("delivery");
       setSelectedPickupHubId("");
@@ -1216,6 +1448,7 @@ export default function Home() {
     setOrderConfirmation(newOrder);
     setCart({});
     setCartVariants({});
+    setCartPromotionLines({});
     setCheckoutOpen(false);
     setFulfillmentMethod("delivery");
     setSelectedPickupHubId("");
@@ -1225,42 +1458,6 @@ export default function Home() {
     setIsPaying(false);
     window.dispatchEvent(new Event("fanzzy-products-updated"));
     announce(`${newOrder.id} placed successfully`);
-  };
-  const applyPaidInventory = async (items: NonNullable<CustomerOrder["items"]>) => {
-    const sizeRemote = await fetchStoreSetting("productSizeStock");
-    let sizeStock: Record<string, Record<string, number>> = {};
-    if (sizeRemote.value) {
-      try { sizeStock = JSON.parse(sizeRemote.value) as Record<string, Record<string, number>>; } catch { sizeStock = {}; }
-    }
-    const regularLines: Array<{ sku: string; quantity: number }> = [];
-    const localUpdates = new Map<string, { quantity: number; size?: string }>();
-    items.forEach((item) => {
-      const product = products.find((candidate) => candidate.id === item.productId || candidate.sku === item.productId || candidate.name === item.name.split(" · ")[0]);
-      if (!product) return;
-      const current = localUpdates.get(product.sku) || { quantity: 0 };
-      if (item.size && product.sizes?.length) {
-        const currentSizeStock = sizeStock[product.sku] || product.sizeStock || {};
-        sizeStock[product.sku] = { ...currentSizeStock, [item.size]: Math.max(0, (currentSizeStock[item.size] ?? 0) - item.quantity) };
-        localUpdates.set(product.sku, { ...current, size: item.size, quantity: current.quantity + item.quantity });
-      } else {
-        regularLines.push({ sku: product.sku, quantity: item.quantity });
-        localUpdates.set(product.sku, { ...current, quantity: current.quantity + item.quantity });
-      }
-    });
-    if (sizeRemote.value || Object.keys(sizeStock).length) await saveStoreSetting("productSizeStock", JSON.stringify(sizeStock));
-    if (regularLines.length) await decrementCatalogStock(regularLines);
-    try {
-      const stored = window.localStorage.getItem("fanzzy-products");
-      const parsed = stored ? JSON.parse(stored) : [];
-      if (Array.isArray(parsed)) {
-        window.localStorage.setItem("fanzzy-products", JSON.stringify(parsed.map((product) => {
-          const update = localUpdates.get(product.sku);
-          if (!update) return product;
-          return { ...product, stock: product.sizes?.length ? product.stock : Math.max(0, Number(product.stock || 0) - update.quantity), sizeStock: product.sizeStock ? { ...product.sizeStock, ...(sizeStock[product.sku] || {}) } : product.sizeStock };
-        })));
-        window.dispatchEvent(new Event("fanzzy-products-updated"));
-      }
-    } catch { /* inventory refresh remains available from Supabase */ }
   };
   const persistPendingOrder = async (newOrder: CustomerOrder) => {
     if (!authUser) throw new Error("Sign in before placing an order");
@@ -1328,7 +1525,7 @@ export default function Home() {
       } : {}),
       paymentStatus: "pending",
       ...(appliedCoupon ? { coupon: appliedCoupon.code } : {}),
-      items: cartItems.map((product) => ({ productId: product.id, name: `${product.billName || product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}${product.size ? ` · Size ${product.size}` : ""}`, quantity: product.quantity, price: formatINR(getCustomerPrice(product)), image: product.image, variantName: product.variant?.name, variantImage: product.variant?.image, size: product.size || undefined })),
+      items: cartItems.map((product) => ({ productId: product.id, name: `${product.billName || product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}${product.size ? ` · Size ${product.size}` : ""}`, quantity: product.quantity, price: formatINR(getCartLinePrice(product)), image: product.image, variantName: product.variant?.name, variantImage: product.variant?.image, size: product.size || undefined, promotion: product.promotion || undefined })),
     };
 
     setIsPaying(true);
@@ -1369,9 +1566,8 @@ export default function Home() {
               });
               const verification = await verifyResponse.json() as { verified?: boolean; error?: string };
               if (!verifyResponse.ok || !verification.verified) throw new Error(verification.error || "Payment verification failed");
-              const paidOrder = { ...pendingOrder, paymentStatus: "paid" as const, razorpayOrderId: payment.razorpay_order_id, razorpayPaymentId: payment.razorpay_payment_id };
+              const paidOrder = { ...pendingOrder, paymentStatus: "paid" as const, razorpayOrderId: payment.razorpay_order_id, razorpayPaymentId: payment.razorpay_payment_id, inventoryAdjusted: true };
               await persistPaidOrder(paidOrder);
-              await applyPaidInventory(paidOrder.items || []);
             } catch (error) {
               setIsPaying(false);
               announce(error instanceof Error ? error.message : "Payment could not be verified");
@@ -1473,6 +1669,15 @@ export default function Home() {
     setAssistantMessages((current) => [...current, { role: "user", text: message }, { role: "assistant", text: assistantReply(message), productIds: matches.map((product) => product.id) }]);
     setAssistantInput("");
   };
+  const quickOffers = quickProduct ? offersForProduct(quickProduct) : [];
+  const activeQuickOffer = selectedPromotion && quickOffers.some((offer) => offer.id === selectedPromotion.id) ? selectedPromotion : quickOffers[0] || null;
+  const quickFreeChoices = activeQuickOffer && quickProduct ? (getProductVariantType(quickProduct) === "normal" && quickProduct.variants?.length ? quickProduct.variants.map((variant) => makePromotionSelection(quickProduct, variant, null)) : [makePromotionSelection(quickProduct, null, selectedSize)]) : [];
+  const quickBundleChoices = activeQuickOffer?.type === "bundle" ? products.flatMap((product) => getProductVariantType(product) === "normal" && product.variants?.length ? product.variants.map((variant) => makePromotionSelection(product, variant, null)) : [makePromotionSelection(product)]) : [];
+  const isSelectionEligible = (offer: PromotionOffer, selection: PromotionSelection, bucket: "paid" | "free") => {
+    const scope = bucket === "paid" ? offer.eligiblePaid : offer.eligibleFree;
+    if (!scope.length) return true;
+    return scope.some((item) => selectionKey(item) === selectionKey(selection) || item.productId === selection.productId);
+  };
 
   return (
     <main className="site-shell" id="top">
@@ -1513,7 +1718,7 @@ export default function Home() {
 
       <section className="manifesto"><p className="eyebrow">THE FANZZY STANDARD</p><h2>Jewellery with a point of view.<br /><em>Made for your everyday extraordinary.</em></h2><p className="manifesto-copy">Fanzzy is a study in contrast — soft and sculptural, familiar and unexpected. Every piece is made in small batches with considered materials and a little bit of magic.</p></section>
 
-      <section className="section-block product-section" id="shop"><div className="section-heading"><div><p className="eyebrow">CURATED FOR YOU</p><h2>Pieces worth <em>keeping.</em></h2></div><a className="text-link" href="#footer">Shop all <span>↗</span></a></div><div className="filter-row"><div className="filter-pills"><button className={activeCategory === "All pieces" ? "active" : ""} onClick={() => setActiveCategory("All pieces")}>All pieces</button>{categories.map((category) => <button className={activeCategory === category.name ? "active" : ""} key={category.name} onClick={() => setActiveCategory(category.name)}>{category.name}</button>)}</div><span className="result-count">{filteredProducts.length} pieces</span></div><div className="product-grid">{filteredProducts.map((product) => <ProductCard key={product.id} product={product} wished={wishlist.includes(product.id)} onWishlist={() => toggleWishlist(product.id)} onAdd={() => product.variants?.length || product.sizes?.length ? setQuickProduct(product) : addToCart(product)} onQuickView={() => setQuickProduct(product)} onImageZoom={() => setZoomedImage({ src: product.image, alt: product.name, adjustments: product.imageAdjustments })} />)}</div></section>
+      <section className="section-block product-section" id="shop"><div className="section-heading"><div><p className="eyebrow">CURATED FOR YOU</p><h2>Pieces worth <em>keeping.</em></h2></div><a className="text-link" href="#footer">Shop all <span>↗</span></a></div>{promotionalOffers.length > 0 && <div className="storefront-offer-rail"><span className="eyebrow">LIVE OFFERS</span>{promotionalOffers.slice(0, 3).map((offer) => <button key={offer.id} onClick={() => { const first = products.find((product) => offersForProduct(product).some((item) => item.id === offer.id)); if (first) setQuickProduct(first); }}>{offerTypeLabel(offer)} <b>↗</b></button>)}</div>}<div className="filter-row"><div className="filter-pills"><button className={activeCategory === "All pieces" ? "active" : ""} onClick={() => setActiveCategory("All pieces")}>All pieces</button>{categories.map((category) => <button className={activeCategory === category.name ? "active" : ""} key={category.name} onClick={() => setActiveCategory(category.name)}>{category.name}</button>)}</div><span className="result-count">{filteredProducts.length} pieces</span></div><div className="product-grid">{filteredProducts.map((product) => <ProductCard key={product.id} product={product} promotions={offersForProduct(product)} wished={wishlist.includes(product.id)} onWishlist={() => toggleWishlist(product.id)} onAdd={() => (getProductVariantType(product) === "normal" && product.variants?.length) || (getProductVariantType(product) === "size" && product.sizes?.length) || offersForProduct(product).length ? setQuickProduct(product) : addToCart(product)} onQuickView={() => setQuickProduct(product)} onImageZoom={() => setZoomedImage({ src: product.image, alt: product.name, adjustments: product.imageAdjustments })} />)}</div></section>
 
       <section className="editorial" id="story"><div className="editorial-image"><img src="https://images.unsplash.com/photo-1515562141207-7a88fb7ce338?auto=format&fit=crop&w=1100&q=85" alt="Close-up of sculptural gold jewelry" /><span>THE ART OF<br /><em>ADORNMENT</em></span></div><div className="editorial-copy"><p className="eyebrow">A NOTE FROM THE STUDIO</p><h2>Less noise.<br /><em>More meaning.</em></h2><p>There is beauty in the in-between. The way a quiet chain layers with your favourite shirt. A ring that becomes part of your hand. Fanzzy is made for these small rituals — the ones that make a day feel like yours.</p><a className="button button-dark" href="#footer">Read our story <span>↗</span></a><div className="editorial-sign">F / 19<br /></div></div></section>
 
@@ -1542,14 +1747,14 @@ export default function Home() {
 
       {ordersOpen && <div className="drawer-backdrop" onClick={() => setOrdersOpen(false)}><aside className="orders-drawer" role="dialog" aria-modal="true" aria-labelledby="orders-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR FANZZY ACCOUNT</p><h2 id="orders-title">My orders</h2></div><button aria-label="Close orders" onClick={() => setOrdersOpen(false)}>×</button></div><div className="orders-intro"><p>These are the orders placed using your signed-in account. Only you can see this account’s orders.</p></div>{visibleOrders.length ? <div className="customer-order-list">{visibleOrders.map((order) => <article className="customer-order-card" key={order.id}><div className="customer-order-head"><div><strong>{order.id}</strong><small>{formatOrderDate(order.date)} · {order.customerName}</small></div><span className={`customer-order-status ${order.status.toLowerCase()}`}>{order.status}</span></div>{order.items?.length ? <div className="customer-order-items">{order.items.map((item) => { const product = getOrderedProduct(item); return <button className="customer-order-product" key={`${order.id}-${item.name}`} onClick={() => openOrderedProduct(item)} aria-label={`View ${item.name} details`}>{product ? <img src={product.image} alt="" style={imageAdjustmentStyle(product.imageAdjustments)} /> : <span className="order-product-placeholder" aria-hidden="true">✦</span>}<span className="order-product-copy"><strong>{item.name}</strong><b>× {item.quantity}</b>{product ? <em>{product.category} · View details ↗</em> : <em>Product no longer in the collection</em>}</span><small>{item.price}</small></button>; })}</div> : <p className="customer-order-items legacy-order">Order details are available in your confirmation.</p>}<div className="customer-order-total"><span>Total paid</span><strong>{order.total}</strong></div><button className="module-secondary customer-bill-button" onClick={() => downloadBill(order)}>Download bill ↗</button></article>)}</div> : <div className="orders-empty"><div>✦</div><h3>No orders found for this account.</h3><p>Orders appear here after you complete payment while signed in to this account.</p><button className="button button-dark" onClick={() => { setOrdersOpen(false); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}>Shop the collection <span>↗</span></button></div>}</aside></div>}
 
-      {cartOpen && <div className="drawer-backdrop" onClick={() => setCartOpen(false)}><aside className="cart-drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR CART</p><h2>{cartCount ? `${cartCount} piece${cartCount > 1 ? "s" : ""}` : "A little empty"}</h2></div><button onClick={() => setCartOpen(false)}>×</button></div>{cartItems.length ? <><div className="drawer-items">{cartItems.map((product) => <div className={`drawer-item${getVariantStock(product, product.variant) <= 0 ? " drawer-item-sold-out" : ""}`} key={product.cartKey}><img src={product.variant?.image || product.image} alt="" style={imageAdjustmentStyle(product.variant?.adjustments || product.imageAdjustments)} /><div><strong>{product.name}</strong>{product.variant?.name && <small className="cart-variant-name">{product.variant.name}</small>}{product.size && <small className="cart-variant-name">Size {product.size}</small>}{getVariantStock(product, product.variant) <= 0 && <small className="cart-stock-label">Sold out</small>}<small>{formatINR(getCustomerPrice(product))}</small><div className="quantity"><button onClick={() => updateQuantity(product.cartKey, -1)} aria-label={`Decrease ${product.name} quantity`}>−</button><span>{product.quantity}</span><button onClick={() => updateQuantity(product.cartKey, 1)} aria-label={`Increase ${product.name} quantity`}>+</button></div></div><div className="cart-item-actions"><b>{formatINR(getCustomerPrice(product) * product.quantity)}</b><button className="cart-remove" onClick={() => removeFromCart(product.cartKey)} aria-label={`Remove ${product.name} from cart`}>Remove</button></div></div>)}</div><div className="drawer-footer">{cartStockIssues.length > 0 && <div className="cart-stock-warning" role="alert"><strong>Remove sold out items before checkout</strong><span>{cartHasSoldOutItems ? "This cart contains an unavailable item." : "One or more quantities are above the available stock."}</span></div>}<div><span>Subtotal</span><strong>{formatINR(subtotal)}</strong></div>{bogoDiscount > 0 && <div className="offer-total"><span>{bogoOfferLabel} discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="offer-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div><span>Delivery</span><strong>{deliveryTotal > 0 ? formatINR(deliveryTotal) : "Free"}</strong></div><div className="drawer-total"><span>Total</span><strong>{formatINR(orderTotal)}</strong></div><p>{bogoDiscount > 0 ? `${bogoOfferLabel} applied to eligible products.` : deliveryTotal > 0 ? "Delivery charge applied to this order." : deliveryCharge.freeAboveEnabled ? `Free delivery on orders above ${formatINR(deliveryCharge.freeAbove)}.` : "Complimentary shipping."}</p><button className="button button-dark full-width" onClick={openCheckout}>Proceed to buy <span>↗</span></button></div></> : <div className="empty-bag"><div>✦</div><p>Your future favourites<br />belong here.</p><button className="text-link" onClick={() => setCartOpen(false)}>Continue shopping <span>↗</span></button></div>}</aside></div>}
+      {cartOpen && <div className="drawer-backdrop" onClick={() => setCartOpen(false)}><aside className="cart-drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR CART</p><h2>{cartCount ? `${cartCount} piece${cartCount > 1 ? "s" : ""}` : "A little empty"}</h2></div><button onClick={() => setCartOpen(false)}>×</button></div>{cartItems.length ? <><div className="drawer-items">{cartItems.map((product) => <div className={`drawer-item${getVariantStock(product, product.variant) <= 0 ? " drawer-item-sold-out" : ""}`} key={product.cartKey}><img src={product.variant?.image || product.image} alt="" style={imageAdjustmentStyle(product.variant?.adjustments || product.imageAdjustments)} /><div><strong>{product.name}</strong>{product.variant?.name && <small className="cart-variant-name">{product.variant.name}</small>}{product.size && <small className="cart-variant-name">Size {product.size}</small>}{product.promotion && <small className={`cart-promotion-label ${product.promotion.role === "free" ? "is-free" : ""}`}>{product.promotion.role === "free" ? `FREE · ${product.promotion.label}` : product.promotion.role === "bundle" ? `${product.promotion.label} · allocated price` : product.promotion.label}</small>}{getVariantStock(product, product.variant) <= 0 && <small className="cart-stock-label">Sold out</small>}<small>{formatINR(getCartLinePrice(product))}{product.promotion && product.promotion.role === "bundle" && product.promotion.linePrice !== product.promotion.regularPrice ? <del className="cart-regular-price">{formatINR(product.promotion.regularPrice)}</del> : null}</small><div className="quantity"><button onClick={() => updateQuantity(product.cartKey, -1)} aria-label={`Decrease ${product.name} quantity`}>−</button><span>{product.quantity}</span><button onClick={() => updateQuantity(product.cartKey, 1)} aria-label={`Increase ${product.name} quantity`}>+</button></div></div><div className="cart-item-actions"><b>{formatINR(getCartLinePrice(product) * product.quantity)}</b><button className="cart-remove" onClick={() => removeFromCart(product.cartKey)} aria-label={`Remove ${product.name} from cart`}>Remove</button></div></div>)}</div><div className="cart-fulfillment"><p className="field-label">Receive your order</p><div className="cart-fulfillment-options"><button type="button" className={fulfillmentMethod === "delivery" ? "active" : ""} onClick={() => setFulfillmentMethod("delivery")}>Home delivery<small>Use delivery address</small></button><button type="button" className={fulfillmentMethod === "pickup" ? "active" : ""} onClick={() => { setFulfillmentMethod("pickup"); if (!selectedPickupHubId && pickupHubs[0]) setSelectedPickupHubId(pickupHubs[0].id); }} disabled={!pickupHubs.length}>Hub pickup<small>{pickupHubs.length ? "Collect from a hub" : "No hubs available"}</small></button></div>{fulfillmentMethod === "pickup" && pickupHubs.length > 0 && <select aria-label="Pickup hub" value={selectedPickupHubId} onChange={(event) => setSelectedPickupHubId(event.target.value)}><option value="">Select pickup hub</option>{pickupHubs.map((hub) => <option key={hub.id} value={hub.id}>{hub.name} · {hub.place}</option>)}</select>}{fulfillmentMethod === "pickup" && !pickupHubs.length && <small className="cart-fulfillment-help">Add a pickup hub in Admin before choosing hub pickup.</small>}</div><div className="drawer-footer">{cartStockIssues.length > 0 && <div className="cart-stock-warning" role="alert"><strong>Remove sold out items before checkout</strong><span>{cartHasSoldOutItems ? "This cart contains an unavailable item." : "One or more quantities are above the available stock."}</span></div>}<div><span>Subtotal</span><strong>{formatINR(subtotal)}</strong></div>{cartItems.some((item) => item.promotion?.role === "bundle") && <div className="offer-total"><span>Bundle regular total</span><strong>{formatINR(cartItems.reduce((sum, item) => sum + (item.promotion?.regularPrice || 0) * item.quantity, 0))}</strong></div>}{cartItems.some((item) => item.promotion?.role === "free") && <div className="offer-total"><span>Free-item discount</span><strong>Applied</strong></div>}{bogoDiscount > 0 && <div className="offer-total"><span>{bogoOfferLabel} discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="offer-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div><span>Delivery</span><strong>{deliveryTotal > 0 ? formatINR(deliveryTotal) : "Free"}</strong></div><div className="drawer-total"><span>Total</span><strong>{formatINR(orderTotal)}</strong></div><p>{cartItems.some((item) => item.promotion) ? "Promotion items are linked by offer group ID for inventory, returns, and refunds." : deliveryTotal > 0 ? "Delivery charge applied to this order." : deliveryCharge.freeAboveEnabled ? `Free delivery on orders above ${formatINR(deliveryCharge.freeAbove)}.` : "Complimentary shipping."}</p><button className="button button-dark full-width" onClick={openCheckout}>Proceed to buy <span>↗</span></button></div></> : <div className="empty-bag"><div>✦</div><p>Your future favourites<br />belong here.</p><button className="text-link" onClick={() => setCartOpen(false)}>Continue shopping <span>↗</span></button></div>}</aside></div>}
 
       {authOpen && <div className="drawer-backdrop auth-backdrop" onClick={closeAuth}><section className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close sign in" onClick={closeAuth}>×</button><p className="eyebrow">SECURE MOBILE LOGIN</p><h2 id="auth-title">Continue with your mobile number.</h2><p className="auth-intro">Enter your mobile number and receive a one-time code by SMS or voice call. No password is required.</p><div className="otp-auth-form"><label>Mobile number<input type="tel" value={authPhone} onChange={(event) => { setAuthPhone(event.target.value); setAuthOtp(""); setOtpSent(false); setOtpCooldown(0); }} placeholder="+91 98765 43210" inputMode="tel" autoComplete="tel" disabled={authLoading} /></label>{otpSent && <label>6-digit verification code<input value={authOtp} onChange={(event) => setAuthOtp(event.target.value.replace(/\D/g, "").slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" maxLength={6} placeholder="Enter 6-digit code" disabled={authLoading} onKeyDown={(event) => { if (event.key === "Enter") void verifyOtp(); }} /></label>}{otpSent ? <><button className="google-sign-in" type="button" onClick={() => void verifyOtp()} disabled={authLoading}><span className="email-otp-mark" aria-hidden="true">✦</span>{authLoading ? "Please wait…" : "Verify code"}<span aria-hidden="true">↗</span></button><div className="otp-fallback-actions"><button className="auth-resend" type="button" onClick={() => void sendOtp()} disabled={authLoading || otpCooldown > 0}>{otpCooldown > 0 ? `Resend SMS in ${otpCooldown}s` : "Resend SMS OTP"}</button><button className="auth-resend" type="button" onClick={() => void sendVoiceOtp()} disabled={authLoading || otpCooldown > 0}>{otpCooldown > 0 ? `Call again in ${otpCooldown}s` : "Call again with OTP"}</button></div></> : <div className="otp-channel-actions"><button className="google-sign-in" type="button" onClick={() => void sendOtp()} disabled={authLoading}><span className="email-otp-mark" aria-hidden="true">✦</span>{authLoading ? "Please wait…" : "Send SMS code"}<span aria-hidden="true">↗</span></button><button className="google-sign-in auth-voice-button" type="button" onClick={() => void sendVoiceOtp()} disabled={authLoading}><span className="email-otp-mark" aria-hidden="true">☎</span>{authLoading ? "Please wait…" : "Call me with code"}<span aria-hidden="true">↗</span></button></div>}</div>{authMessage && <p className="auth-message" role="alert">{authMessage}</p>}<p className="auth-note">Your orders and cart are saved to this verified mobile number.</p></section></div>}
 
       {checkoutOpen && <div className="drawer-backdrop checkout-backdrop" onClick={() => setCheckoutOpen(false)}><section className="checkout-modal" role="dialog" aria-modal="true" aria-labelledby="checkout-title" onClick={(event) => event.stopPropagation()} onFocusCapture={(event) => { if (event.target instanceof HTMLInputElement) requestAnimationFrame(() => event.target.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" })); }}><div className="drawer-header"><div><p className="eyebrow">CHECKOUT</p><h2 id="checkout-title">Complete your order</h2></div><button aria-label="Close checkout" onClick={() => setCheckoutOpen(false)}>×</button></div><p className="checkout-intro">We’ll use your WhatsApp number to confirm your order and delivery updates.</p><div className="checkout-grid"><label>Customer name<input value={checkoutForm.name} onChange={(event) => setCheckoutForm((current) => ({ ...current, name: event.target.value }))} placeholder="Your full name" required /></label><label>WhatsApp number <span className="required-mark">Required</span><input type="tel" value={checkoutForm.phone} onChange={(event) => setCheckoutForm((current) => ({ ...current, phone: event.target.value }))} placeholder="+91 98765 43210" required /></label><label>Email address <span className="optional-mark">Optional</span><input type="email" value={checkoutForm.email} onChange={(event) => setCheckoutForm((current) => ({ ...current, email: event.target.value }))} placeholder="you@example.com" /></label><div className="checkout-fulfillment checkout-wide"><p className="field-label">How would you like to receive your order?</p><div className="fulfillment-options"><label><input type="radio" name="fulfillment-method" checked={fulfillmentMethod === "delivery"} onChange={() => setFulfillmentMethod("delivery")} /> <span>Home delivery<small>Delivery charges apply as configured.</small></span></label><label className={!pickupHubs.length ? "disabled" : ""}><input type="radio" name="fulfillment-method" checked={fulfillmentMethod === "pickup"} onChange={() => { setFulfillmentMethod("pickup"); if (!selectedPickupHubId && pickupHubs[0]) setSelectedPickupHubId(pickupHubs[0].id); }} disabled={!pickupHubs.length} /> <span>Pick up from a hub<small>{pickupHubs.length ? "No delivery charges." : "Add a hub in Admin → Hub to enable pickup."}</small></span></label></div></div>{fulfillmentMethod === "pickup" && pickupHubs.length > 0 && <label className="checkout-wide pickup-hub-select">Pickup hub<select value={selectedPickupHubId} onChange={(event) => setSelectedPickupHubId(event.target.value)}><option value="">Select a pickup hub</option>{pickupHubs.map((hub) => <option key={hub.id} value={hub.id}>{hub.name} · {hub.place}</option>)}</select><small className="pickup-hub-details">{selectedPickupHub ? `${selectedPickupHub.name} · ${selectedPickupHub.place}` : "Choose where you will collect your order."}</small></label>}{fulfillmentMethod === "delivery" && <label className="checkout-wide">Delivery address<input value={checkoutForm.address} onChange={(event) => setCheckoutForm((current) => ({ ...current, address: event.target.value }))} placeholder="House number, street, city, pincode" required /></label>}<div className="checkout-coupon checkout-wide"><label htmlFor="checkout-coupon-code">Coupon code <span className="optional-mark">Optional</span></label><div className="coupon-entry"><input id="checkout-coupon-code" value={couponInput} onChange={(event) => { setCouponInput(event.target.value.toUpperCase()); setAppliedCoupon(null); }} placeholder="Enter coupon code" autoCapitalize="characters" /><button className="button button-light" type="button" onClick={applyCoupon}>Apply</button></div>{appliedCoupon && <p className="coupon-success">{appliedCoupon.code} applied · {appliedCoupon.discount} off</p>}</div></div>{bogoDiscount > 0 && <div className="checkout-total coupon-total"><span>{bogoOfferLabel} discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="checkout-total coupon-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div className="checkout-total"><span>{fulfillmentMethod === "pickup" ? "Pickup" : "Delivery"}</span><strong>{fulfillmentMethod === "pickup" ? "Free" : deliveryTotal > 0 ? formatINR(deliveryTotal) : "Free"}</strong></div><div className="checkout-total"><span>Order total</span><strong>{formatINR(orderTotal)}</strong></div><div className="checkout-actions"><button className="button button-dark" onClick={submitCheckout}>Place order <span>↗</span></button><button className="save-text" onClick={() => setCheckoutOpen(false)}>Back to cart</button></div></section></div>}
 
-      {quickProduct && <div className="drawer-backdrop" onClick={() => setQuickProduct(null)}><div className="quick-modal" onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setQuickProduct(null)}>×</button><div className="quick-image" onClick={() => setZoomedImage({ src: selectedVariant?.image || quickProduct.image, alt: selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name, adjustments: selectedVariant?.adjustments || quickProduct.imageAdjustments })} title="Click to zoom"><img src={selectedVariant?.image || quickProduct.image} alt={selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name} style={imageAdjustmentStyle(selectedVariant?.adjustments || quickProduct.imageAdjustments)} /></div><div className="quick-copy"><p className="eyebrow">{quickProduct.category}</p><h2>{quickProduct.name}</h2><div className="price-row"><span>{formatINR(getCustomerPrice(quickProduct))}</span><del>{formatINR(getComparePrice(quickProduct))}</del></div>{quickProduct.variants?.length ? <div className="variant-picker"><span>Choose colour / series / model</span><div>{quickProduct.variants.map((variant, index) => { const variantStock = getVariantStock(quickProduct, variant); return <button key={`${quickProduct.id}-${variant.name || index}`} disabled={variantStock <= 0} className={`${selectedVariant?.name === variant.name && selectedVariant?.image === variant.image ? "active" : ""} ${variantStock <= 0 ? "sold-out" : ""}`} onClick={() => setSelectedVariant(variant)}><img src={variant.image || quickProduct.image} alt="" style={imageAdjustmentStyle(variant.adjustments)} /><span>{variant.name || `Option ${index + 1}`} · {variantStock > 0 ? `${variantStock} available` : "Sold out"}</span></button>; })}</div></div> : null}{quickProduct.sizes?.length ? <div className="size-picker"><span>Choose size</span><div>{quickProduct.sizes.map((size) => { const stock = getSelectionStock(quickProduct, selectedVariant, size); return <button type="button" key={size} disabled={stock <= 0} className={`${selectedSize === size ? "active" : ""} ${stock <= 0 ? "sold-out" : ""}`} onClick={() => setSelectedSize(size)}>Size {size} · {stock > 0 ? `${stock} available` : "Sold out"}</button>; })}</div></div> : null}<p>Designed to become part of your everyday ritual. Hand-finished in small batches with a soft, lasting glow.</p><div className="quick-actions"><button className="button button-dark" disabled={selectedVariantStock <= 0} onClick={() => { addToCart(quickProduct, selectedVariant, selectedSize); if (selectedVariantStock > 0) setQuickProduct(null); }}>{selectedVariantStock <= 0 ? "Sold out" : <>Add selected item to cart <span>↗</span></>}</button><button className="save-text" onClick={() => toggleWishlist(quickProduct.id)}>{wishlist.includes(quickProduct.id) ? "♥ Saved" : "♡ Save for later"}</button></div></div></div></div>}
 
+      {quickProduct && <div className="drawer-backdrop" onClick={() => setQuickProduct(null)}><div className="quick-modal" onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setQuickProduct(null)}>×</button><div className="quick-image" onClick={() => setZoomedImage({ src: selectedVariant?.image || quickProduct.image, alt: selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name, adjustments: selectedVariant?.adjustments || quickProduct.imageAdjustments })} title="Click to zoom"><img src={selectedVariant?.image || quickProduct.image} alt={selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name} style={imageAdjustmentStyle(selectedVariant?.adjustments || quickProduct.imageAdjustments)} /></div><div className="quick-copy"><p className="eyebrow">{quickProduct.category}</p><h2>{quickProduct.name}</h2><div className="price-row"><span>{formatINR(getCustomerPrice(quickProduct))}</span><del>{formatINR(getComparePrice(quickProduct))}</del></div>{getProductVariantType(quickProduct) === "normal" && quickProduct.variants?.length ? <div className="variant-picker"><span>Choose colour / series / model</span><div>{quickProduct.variants.map((variant, index) => { const variantStock = getVariantStock(quickProduct, variant); return <button key={`${quickProduct.id}-${variant.name || index}`} disabled={variantStock <= 0} className={`${selectedVariant?.name === variant.name && selectedVariant?.image === variant.image ? "active" : ""} ${variantStock <= 0 ? "sold-out" : ""}`} onClick={() => setSelectedVariant(variant)}><img src={variant.image || quickProduct.image} alt="" style={imageAdjustmentStyle(variant.adjustments)} /><span>{variant.name || `Option ${index + 1}`} · {variantStock > 0 ? `${variantStock} available` : "Sold out"}</span></button>; })}</div></div> : null}{getProductVariantType(quickProduct) === "size" && getProductSizes(quickProduct).length ? <div className="size-picker"><span>Choose size</span><div>{getProductSizes(quickProduct).map((size) => { const sizeVariant = getSizeVariant(quickProduct, size); const stock = getSelectionStock(quickProduct, selectedVariant, size); return <button type="button" key={size} disabled={stock <= 0} className={`${selectedSize === size ? "active" : ""} ${stock <= 0 ? "sold-out" : ""}`} onClick={() => setSelectedSize(size)}>{sizeVariant?.image ? <img src={sizeVariant.image} alt="" /> : null}Size {size} · {stock > 0 ? `${stock} available` : "Sold out"}</button>; })}</div></div> : null}{quickOffers.length > 0 && <div className="storefront-promotion-picker"><span className="promotion-picker-label">Special offer available</span><div className="storefront-promotion-tabs">{quickOffers.map((offer) => <button key={offer.id} className={activeQuickOffer?.id === offer.id ? "active" : ""} onClick={() => { setSelectedPromotion(offer); setSelectedFreeSelections([]); setSelectedBundleSelections([]); }}>{offerTypeLabel(offer)}</button>)}</div>{activeQuickOffer?.type === "bundle" ? <div className="promotion-selection-panel"><strong>Select Any {activeQuickOffer.bundleQuantity} Items for ₹{activeQuickOffer.fixedBundlePrice.toLocaleString("en-IN")}</strong><small>{selectedBundleSelections.length} of {activeQuickOffer.bundleQuantity} selected · regular prices are allocated proportionally</small><div className="promotion-choice-grid">{quickBundleChoices.filter((selection) => isSelectionEligible(activeQuickOffer, selection, "paid")).map((selection, index) => { const product = products.find((item) => item.id === selection.productId); const active = selectedBundleSelections.some((item) => selectionKey(item) === selectionKey(selection)); const stock = selection.stock || 0; return <button key={`${selectionKey(selection)}-${index}`} disabled={stock <= 0 || (!active && selectedBundleSelections.length >= activeQuickOffer.bundleQuantity)} className={active ? "active" : ""} onClick={() => setSelectedBundleSelections((current) => active ? current.filter((item) => selectionKey(item) !== selectionKey(selection)) : [...current, selection])}><img src={product?.variants?.find((variant) => variant.name === selection.variantName)?.image || product?.image || quickProduct.image} alt="" /><span>{product?.name || quickProduct.name}{selection.variantName ? ` · ${selection.variantName}` : ""}<small>{stock > 0 ? `${stock} available · ₹${(selection.price || 0).toLocaleString("en-IN")}` : "Out of stock"}</small></span></button>; })}</div><button className="button button-dark full-width" disabled={selectedBundleSelections.length !== activeQuickOffer.bundleQuantity} onClick={() => addPromotionToCart(activeQuickOffer)}>Add Bundle to Cart</button></div> : <div className="promotion-selection-panel"><strong>Select Your {activeQuickOffer?.freeQuantity || 1} Free Variant{(activeQuickOffer?.freeQuantity || 1) > 1 ? "s" : ""}</strong><small>{selectedFreeSelections.length} of {activeQuickOffer?.freeQuantity || 1} selected · paid item: {selectedVariant?.name || quickProduct.name}</small><div className="promotion-choice-grid">{quickFreeChoices.filter((selection) => activeQuickOffer ? isSelectionEligible(activeQuickOffer, selection, "free") : true).map((selection, index) => { const active = selectedFreeSelections.some((item) => selectionKey(item) === selectionKey(selection)); const stock = selection.stock || 0; return <button key={`${selectionKey(selection)}-${index}`} disabled={stock <= 0 || (!active && selectedFreeSelections.length >= (activeQuickOffer?.freeQuantity || 1))} className={active ? "active" : ""} onClick={() => setSelectedFreeSelections((current) => active ? current.filter((item) => selectionKey(item) !== selectionKey(selection)) : [...current, selection])}><img src={quickProduct.variants?.find((variant) => variant.name === selection.variantName)?.image || quickProduct.image} alt="" /><span>{selection.variantName || quickProduct.name}<small>{stock > 0 ? `${stock} available` : "Out of stock"} · FREE</small></span></button>; })}</div><button className="button button-dark full-width" disabled={selectedFreeSelections.length !== (activeQuickOffer?.freeQuantity || 1) || selectedVariantStock <= 0} onClick={() => activeQuickOffer && addPromotionToCart(activeQuickOffer)}>Add {offerTypeLabel(activeQuickOffer || quickOffers[0])} to Cart</button></div>} </div>}{<div className="quick-actions"><button className="button button-dark full-width" type="button" disabled={selectedVariantStock <= 0} onClick={() => { addToCart(quickProduct, getProductVariantType(quickProduct) === "normal" ? selectedVariant : null, getProductVariantType(quickProduct) === "size" ? selectedSize : null); setQuickProduct(null); }}>{selectedVariantStock > 0 ? "Buy now" : "Sold out"} <span>↗</span></button></div>}<p>Designed to become part of your everyday ritual. Hand-finished in small batches with a soft, lasting glow.</p></div></div></div>}
       {zoomedImage && <div className="drawer-backdrop image-zoom-backdrop" onClick={() => setZoomedImage(null)}><section className="image-zoom-modal" role="dialog" aria-modal="true" aria-label={`Zoomed view of ${zoomedImage.alt}`} onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setZoomedImage(null)} aria-label="Close image zoom">×</button><img src={zoomedImage.src} alt={zoomedImage.alt} style={imageAdjustmentStyle(zoomedImage.adjustments)} /></section></div>}
 
       {toast && <div className="toast">{toast}<span>✦</span></div>}
