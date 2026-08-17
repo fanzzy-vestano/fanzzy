@@ -109,6 +109,16 @@ type RazorpayCheckoutOptions = {
 };
 type RazorpayCheckout = { open: () => void };
 
+const readOverlayProduct = (): Product | null => {
+  if (typeof window === "undefined" || !new URLSearchParams(window.location.search).get("fanzzy-product")) return null;
+  try {
+    const stored = window.sessionStorage.getItem("fanzzy-overlay-product");
+    return stored ? JSON.parse(stored) as Product : null;
+  } catch {
+    return null;
+  }
+};
+
 const defaultProducts: Product[] = [];
 const defaultCategories: Array<{ name: string; count: string; image: string }> = [];
 const demoProductNames = new Set([
@@ -406,12 +416,12 @@ export default function Home() {
   const [appliedCoupon, setAppliedCoupon] = useState<MarketingRecord | null>(null);
   const [marketingRecords, setMarketingRecords] = useState<MarketingRecord[]>([]);
   const [promotionalOffers, setPromotionalOffers] = useState<PromotionOffer[]>([]);
-  const [quickProduct, setQuickProduct] = useState<Product | null>(null);
+  const [quickProduct, setQuickProduct] = useState<Product | null>(() => readOverlayProduct());
   const overlayHistoryStack = useRef<string[]>([]);
   const overlayHistoryCleanup = useRef(false);
   const overlayClosedFromBack = useRef(false);
   const overlayLastBackUrl = useRef<string | null>(null);
-  const overlayRestoredFromUrl = useRef(false);
+  const overlayRestoredFromUrl = useRef(Boolean(typeof window !== "undefined" && new URLSearchParams(window.location.search).get("fanzzy-product")));
   const [zoomedImage, setZoomedImage] = useState<{ src: string; alt: string; adjustments?: ImageAdjustments } | null>(null);
   const [selectedVariant, setSelectedVariant] = useState<ProductVariant | null>(null);
   const [selectedSize, setSelectedSize] = useState<string | null>(null);
@@ -1236,6 +1246,7 @@ export default function Home() {
       // Opening a new layer (for example product popup, then photo zoom) gets
       // exactly one same-page history entry per layer.
       overlayLastBackUrl.current = null;
+      if (quickProduct) window.sessionStorage.setItem("fanzzy-overlay-product", JSON.stringify(quickProduct));
       for (let index = previousLayers.length; index < activeOverlayLayers.length; index += 1) {
         window.history.pushState(
           { ...window.history.state, fanzzyOverlay: activeOverlayLayers[index] },
