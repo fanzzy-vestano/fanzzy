@@ -1245,29 +1245,11 @@ export default function Home() {
   useEffect(() => {
     const previousLayers = overlayHistoryStack.current;
 
-    if (overlayRestoredFromUrl.current && activeOverlayLayers.length) {
+    if (overlayRestoredFromUrl.current) {
       overlayRestoredFromUrl.current = false;
-      const currentUrl = window.location.href;
-      window.history.replaceState(
-        { ...window.history.state, fanzzyOverlayScrollY: Math.round(window.scrollY) },
-        "",
-        overlayHistoryUrl([]),
-      );
-      for (let index = 0; index < activeOverlayLayers.length; index += 1) {
-        window.history.pushState(
-          { ...window.history.state, fanzzyOverlay: activeOverlayLayers[index] },
-          "",
-          overlayHistoryUrl(activeOverlayLayers.slice(0, index + 1), quickProduct?.id),
-        );
-      }
-      if (window.location.href !== currentUrl) {
-        overlayLastBackUrl.current = null;
-      }
       overlayHistoryStack.current = activeOverlayLayers;
       return;
     }
-
-    if (overlayRestoredFromUrl.current) return;
 
     // State was already reduced by the Back-button handler, so no replacement
     // history entry should be created during this render.
