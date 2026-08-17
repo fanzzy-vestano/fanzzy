@@ -1249,6 +1249,7 @@ export default function Home() {
         overlayHistoryCleanup.current = false;
         return;
       }
+      if (overlayClosedFromBack.current) return;
 
       const topLayer = activeOverlayLayers.at(-1);
       if (!topLayer) return;
