@@ -411,6 +411,7 @@ export default function Home() {
   const overlayHistoryCleanup = useRef(false);
   const overlayClosedFromBack = useRef(false);
   const overlayLastBackUrl = useRef<string | null>(null);
+  const overlayRestoredFromUrl = useRef(false);
   const [zoomedImage, setZoomedImage] = useState<{ src: string; alt: string; adjustments?: ImageAdjustments } | null>(null);
   const [selectedVariant, setSelectedVariant] = useState<ProductVariant | null>(null);
   const [selectedSize, setSelectedSize] = useState<string | null>(null);
@@ -466,7 +467,10 @@ export default function Home() {
     const productId = new URLSearchParams(window.location.search).get("fanzzy-product");
     if (!productId || quickProduct) return;
     const product = products.find((candidate) => candidate.id === productId || candidate.sku === productId);
-    if (product) setQuickProduct(product);
+    if (product) {
+      overlayRestoredFromUrl.current = true;
+      setQuickProduct(product);
+    }
   }, [products, quickProduct]);
 
   useEffect(() => {
@@ -1206,6 +1210,12 @@ export default function Home() {
 
   useEffect(() => {
     const previousLayers = overlayHistoryStack.current;
+
+    if (overlayRestoredFromUrl.current) {
+      overlayRestoredFromUrl.current = false;
+      overlayHistoryStack.current = activeOverlayLayers;
+      return;
+    }
 
     // State was already reduced by the Back-button handler, so no replacement
     // history entry should be created during this render.
