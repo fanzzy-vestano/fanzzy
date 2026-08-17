@@ -1228,6 +1228,21 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("fanzzy-overlay")) return;
+    const savedScrollY = Number(window.sessionStorage.getItem("fanzzy-overlay-scroll"));
+    if (!Number.isFinite(savedScrollY)) return;
+
+    const restoreScroll = () => {
+      window.scrollTo({ top: savedScrollY, behavior: "auto" });
+      document.documentElement.scrollTop = savedScrollY;
+      document.body.scrollTop = savedScrollY;
+    };
+    restoreScroll();
+    [50, 200, 600].forEach((delay) => window.setTimeout(restoreScroll, delay));
+    window.setTimeout(() => window.sessionStorage.removeItem("fanzzy-overlay-scroll"), 800);
+  }, []);
+
+  useEffect(() => {
     const previousLayers = overlayHistoryStack.current;
 
     if (overlayRestoredFromUrl.current) {
@@ -1278,6 +1293,10 @@ export default function Home() {
       const removedLayerCount = previousLayers.length - activeOverlayLayers.length;
       overlayHistoryStack.current = activeOverlayLayers;
       overlayHistoryCleanup.current = true;
+      if (activeOverlayLayers.length === 0) {
+        overlayScrollY.current = null;
+        window.sessionStorage.removeItem("fanzzy-overlay-scroll");
+      }
       window.history.go(-removedLayerCount);
       return;
     } else if (activeOverlayKey !== previousLayers.join("|") && activeOverlayLayers.length) {
