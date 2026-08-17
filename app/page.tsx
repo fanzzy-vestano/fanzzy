@@ -418,6 +418,7 @@ export default function Home() {
   const [promotionalOffers, setPromotionalOffers] = useState<PromotionOffer[]>([]);
   const [quickProduct, setQuickProduct] = useState<Product | null>(() => readOverlayProduct());
   const overlayHistoryStack = useRef<string[]>([]);
+  const overlayScrollY = useRef<number | null>(null);
   const overlayHistoryCleanup = useRef(false);
   const overlayClosedFromBack = useRef(false);
   const overlayLastBackUrl = useRef<string | null>(null);
@@ -1255,6 +1256,7 @@ export default function Home() {
       // exactly one same-page history entry per layer.
       overlayLastBackUrl.current = null;
       if (previousLayers.length === 0) {
+        overlayScrollY.current = Math.round(window.scrollY);
         window.history.replaceState(
           { ...window.history.state, fanzzyOverlayScrollY: Math.round(window.scrollY) },
           "",
@@ -1306,17 +1308,23 @@ export default function Home() {
       if (!topLayer) return;
 
       const savedScrollState = window.history.state?.fanzzyOverlayScrollY;
-      const savedScrollY = Number(
-        savedScrollState ?? window.sessionStorage.getItem("fanzzy-overlay-scroll"),
-      );
+      const savedScrollY = Number(overlayScrollY.current ?? savedScrollState ?? window.sessionStorage.getItem("fanzzy-overlay-scroll"));
       overlayClosedFromBack.current = true;
       overlayHistoryStack.current = activeOverlayLayers.slice(0, -1);
 
       if (Number.isFinite(savedScrollY)) {
+        const restoreScroll = () => {
+          window.scrollTo({ top: savedScrollY, behavior: "auto" });
+          document.documentElement.scrollTop = savedScrollY;
+          document.body.scrollTop = savedScrollY;
+        };
+        restoreScroll();
+        [50, 200, 600].forEach((delay) => window.setTimeout(restoreScroll, delay));
         window.requestAnimationFrame(() => {
           window.requestAnimationFrame(() => {
             window.scrollTo({ top: savedScrollY, behavior: "auto" });
             if (activeOverlayLayers.length === 1) {
+              overlayScrollY.current = null;
               window.sessionStorage.removeItem("fanzzy-overlay-scroll");
             }
           });
