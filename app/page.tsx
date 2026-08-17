@@ -1219,6 +1219,14 @@ export default function Home() {
   const activeOverlayKey = activeOverlayLayers.join("|");
 
   useEffect(() => {
+    const previousScrollRestoration = window.history.scrollRestoration;
+    window.history.scrollRestoration = "manual";
+    return () => {
+      window.history.scrollRestoration = previousScrollRestoration;
+    };
+  }, []);
+
+  useEffect(() => {
     const previousLayers = overlayHistoryStack.current;
 
     if (overlayRestoredFromUrl.current) {
@@ -1247,6 +1255,11 @@ export default function Home() {
       // exactly one same-page history entry per layer.
       overlayLastBackUrl.current = null;
       if (previousLayers.length === 0) {
+        window.history.replaceState(
+          { ...window.history.state, fanzzyOverlayScrollY: Math.round(window.scrollY) },
+          "",
+          window.location.href,
+        );
         window.sessionStorage.setItem("fanzzy-overlay-scroll", String(window.scrollY));
       }
       if (quickProduct) window.sessionStorage.setItem("fanzzy-overlay-product", JSON.stringify(quickProduct));
@@ -1292,7 +1305,10 @@ export default function Home() {
       const topLayer = activeOverlayLayers.at(-1);
       if (!topLayer) return;
 
-      const savedScrollY = Number(window.sessionStorage.getItem("fanzzy-overlay-scroll"));
+      const savedScrollState = window.history.state?.fanzzyOverlayScrollY;
+      const savedScrollY = Number(
+        savedScrollState ?? window.sessionStorage.getItem("fanzzy-overlay-scroll"),
+      );
       overlayClosedFromBack.current = true;
       overlayHistoryStack.current = activeOverlayLayers.slice(0, -1);
 
