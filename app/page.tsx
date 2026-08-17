@@ -193,10 +193,12 @@ const readRazorpayResponse = async <T extends Record<string, unknown>>(response:
     throw new Error("Payment service is temporarily unavailable. Please try again.");
   }
 };
-const overlayHistoryUrl = (layers: string[]) => {
+const overlayHistoryUrl = (layers: string[], productId?: string) => {
   const url = new URL(window.location.href);
   if (layers.length) url.searchParams.set("fanzzy-overlay", layers.join(","));
   else url.searchParams.delete("fanzzy-overlay");
+  if (productId) url.searchParams.set("fanzzy-product", productId);
+  else url.searchParams.delete("fanzzy-product");
   return url.href;
 };
 const blockedHeroImage = "photo-1599643478518-a784e5dc4c8f";
@@ -458,6 +460,13 @@ export default function Home() {
       window.removeEventListener("storage", refreshDeliveryCharge);
     };
   }, []);
+
+  useEffect(() => {
+    const productId = new URLSearchParams(window.location.search).get("fanzzy-product");
+    if (!productId || quickProduct) return;
+    const product = products.find((candidate) => candidate.id === productId || candidate.sku === productId);
+    if (product) setQuickProduct(product);
+  }, [products, quickProduct]);
 
   useEffect(() => {
     let active = true;
@@ -1219,7 +1228,7 @@ export default function Home() {
         window.history.pushState(
           { ...window.history.state, fanzzyOverlay: activeOverlayLayers[index] },
           "",
-          overlayHistoryUrl(activeOverlayLayers.slice(0, index + 1)),
+          overlayHistoryUrl(activeOverlayLayers.slice(0, index + 1), quickProduct?.id),
         );
       }
     } else if (activeOverlayLayers.length < previousLayers.length && currentIsPreviousPrefix) {
@@ -1236,7 +1245,7 @@ export default function Home() {
       window.history.replaceState(
         { ...window.history.state, fanzzyOverlay: activeOverlayLayers.at(-1) },
         "",
-        overlayHistoryUrl(activeOverlayLayers),
+        overlayHistoryUrl(activeOverlayLayers, quickProduct?.id),
       );
     }
 
