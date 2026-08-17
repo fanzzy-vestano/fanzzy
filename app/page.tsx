@@ -1246,6 +1246,9 @@ export default function Home() {
       // Opening a new layer (for example product popup, then photo zoom) gets
       // exactly one same-page history entry per layer.
       overlayLastBackUrl.current = null;
+      if (previousLayers.length === 0) {
+        window.sessionStorage.setItem("fanzzy-overlay-scroll", String(window.scrollY));
+      }
       if (quickProduct) window.sessionStorage.setItem("fanzzy-overlay-product", JSON.stringify(quickProduct));
       for (let index = previousLayers.length; index < activeOverlayLayers.length; index += 1) {
         window.history.pushState(
@@ -1289,8 +1292,20 @@ export default function Home() {
       const topLayer = activeOverlayLayers.at(-1);
       if (!topLayer) return;
 
+      const savedScrollY = Number(window.sessionStorage.getItem("fanzzy-overlay-scroll"));
       overlayClosedFromBack.current = true;
       overlayHistoryStack.current = activeOverlayLayers.slice(0, -1);
+
+      if (Number.isFinite(savedScrollY)) {
+        window.requestAnimationFrame(() => {
+          window.requestAnimationFrame(() => {
+            window.scrollTo({ top: savedScrollY, behavior: "auto" });
+            if (activeOverlayLayers.length === 1) {
+              window.sessionStorage.removeItem("fanzzy-overlay-scroll");
+            }
+          });
+        });
+      }
 
       switch (topLayer) {
         case "zoomedImage": setZoomedImage(null); break;
