@@ -15,6 +15,7 @@ import {
   clearCustomerAuthTokens,
   clearPendingCustomerAuthToken,
   customerAuthRequest,
+  readStoredCustomerAuthUser,
   saveCustomerAuthTokens,
 } from "../lib/customer-auth-client";
 import {
@@ -377,7 +378,7 @@ export default function Home() {
   const [otpSent, setOtpSent] = useState(false);
   const [otpCooldown, setOtpCooldown] = useState(0);
   const [authJustVerified, setAuthJustVerified] = useState(false);
-  const [authUser, setAuthUser] = useState<CustomerAuthUser | null>(null);
+  const [authUser, setAuthUser] = useState<CustomerAuthUser | null>(() => readStoredCustomerAuthUser());
   const [checkoutForm, setCheckoutForm] = useState({ name: "", phone: "", email: "", address: "" });
   const [couponInput, setCouponInput] = useState("");
   const [appliedCoupon, setAppliedCoupon] = useState<MarketingRecord | null>(null);
@@ -810,16 +811,31 @@ export default function Home() {
 
   useEffect(() => {
     let active = true;
+    const storedUser = readStoredCustomerAuthUser();
     const loadCustomerSession = async () => {
       try {
         const response = await customerAuthRequest("session", { cache: "no-store" });
+        if (!response.ok) {
+          if ([401, 403, 410].includes(response.status)) {
+            clearCustomerAuthTokens();
+            if (active) setAuthUser(null);
+          }
+          return;
+        }
         const result = await response.json() as { user?: CustomerAuthUser | null };
         if (!active) return;
         const user = result.user || null;
+        if (!user) {
+          clearCustomerAuthTokens();
+          setAuthUser(null);
+          return;
+        }
         setAuthUser(user);
         if (user) setCheckoutForm((current) => ({ ...current, phone: current.phone || user.phone }));
       } catch {
-        if (active) setAuthUser(null);
+        // Keep a locally restorable session through temporary network/CORS failures.
+        // The next successful session check will still validate the token server-side.
+        if (active && !storedUser) setAuthUser(null);
       }
     };
     void loadCustomerSession();
