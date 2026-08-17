@@ -10,6 +10,7 @@ const { d1, r2 } = hostingConfig;
 
 // macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
+const defaultCustomerAuthApiUrl = "https://pdrcrkxeyqxqgpwfxqpu.supabase.co/functions/v1/customer-auth";
 
 const localBindingConfig = {
   main: "./worker/index.ts",
@@ -49,7 +50,9 @@ export default defineConfig(async () => {
         process.env.GITHUB_PAGES === "true" ? process.env.ADMIN_LOGIN_PASSWORD ?? "" : "",
       ),
       "process.env.NEXT_PUBLIC_CUSTOMER_AUTH_API_URL": JSON.stringify(
-        process.env.GITHUB_PAGES === "true" ? process.env.CUSTOMER_AUTH_API_URL?.trim() ?? "" : "",
+        process.env.GITHUB_PAGES === "true"
+          ? process.env.CUSTOMER_AUTH_API_URL?.trim() || defaultCustomerAuthApiUrl
+          : "",
       ),
     },
     server: isCodexSeatbeltSandbox
