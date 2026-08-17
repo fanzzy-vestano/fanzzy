@@ -826,6 +826,14 @@ export default function Home() {
         if (!active) return;
         const user = result.user || null;
         if (!user) {
+          // A valid browser token is the last known authenticated state. Do not
+          // erase it when the external session endpoint briefly returns an
+          // empty response during checkout or another network transition.
+          if (storedUser) {
+            setAuthUser(storedUser);
+            setCheckoutForm((current) => ({ ...current, phone: current.phone || storedUser.phone }));
+            return;
+          }
           clearCustomerAuthTokens();
           setAuthUser(null);
           return;
