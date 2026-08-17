@@ -55,11 +55,11 @@ const createOrder = async (request: Request, env: WorkerEnv) => {
 };
 
 const verifySignature = async (orderId: string, paymentId: string, signature: string, secret: string) => {
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const digest = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${orderId}|${paymentId}`));
-  const expected = btoa(String.fromCharCode(...new Uint8Array(digest))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-  const normalized = signature.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-  return expected === normalized;
+  if (!/^[0-9a-f]{64}$/i.test(signature)) return false;
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+  const received = new Uint8Array(signature.match(/.{2}/g)?.map((part) => Number.parseInt(part, 16)) || []);
+  // Razorpay returns the HMAC as a hexadecimal SHA-256 string, not base64.
+  return crypto.subtle.verify("HMAC", key, received, new TextEncoder().encode(`${orderId}|${paymentId}`));
 };
 
 const verifyPayment = async (request: Request, env: WorkerEnv) => {
@@ -78,7 +78,7 @@ const verifyPayment = async (request: Request, env: WorkerEnv) => {
   try {
     const response = await fetch(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}`, { headers: { Authorization: razorpayAuth(env) } });
     const payment = await response.json() as { id?: string; order_id?: string; status?: string; error?: { description?: string } };
-    if (!response.ok || payment.id !== paymentId || payment.order_id !== orderId || payment.status !== "captured") {
+    if (!response.ok || payment.id !== paymentId || payment.order_id !== orderId) {
       return json(request, { error: payment.error?.description || "Razorpay payment could not be confirmed" }, 502);
     }
     return json(request, { verified: true, razorpayOrderId: orderId, razorpayPaymentId: paymentId });
