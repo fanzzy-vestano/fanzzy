@@ -410,6 +410,7 @@ export default function Home() {
   const overlayHistoryStack = useRef<string[]>([]);
   const overlayHistoryCleanup = useRef(false);
   const overlayClosedFromBack = useRef(false);
+  const overlayLastBackUrl = useRef<string | null>(null);
   const [zoomedImage, setZoomedImage] = useState<{ src: string; alt: string; adjustments?: ImageAdjustments } | null>(null);
   const [selectedVariant, setSelectedVariant] = useState<ProductVariant | null>(null);
   const [selectedSize, setSelectedSize] = useState<string | null>(null);
@@ -1224,6 +1225,7 @@ export default function Home() {
     if (activeOverlayLayers.length > previousLayers.length && previousIsCurrentPrefix) {
       // Opening a new layer (for example product popup, then photo zoom) gets
       // exactly one same-page history entry per layer.
+      overlayLastBackUrl.current = null;
       for (let index = previousLayers.length; index < activeOverlayLayers.length; index += 1) {
         window.history.pushState(
           { ...window.history.state, fanzzyOverlay: activeOverlayLayers[index] },
@@ -1259,6 +1261,9 @@ export default function Home() {
         return;
       }
       if (overlayClosedFromBack.current) return;
+      const backUrl = window.location.href;
+      if (overlayLastBackUrl.current === backUrl) return;
+      overlayLastBackUrl.current = backUrl;
 
       const topLayer = activeOverlayLayers.at(-1);
       if (!topLayer) return;
