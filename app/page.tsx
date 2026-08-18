@@ -164,14 +164,16 @@ const getProductSetting = <T,>(settings: Record<string, T>, ...keys: Array<strin
 const getCustomerPrice = (product: Pick<Product, "price">) => product.price;
 const getComparePrice = (product: Pick<Product, "price">) => Math.round(product.price * CUSTOMER_PRICE_MULTIPLIER);
 const getProductVariantType = (product: Pick<Product, "variantType" | "sizes" | "sizeStock" | "variants">): ProductVariantType =>
-  product.sizes?.length || Object.keys(product.sizeStock || {}).length || product.variants?.some((variant) => Boolean(variant.size))
-    ? "size"
-    : product.variantType || "normal";
-const getProductSizes = (product: Pick<Product, "variantType" | "sizes" | "variants">) =>
+  product.variantType || (
+    product.sizes?.length || Object.keys(product.sizeStock || {}).length || product.variants?.some((variant) => Boolean(variant.size))
+      ? "size"
+      : "normal"
+  );
+const getProductSizes = (product: Pick<Product, "variantType" | "sizes" | "sizeStock" | "variants">) =>
   getProductVariantType(product) === "size" && product.variants?.length
     ? product.variants.map((variant) => variant.size || variant.name).filter(Boolean)
     : product.sizes || [];
-const getSizeVariant = (product: Pick<Product, "variantType" | "sizes" | "variants">, size?: string | null) =>
+const getSizeVariant = (product: Pick<Product, "variantType" | "sizes" | "sizeStock" | "variants">, size?: string | null) =>
   size ? product.variants?.find((variant) => getProductVariantType(product) === "size" && (variant.size || variant.name) === size) : undefined;
 type StockProduct = Pick<Product, "stock"> & Partial<Pick<Product, "sizeStock" | "variantType" | "sizes" | "variants">> & { size?: string | null };
 const getSizeStock = (product: StockProduct, size?: string | null) => {

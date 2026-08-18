@@ -683,6 +683,17 @@ function AdminLoginGate() {
     setLoading(true);
     setError("");
     if (staticPagesMode) {
+      const isStaticCredential =
+        email.trim().toLowerCase() === staticAdminEmail.trim().toLowerCase() &&
+        password === staticAdminPassword &&
+        Boolean(staticAdminEmail && staticAdminPassword);
+      if (isStaticCredential) {
+        window.localStorage.setItem(staticAdminSessionKey, "true");
+        setAuthenticated(true);
+        setPassword("");
+        setLoading(false);
+        return;
+      }
       if (supabase) {
         const { error: supabaseError } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
         if (!supabaseError) {
@@ -693,18 +704,7 @@ function AdminLoginGate() {
           return;
         }
       }
-      const isValid =
-        email.trim().toLowerCase() === staticAdminEmail.trim().toLowerCase() &&
-        password === staticAdminPassword &&
-        Boolean(staticAdminEmail && staticAdminPassword);
-      if (!isValid) {
-        setError("Invalid admin email or password.");
-        setLoading(false);
-        return;
-      }
-      window.localStorage.setItem(staticAdminSessionKey, "true");
-      setAuthenticated(true);
-      setPassword("");
+      setError("Invalid admin email or password.");
       setLoading(false);
       return;
     }
