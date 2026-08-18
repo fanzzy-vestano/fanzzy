@@ -1493,7 +1493,7 @@ export default function Home() {
         window.history.replaceState(
           { ...window.history.state, fanzzyOverlay: undefined },
           "",
-          overlayHistoryUrl(activeOverlayLayers),
+          overlayHistoryUrl(activeOverlayLayers, activeOverlayLayers.includes("quickProduct") ? quickProduct?.id : undefined),
         );
         return;
       }
@@ -1582,7 +1582,7 @@ export default function Home() {
       }
 
       switch (topLayer) {
-        case "zoomedImage": setZoomedImage(null); break;
+        case "zoomedImage": setZoomedImageState(null); break;
         case "quickProduct": setQuickProduct(null); break;
         case "orderConfirmation": setOrderConfirmation(null); break;
         case "checkout": setCheckoutOpen(false); break;
