@@ -465,6 +465,7 @@ export default function Home() {
   const [promotionalOffers, setPromotionalOffers] = useState<PromotionOffer[]>([]);
   const [quickProduct, setQuickProduct] = useState<Product | null>(null);
   const overlayHistoryStack = useRef<string[]>([]);
+  const overlayPageState = useRef<StorefrontPageHistoryState>({ activeCategory: "All pieces", search: "", scrollY: 0 });
   const overlayScrollY = useRef<number | null>(null);
   const overlayHistoryCleanup = useRef(false);
   const overlayClosedFromBack = useRef(false);
@@ -1350,6 +1351,7 @@ export default function Home() {
         search,
         scrollY: Math.round(window.scrollY),
       };
+      overlayPageState.current = restoredPageHistoryState;
       const restoredScrollY = Math.round(window.scrollY);
       window.history.replaceState(
         {
@@ -1401,6 +1403,7 @@ export default function Home() {
         search,
         scrollY: Math.round(window.scrollY),
       };
+      overlayPageState.current = pageHistoryState;
       window.history.replaceState(
         { ...window.history.state, fanzzyPage: pageHistoryState },
         "",
@@ -1445,6 +1448,7 @@ export default function Home() {
         search,
         scrollY: Math.round(window.scrollY),
       };
+      overlayPageState.current = pageHistoryState;
       window.history.replaceState(
         {
           ...window.history.state,
@@ -1469,6 +1473,7 @@ export default function Home() {
       search,
       scrollY: Math.round(window.scrollY),
     };
+    overlayPageState.current = pageHistoryState;
     window.history.replaceState(
       { ...window.history.state, fanzzyPage: pageHistoryState },
       "",
@@ -1491,7 +1496,10 @@ export default function Home() {
       if (!topLayer) return;
 
       const savedScrollState = window.history.state?.fanzzyOverlayScrollY;
-      const pageHistoryState = window.history.state?.fanzzyPage as Partial<StorefrontPageHistoryState> | undefined;
+      const pageHistoryState = {
+        ...overlayPageState.current,
+        ...(window.history.state?.fanzzyPage as Partial<StorefrontPageHistoryState> | undefined),
+      };
       const savedScrollY = Number(overlayScrollY.current ?? savedScrollState ?? pageHistoryState?.scrollY);
       overlayClosedFromBack.current = true;
       overlayHistoryStack.current = activeOverlayLayers.slice(0, -1);
