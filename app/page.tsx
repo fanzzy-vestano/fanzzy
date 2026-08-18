@@ -1277,6 +1277,12 @@ export default function Home() {
     setCart((current) => ({ ...current, [cartKey]: 1 }));
     if (variant) setCartVariants((current) => ({ ...current, [cartKey]: variant }));
     if (size) setCartSizes((current) => ({ ...current, [cartKey]: size }));
+    // Buy now is triggered from quick view. Close that layer after adding so
+    // the cart drawer is visible instead of remaining underneath the modal.
+    if (quickProduct) {
+      quickProductCloseRequested.current = true;
+      setQuickProduct(null);
+    }
     openCart();
     announce(`${product.name}${variant?.name ? ` · ${variant.name}` : ""} added to cart`);
   };
