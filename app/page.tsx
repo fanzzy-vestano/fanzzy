@@ -1347,6 +1347,23 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    const savedPageState = window.history.state?.fanzzyPage as Partial<StorefrontPageHistoryState> | undefined;
+    if (!savedPageState) return;
+    const restoredPageState: StorefrontPageHistoryState = {
+      activeCategory: savedPageState.activeCategory || "All pieces",
+      search: typeof savedPageState.search === "string" ? savedPageState.search : "",
+      scrollY: Number.isFinite(Number(savedPageState.scrollY)) ? Number(savedPageState.scrollY) : 0,
+    };
+    overlayPageState.current = restoredPageState;
+    if (savedPageState.activeCategory) setActiveCategory(restoredPageState.activeCategory);
+    if (typeof savedPageState.search === "string") setSearch(restoredPageState.search);
+    if (restoredPageState.scrollY > 0) {
+      const restoreScroll = () => window.scrollTo({ top: restoredPageState.scrollY, behavior: "auto" });
+      [50, 200, 600].forEach((delay) => window.setTimeout(restoreScroll, delay));
+    }
+  }, []);
+
+  useEffect(() => {
     const previousLayers = overlayHistoryStack.current;
 
     if (overlayRestoredFromUrl.current) {
