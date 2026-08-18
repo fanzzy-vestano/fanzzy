@@ -43,10 +43,14 @@ img { display: block; width: 100%; }
 .checkout-modal .drawer-header h2 { font-size: 38px; }
 .terms-backdrop { align-items: center; display: flex; justify-content: center; padding: 24px; }.terms-modal { background: var(--paper); border-radius: 22px; max-height: calc(100vh - 48px); max-width: 720px; overflow-y: auto; padding: 36px; width: 100%; }.terms-content { color: var(--ink); font-size: 13px; line-height: 1.75; padding-top: 25px; }.terms-content p { margin: 0 0 20px; }.terms-content ul { margin: 0 0 24px; padding-left: 22px; }.terms-content li { margin-bottom: 10px; }.terms-content strong { color: var(--wine); }
 .checkout-intro { color: var(--muted); font-size: 12px; line-height: 1.7; margin: 24px 0; max-width: 470px; }
+.checkout-validation-summary { background: #fff4f1; border: 1px solid rgba(165,67,75,.32); color: #84363d; display: flex; flex-direction: column; font-size: 11px; gap: 5px; line-height: 1.5; margin: -8px 0 20px; padding: 12px 14px; }
+.checkout-validation-summary strong { font-family: var(--mono); font-size: 8px; letter-spacing: .08em; text-transform: uppercase; }
 .checkout-grid { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
 .checkout-grid label { color: var(--wine); display: flex; flex-direction: column; font-family: var(--mono); font-size: 8px; gap: 8px; letter-spacing: .08em; text-transform: uppercase; }
 .checkout-grid input { background: transparent; border: 1px solid var(--line); color: var(--wine); font-family: var(--sans); font-size: 12px; letter-spacing: 0; outline: 0; padding: 13px; text-transform: none; }
 .checkout-grid input:focus { border-color: var(--wine); }
+.checkout-grid input[aria-invalid="true"], .checkout-grid select[aria-invalid="true"] { border-color: #a5434b; box-shadow: 0 0 0 1px rgba(165,67,75,.18); }
+.checkout-field-error { color: #a5434b; font-family: var(--sans); font-size: 10px; letter-spacing: 0; line-height: 1.45; text-transform: none; }
 .checkout-wide { grid-column: 1 / -1; }
 .checkout-fulfillment { border-top: 1px solid var(--line); padding-top: 18px; }
 .field-label { color: var(--wine); font-family: var(--mono); font-size: 8px; letter-spacing: .08em; margin: 0 0 10px; text-transform: uppercase; }
@@ -76,6 +80,8 @@ img { display: block; width: 100%; }
 .checkout-total:not(.coupon-total):has(+ .checkout-total:not(.coupon-total)) { padding-bottom: 32px; position: relative; }
 .checkout-total:not(.coupon-total):has(+ .checkout-total:not(.coupon-total))::after { bottom: 10px; color: var(--muted); content: "Choose Hub pickup for free delivery, or get free delivery on orders above ₹500."; font-family: var(--mono); font-size: 8px; left: 0; letter-spacing: .02em; line-height: 1.45; position: absolute; text-transform: uppercase; }
 .checkout-actions { align-items: center; display: flex; gap: 20px; margin-top: 22px; }
+.checkout-actions button:disabled { cursor: wait; opacity: .65; transform: none; }
+.checkout-payment-status { color: var(--muted); font-family: var(--mono); font-size: 8px; letter-spacing: .05em; margin: 12px 0 0; text-transform: uppercase; }
 @media (max-width: 640px) { .checkout-backdrop { align-items: flex-start; overflow-y: auto; padding: 12px; }.checkout-modal { margin: auto 0; max-height: calc(100dvh - 24px); overscroll-behavior: contain; padding: 25px 20px max(32px, env(safe-area-inset-bottom)); }.checkout-modal .drawer-header h2 { font-size: 31px; }.checkout-grid { grid-template-columns: 1fr; }.checkout-wide { grid-column: auto; }.fulfillment-options { grid-template-columns: 1fr; }.checkout-actions { align-items: stretch; flex-direction: column; gap: 12px; } }
 
 .auth-backdrop { align-items: center; display: flex; justify-content: center; padding: 24px; }
