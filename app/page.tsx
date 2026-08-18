@@ -513,6 +513,44 @@ export default function Home() {
     quickProductCloseRequested.current = true;
     setQuickProduct(null);
   }, []);
+  const openCart = useCallback(() => {
+    if (cartOpen) return;
+
+    // Add the cart entry before its UI is painted. This ensures browser Back
+    // closes the cart before it can reach a prior browser page.
+    if (overlayHistoryStack.current.length === 0) {
+      const pageHistoryState: StorefrontPageHistoryState = {
+        activeCategory,
+        search,
+        scrollY: Math.round(window.scrollY),
+      };
+      overlayPageState.current = pageHistoryState;
+      overlayScrollY.current = pageHistoryState.scrollY;
+      overlayLastBackUrl.current = null;
+      window.history.replaceState(
+        {
+          ...window.history.state,
+          fanzzyPage: pageHistoryState,
+          fanzzyOverlayScrollY: pageHistoryState.scrollY,
+        },
+        "",
+        window.location.href,
+      );
+      window.history.pushState(
+        {
+          ...window.history.state,
+          fanzzyOverlay: "cart",
+          fanzzyPage: pageHistoryState,
+          fanzzyOverlayScrollY: pageHistoryState.scrollY,
+        },
+        "",
+        overlayHistoryUrl(["cart"]),
+      );
+      overlayHistoryStack.current = ["cart"];
+    }
+
+    setCartOpen(true);
+  }, [activeCategory, cartOpen, search]);
   const selectCategory = useCallback((category: string) => {
     setActiveCategory(category);
     overlayPageState.current = {
@@ -1225,7 +1263,7 @@ export default function Home() {
     setCart((current) => ({ ...current, [cartKey]: 1 }));
     if (variant) setCartVariants((current) => ({ ...current, [cartKey]: variant }));
     if (size) setCartSizes((current) => ({ ...current, [cartKey]: size }));
-    setCartOpen(true);
+    openCart();
     announce(`${product.name}${variant?.name ? ` · ${variant.name}` : ""} added to cart`);
   };
   const addPromotionToCart = (offer: PromotionOffer) => {
@@ -1255,7 +1293,7 @@ export default function Home() {
       paid.forEach((selection, index) => addLine(selection, index, "paid", selection.price || 0));
       free.forEach((selection, index) => addLine(selection, paid.length + index, "free", 0));
     }
-    setCartOpen(true);
+    openCart();
     announce(`${offerTypeLabel(offer)} added to cart`);
   };
   const updateQuantity = (cartKey: string, delta: number) => {
@@ -2114,7 +2152,7 @@ export default function Home() {
           <label className="navbar-search"><span aria-hidden="true">⌕</span><input readOnly placeholder="Search jewellery" onFocus={openSearch} aria-label="Open search" /></label>
           <button className="header-action-with-icon saved-header-action" onClick={() => setSavedOpen(true)} aria-label="View saved pieces"><svg className="header-action-icon" viewBox="0 0 16 16" aria-hidden="true" fill="none"><path d="M8 13.25S2.75 10.15 2.75 6.55A2.55 2.55 0 0 1 8 5.8a2.55 2.55 0 0 1 5.25.75C13.25 10.15 8 13.25 8 13.25Z" /></svg><span className="action-label">Saved</span>{wishlist.length > 0 && <b>{wishlist.length}</b>}</button>
           <button className="header-action-with-icon" onClick={openOrders} aria-label="View my orders"><svg className="header-action-icon" viewBox="0 0 16 16" aria-hidden="true" fill="none"><path d="M5 2.5h6v11L8 11.7 5 13.5v-11Z" /><path d="M6.6 5.4h2.8M6.6 7.7h2.1" /></svg><span className="action-label">My orders</span>{orders.length > 0 && <b>{orders.length}</b>}</button>
-          <button className="header-action-with-icon" onClick={() => setCartOpen(true)} aria-label={cartCount > 0 ? `Open shopping cart, ${cartCount} item${cartCount === 1 ? "" : "s"}` : "Open shopping cart"}><svg className="header-action-icon" viewBox="0 0 16 16" aria-hidden="true" fill="none"><path d="M4 5.5h8l-.65 8H4.65L4 5.5Z" /><path d="M6.25 5.5V4.25a1.75 1.75 0 0 1 3.5 0V5.5" /></svg><span className="action-label">Cart</span>{cartCount > 0 && <span className="bag-count">({cartCount})</span>}</button>
+          <button className="header-action-with-icon" onClick={openCart} aria-label={cartCount > 0 ? `Open shopping cart, ${cartCount} item${cartCount === 1 ? "" : "s"}` : "Open shopping cart"}><svg className="header-action-icon" viewBox="0 0 16 16" aria-hidden="true" fill="none"><path d="M4 5.5h8l-.65 8H4.65L4 5.5Z" /><path d="M6.25 5.5V4.25a1.75 1.75 0 0 1 3.5 0V5.5" /></svg><span className="action-label">Cart</span>{cartCount > 0 && <span className="bag-count">({cartCount})</span>}</button>
           <button className="profile-button" onClick={() => setProfileOpen(true)} aria-label="View account profile"><span className="profile-logo" data-signed-in={authUser ? "true" : "false"} aria-hidden="true"><span /></span><span className="action-label">Profile</span></button>
         </div>
         <button className="mobile-menu" onClick={() => setMobileNavOpen((current) => !current)} aria-label={mobileNavOpen ? "Close menu" : "Open menu"} aria-expanded={mobileNavOpen}>{mobileNavOpen ? "×" : "☰"}</button>
@@ -2132,7 +2170,7 @@ export default function Home() {
           <button onClick={() => { setMobileNavOpen(false); setSavedOpen(true); }}>Saved pieces <span>♡</span></button>
           <button onClick={() => { setMobileNavOpen(false); openOrders(); }}>My orders <span>↗</span></button>
           <button onClick={() => { setMobileNavOpen(false); setProfileOpen(true); }}>Profile <span className="mobile-profile-logo" aria-hidden="true"><span /></span></button>
-          <button onClick={() => { setMobileNavOpen(false); setCartOpen(true); }}>Your cart {cartCount > 0 && <span>({cartCount})</span>}</button>
+          <button onClick={() => { setMobileNavOpen(false); openCart(); }}>Your cart {cartCount > 0 && <span>({cartCount})</span>}</button>
         </div>
       </div>}
 
@@ -2167,7 +2205,7 @@ export default function Home() {
 
       {savedOpen && <div className="drawer-backdrop" onClick={() => setSavedOpen(false)}><aside className="orders-drawer saved-drawer" role="dialog" aria-modal="true" aria-labelledby="saved-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR EDIT</p><h2 id="saved-title">Saved pieces</h2></div><button aria-label="Close saved pieces" onClick={() => setSavedOpen(false)}>×</button></div>{wishlist.length ? <div className="saved-list">{wishlist.map((productId) => { const product = products.find((item) => item.id === productId); return product ? <article className="saved-card" key={product.id}><button className="saved-product" onClick={() => { openQuickProduct(product); setSavedOpen(false); }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(getCustomerPrice(product))}</small></span><b>↗</b></button><div className="saved-card-actions"><button className="module-secondary" onClick={() => { addToCart(product); setSavedOpen(false); }}>Add to cart</button><button className="saved-remove" onClick={() => toggleWishlist(product.id)}>Remove</button></div></article> : null; })}</div> : <div className="orders-empty saved-empty"><div>♡</div><h3>Your edit is waiting.</h3><p>Tap the heart on any piece to keep it close while you decide.</p><button className="button button-dark" onClick={() => { setSavedOpen(false); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}>Explore pieces <span>↗</span></button></div>}</aside></div>}
 
-      {profileOpen && <div className="drawer-backdrop" onClick={() => setProfileOpen(false)}><aside className="orders-drawer profile-drawer" role="dialog" aria-modal="true" aria-labelledby="profile-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR FANZZY ACCOUNT</p><h2 id="profile-title">Profile</h2></div><button aria-label="Close profile" onClick={() => setProfileOpen(false)}>×</button></div>{authUser ? <div className="profile-content"><div className="profile-avatar" aria-hidden="true">{profileName.slice(0, 1).toUpperCase()}</div><p className="eyebrow">SIGNED IN</p><h3>{profileName}</h3><p className="profile-welcome">Your saved pieces, cart and order history stay together here.</p><dl className="profile-details"><div><dt>Login mobile number</dt><dd>{authUser.phone}</dd></div><div><dt>Account ID</dt><dd>{authUser.id}</dd></div></dl><div className="profile-shortcuts"><button onClick={() => { setProfileOpen(false); setOrdersOpen(true); }}><span>Orders</span><b>{orders.length.toString().padStart(2, "0")} ↗</b></button><button onClick={() => { setProfileOpen(false); setSavedOpen(true); }}><span>Saved</span><b>{wishlist.length.toString().padStart(2, "0")} ♡</b></button></div><button className="button button-dark full-width" onClick={() => { setProfileOpen(false); setCartOpen(true); }}>Open my cart <span>↗</span></button><button className="profile-sign-out" onClick={signOut}>Sign out</button></div> : <div className="profile-content profile-signed-out"><div className="profile-avatar" aria-hidden="true">○</div><p className="eyebrow">NOT SIGNED IN</p><h3>Welcome to Fanzzy.</h3><p>Sign in with a one-time SMS or voice code to keep your cart and orders connected to your mobile number.</p><button className="button button-dark full-width" onClick={() => { setProfileOpen(false); setAuthMessage(""); setAuthOpen(true); }}>Sign in with mobile OTP <span>↗</span></button></div>}</aside></div>}
+      {profileOpen && <div className="drawer-backdrop" onClick={() => setProfileOpen(false)}><aside className="orders-drawer profile-drawer" role="dialog" aria-modal="true" aria-labelledby="profile-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR FANZZY ACCOUNT</p><h2 id="profile-title">Profile</h2></div><button aria-label="Close profile" onClick={() => setProfileOpen(false)}>×</button></div>{authUser ? <div className="profile-content"><div className="profile-avatar" aria-hidden="true">{profileName.slice(0, 1).toUpperCase()}</div><p className="eyebrow">SIGNED IN</p><h3>{profileName}</h3><p className="profile-welcome">Your saved pieces, cart and order history stay together here.</p><dl className="profile-details"><div><dt>Login mobile number</dt><dd>{authUser.phone}</dd></div><div><dt>Account ID</dt><dd>{authUser.id}</dd></div></dl><div className="profile-shortcuts"><button onClick={() => { setProfileOpen(false); setOrdersOpen(true); }}><span>Orders</span><b>{orders.length.toString().padStart(2, "0")} ↗</b></button><button onClick={() => { setProfileOpen(false); setSavedOpen(true); }}><span>Saved</span><b>{wishlist.length.toString().padStart(2, "0")} ♡</b></button></div><button className="button button-dark full-width" onClick={() => { setProfileOpen(false); openCart(); }}>Open my cart <span>↗</span></button><button className="profile-sign-out" onClick={signOut}>Sign out</button></div> : <div className="profile-content profile-signed-out"><div className="profile-avatar" aria-hidden="true">○</div><p className="eyebrow">NOT SIGNED IN</p><h3>Welcome to Fanzzy.</h3><p>Sign in with a one-time SMS or voice code to keep your cart and orders connected to your mobile number.</p><button className="button button-dark full-width" onClick={() => { setProfileOpen(false); setAuthMessage(""); setAuthOpen(true); }}>Sign in with mobile OTP <span>↗</span></button></div>}</aside></div>}
 
       {ordersOpen && <div className="drawer-backdrop" onClick={() => setOrdersOpen(false)}><aside className="orders-drawer" role="dialog" aria-modal="true" aria-labelledby="orders-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR FANZZY ACCOUNT</p><h2 id="orders-title">My orders</h2></div><button aria-label="Close orders" onClick={() => setOrdersOpen(false)}>×</button></div><div className="orders-intro"><p>These are the orders placed using your signed-in account. Only you can see this account’s orders.</p></div>{visibleOrders.length ? <div className="customer-order-list">{visibleOrders.map((order) => <article className="customer-order-card" key={order.id}><div className="customer-order-head"><div><strong>{order.id}</strong><small>{formatOrderDate(order.date)} · {order.customerName}</small></div><span className={`customer-order-status ${order.status.toLowerCase()}`}>{order.status}</span></div>{order.items?.length ? <div className="customer-order-items">{order.items.map((item) => { const product = getOrderedProduct(item); return <button className="customer-order-product" key={`${order.id}-${item.name}`} onClick={() => openOrderedProduct(item)} aria-label={`View ${item.name} details`}>{product ? <img src={product.image} alt="" style={imageAdjustmentStyle(product.imageAdjustments)} /> : <span className="order-product-placeholder" aria-hidden="true">✦</span>}<span className="order-product-copy"><strong>{item.name}</strong><b>× {item.quantity}</b>{product ? <em>{product.category} · View details ↗</em> : <em>Product no longer in the collection</em>}</span><small>{item.price}</small></button>; })}</div> : <p className="customer-order-items legacy-order">Order details are available in your confirmation.</p>}<div className="customer-order-total"><span>Total paid</span><strong>{order.total}</strong></div><button className="module-secondary customer-bill-button" onClick={() => downloadBill(order)}>Download bill ↗</button></article>)}</div> : <div className="orders-empty"><div>✦</div><h3>No orders found for this account.</h3><p>Orders appear here after you complete payment while signed in to this account.</p><button className="button button-dark" onClick={() => { setOrdersOpen(false); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}>Shop the collection <span>↗</span></button></div>}</aside></div>}
 
