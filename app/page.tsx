@@ -474,13 +474,8 @@ export default function Home() {
   const overlayClosedFromBack = useRef(false);
   const overlayLastBackUrl = useRef<string | null>(null);
   const quickProductCloseRequested = useRef(false);
-  const zoomedImageCloseRequested = useRef(false);
   const overlayRestoredFromUrl = useRef(Boolean(typeof window !== "undefined" && new URLSearchParams(window.location.search).get("fanzzy-product")));
-  const [zoomedImage, setZoomedImageState] = useState<{ src: string; alt: string; adjustments?: ImageAdjustments } | null>(null);
-  const setZoomedImage = useCallback((image: { src: string; alt: string; adjustments?: ImageAdjustments } | null) => {
-    zoomedImageCloseRequested.current = image === null;
-    setZoomedImageState(image);
-  }, []);
+  const [zoomedImage, setZoomedImage] = useState<{ src: string; alt: string; adjustments?: ImageAdjustments } | null>(null);
   const [selectedVariant, setSelectedVariant] = useState<ProductVariant | null>(null);
   const [selectedSize, setSelectedSize] = useState<string | null>(null);
   const [selectedPromotion, setSelectedPromotion] = useState<PromotionOffer | null>(null);
@@ -1480,23 +1475,6 @@ export default function Home() {
       if (activeOverlayLayers.length === 0) {
         overlayScrollY.current = null;
       }
-      const samePageOverlayCloseRequested =
-        (quickProductCloseRequested.current && previousLayers.at(-1) === "quickProduct")
-        || (zoomedImageCloseRequested.current && previousLayers.at(-1) === "zoomedImage");
-      if (samePageOverlayCloseRequested) {
-        // Quick view and image zoom are same-page cards, so their close
-        // buttons must never
-        // navigate through an unrelated browser-history entry.
-        quickProductCloseRequested.current = false;
-        zoomedImageCloseRequested.current = false;
-        overlayHistoryCleanup.current = false;
-        window.history.replaceState(
-          { ...window.history.state, fanzzyOverlay: undefined },
-          "",
-          overlayHistoryUrl(activeOverlayLayers, activeOverlayLayers.includes("quickProduct") ? quickProduct?.id : undefined),
-        );
-        return;
-      }
       window.history.go(-removedLayerCount);
       return;
     } else if (activeOverlayKey !== previousLayers.join("|") && activeOverlayLayers.length) {
@@ -1582,7 +1560,7 @@ export default function Home() {
       }
 
       switch (topLayer) {
-        case "zoomedImage": setZoomedImageState(null); break;
+        case "zoomedImage": setZoomedImage(null); break;
         case "quickProduct": setQuickProduct(null); break;
         case "orderConfirmation": setOrderConfirmation(null); break;
         case "checkout": setCheckoutOpen(false); break;
