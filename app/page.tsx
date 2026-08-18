@@ -466,6 +466,7 @@ export default function Home() {
   const [quickProduct, setQuickProduct] = useState<Product | null>(null);
   const overlayHistoryStack = useRef<string[]>([]);
   const overlayPageState = useRef<StorefrontPageHistoryState>({ activeCategory: "All pieces", search: "", scrollY: 0 });
+  const pendingPageScrollY = useRef<number | null>(null);
   const overlayScrollY = useRef<number | null>(null);
   const overlayHistoryCleanup = useRef(false);
   const overlayClosedFromBack = useRef(false);
@@ -1358,10 +1359,19 @@ export default function Home() {
     if (savedPageState.activeCategory) setActiveCategory(restoredPageState.activeCategory);
     if (typeof savedPageState.search === "string") setSearch(restoredPageState.search);
     if (restoredPageState.scrollY > 0) {
+      pendingPageScrollY.current = restoredPageState.scrollY;
       const restoreScroll = () => window.scrollTo({ top: restoredPageState.scrollY, behavior: "auto" });
       [50, 200, 600].forEach((delay) => window.setTimeout(restoreScroll, delay));
     }
   }, []);
+
+  useEffect(() => {
+    const savedScrollY = pendingPageScrollY.current;
+    if (savedScrollY === null || products.length === 0) return;
+    pendingPageScrollY.current = null;
+    const restoreScroll = () => window.scrollTo({ top: savedScrollY, behavior: "auto" });
+    [0, 100, 400].forEach((delay) => window.setTimeout(restoreScroll, delay));
+  }, [products.length]);
 
   useEffect(() => {
     const previousLayers = overlayHistoryStack.current;
