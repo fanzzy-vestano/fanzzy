@@ -155,7 +155,6 @@ const isCustomerOrder = (order: CustomerOrder, customer: CustomerAuthUser) =>
   belongsToCustomer(order, customer) && !isDemoOrder(order) && (isPaidOrder(order) || order.paymentStatus == null);
 
 const formatINR = (value: number) => `₹${(Number.isFinite(value) ? value : 0).toLocaleString("en-IN")}`;
-const CUSTOMER_PRICE_MULTIPLIER = 2.2;
 const normalizeProductKey = (value?: string) => String(value || "").trim().replace(/[^a-z0-9]/gi, "").toLowerCase();
 const matchesProductKey = (product: Pick<Product, "id" | "sku">, value?: string) => {
   const normalizedValue = normalizeProductKey(value);
@@ -169,7 +168,24 @@ const getProductSetting = <T,>(settings: Record<string, T>, ...keys: Array<strin
   return Object.entries(settings).find(([key]) => normalizedKeys.has(normalizeProductKey(key)))?.[1];
 };
 const getCustomerPrice = (product: Pick<Product, "price">) => product.price;
-const getComparePrice = (product: Pick<Product, "price">) => Math.round(product.price * CUSTOMER_PRICE_MULTIPLIER);
+const getProductDiscountPercent = (product: Pick<Product, "id" | "sku" | "price">) => {
+  const salePrice = Number(product.price);
+  if (!Number.isFinite(salePrice) || salePrice <= 0) return 0;
+  const key = normalizeProductKey(product.id || product.sku);
+  const maxExclusive = salePrice < 100 ? 9 : 10;
+  const hash = Array.from(key).reduce((total, character) => (total * 31 + character.charCodeAt(0)) % maxExclusive, 0);
+  return (salePrice < 100 ? 68 : 51) + hash;
+};
+const getComparePrice = (product: Pick<Product, "id" | "sku" | "price">) => {
+  const salePrice = Number(product.price);
+  const discount = getProductDiscountPercent(product);
+  if (!Number.isFinite(salePrice) || salePrice <= 0 || discount <= 0) return salePrice;
+  const idealMrp = Math.max(salePrice + 1, Math.ceil(salePrice / (1 - discount / 100)));
+  for (let mrp = Math.max(salePrice + 1, idealMrp - 2); mrp <= idealMrp + 2; mrp += 1) {
+    if (Math.round(((mrp - salePrice) / mrp) * 100) === discount) return mrp;
+  }
+  return idealMrp;
+};
 const getProductVariantType = (product: Pick<Product, "variantType" | "sizes" | "sizeStock" | "variants">): ProductVariantType =>
   product.variantType || (
     product.sizes?.length || Object.keys(product.sizeStock || {}).length || product.variants?.some((variant) => Boolean(variant.size))
@@ -351,6 +367,8 @@ function normalizeStoredProduct(value: unknown, index: number): Product | null {
   if (!name) return null;
   const rawPrice = raw.price;
   const price = typeof rawPrice === "number" ? rawPrice : Number(String(rawPrice ?? "").replace(/[^0-9.]/g, ""));
+  const rawCompareAt = raw.compareAt;
+  const compareAt = typeof rawCompareAt === "number" ? rawCompareAt : Number(String(rawCompareAt ?? "").replace(/[^0-9.]/g, ""));
   const stock = typeof raw.stock === "number" ? raw.stock : Number(raw.stock ?? 0);
   const image = typeof raw.image === "string" ? raw.image : "";
   const sizes = Array.isArray(raw.sizes) ? raw.sizes.filter((size): size is string => typeof size === "string") : [];
@@ -381,7 +399,7 @@ function normalizeStoredProduct(value: unknown, index: number): Product | null {
     category: typeof raw.category === "string" && raw.category ? raw.category : "Uncategorised",
     stock: Number.isFinite(stock) ? stock : 0,
     price: Number.isFinite(price) ? price : 0,
-    compareAt: typeof raw.compareAt === "number" ? raw.compareAt : undefined,
+    compareAt: Number.isFinite(compareAt) ? compareAt : undefined,
     image,
     hoverImage: typeof raw.hoverImage === "string" && raw.hoverImage ? raw.hoverImage : image,
     tag: typeof raw.tag === "string" ? raw.tag : undefined,
@@ -404,14 +422,16 @@ const isProductOutOfStock = (product: Product) => getProductVariantType(product)
 
 function ProductCard({ product, wished, promotions, onWishlist, onAdd, onQuickView, onImageZoom }: { product: Product; wished: boolean; promotions: PromotionOffer[]; onWishlist: () => void; onAdd: () => void; onQuickView: () => void; onImageZoom: () => void }) {
   const isOutOfStock = isProductOutOfStock(product);
+  const discountPercent = getProductDiscountPercent(product);
   return (
     <article className="product-card">
       <div className="product-media" style={{ backgroundColor: product.tone }}>
         <img className={`product-image product-image-zoom primary-image ${isOutOfStock ? "stock-out-image" : ""}`} src={product.image} alt={product.name} style={imageAdjustmentStyle(product.imageAdjustments)} onClick={onImageZoom} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onImageZoom(); }} role="button" tabIndex={0} title="Click to zoom" />
         <img className={`product-image product-image-zoom hover-image ${isOutOfStock ? "stock-out-image" : ""}`} src={product.hoverImage} alt="" aria-hidden="true" style={imageAdjustmentStyle(product.hoverImageAdjustments)} onClick={onImageZoom} />
-        {product.tag && <span className="product-tag">{product.tag}</span>}
+        <span className="product-discount-badge">{discountPercent}% off</span>
+        {product.tag && <span className="product-tag with-discount">{product.tag}</span>}
         {promotions.slice(0, 1).map((offer) => <span className="promotion-badge" key={offer.id}>{offerTypeLabel(offer)}</span>)}
-        {product.stock === 1 && <span className={`low-stock-badge ${product.tag ? "with-tag" : ""}`}>Only 1 available</span>}
+        {product.stock === 1 && <span className={`low-stock-badge ${product.tag ? "with-tag" : ""} with-discount`}>Only 1 available</span>}
         {isOutOfStock && <span className="stock-out-overlay">Sold out</span>}
         <button className={`wishlist-button ${wished ? "is-wished" : ""}`} onClick={onWishlist} aria-label={wished ? `Remove ${product.name} from wishlist` : `Add ${product.name} to wishlist`}>{wished ? "♥" : "♡"}</button>
         <button className="quick-view" onClick={onQuickView}>Quick view <span>↗</span></button>
