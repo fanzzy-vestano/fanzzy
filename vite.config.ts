@@ -42,6 +42,9 @@ export default defineConfig(async () => {
   process.env.WRANGLER_LOG_PATH ??= ".wrangler/logs";
   process.env.MINIFLARE_REGISTRY_PATH ??= ".wrangler/registry";
 
+  // Wrangler snapshots its log path while the Cloudflare plugin is imported.
+  const { cloudflare } = await import("@cloudflare/vite-plugin");
+
   return {
     define: {
       "process.env.NEXT_PUBLIC_STATIC_ADMIN_EMAIL": JSON.stringify(
@@ -67,6 +70,10 @@ export default defineConfig(async () => {
     plugins: [
       vinext(),
       sites(),
+      cloudflare({
+        viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
+        config: localBindingConfig,
+      }),
     ],
   };
 });
