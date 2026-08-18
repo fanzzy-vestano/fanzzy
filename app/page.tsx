@@ -1475,6 +1475,18 @@ export default function Home() {
       if (activeOverlayLayers.length === 0) {
         overlayScrollY.current = null;
       }
+      if (quickProductCloseRequested.current && previousLayers.at(-1) === "quickProduct") {
+        // Quick view is a same-page card, so its close button must never
+        // navigate through an unrelated browser-history entry.
+        quickProductCloseRequested.current = false;
+        overlayHistoryCleanup.current = false;
+        window.history.replaceState(
+          { ...window.history.state, fanzzyOverlay: undefined },
+          "",
+          overlayHistoryUrl(activeOverlayLayers),
+        );
+        return;
+      }
       window.history.go(-removedLayerCount);
       return;
     } else if (activeOverlayKey !== previousLayers.join("|") && activeOverlayLayers.length) {
