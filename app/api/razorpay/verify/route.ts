@@ -47,10 +47,14 @@ export async function POST(request: Request) {
     if (!paymentResponse.ok || payment.order_id !== orderId) {
       return json({ error: payment.error?.description || "Razorpay payment could not be confirmed" }, 502);
     }
-    await finalizeRazorpayPayment(payment);
+    const order = await finalizeRazorpayPayment(payment);
+    return json({
+      verified: true,
+      razorpayOrderId: orderId,
+      razorpayPaymentId: paymentId,
+      inventoryAdjusted: order.inventoryAdjusted === true,
+    });
   } catch (error) {
     return json({ error: error instanceof Error ? error.message : "Could not save the confirmed payment" }, 502);
   }
-
-  return json({ verified: true, razorpayOrderId: orderId, razorpayPaymentId: paymentId });
 }

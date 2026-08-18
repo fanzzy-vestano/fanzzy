@@ -1,4 +1,4 @@
-import { finalizeRazorpayPayment, type RazorpayPayment } from "../../../../lib/razorpay-payment-sync";
+import { finalizeRazorpayPayment, reconcilePendingOrderInventory, type RazorpayPayment } from "../../../../lib/razorpay-payment-sync";
 
 const json = (body: Record<string, unknown>, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -21,7 +21,8 @@ export async function POST() {
         synced += 1;
       }
     }
-    return json({ synced });
+    const inventory = await reconcilePendingOrderInventory();
+    return json({ synced, inventory });
   } catch (error) {
     return json({ error: error instanceof Error ? error.message : "Could not sync Razorpay payments" }, 502);
   }

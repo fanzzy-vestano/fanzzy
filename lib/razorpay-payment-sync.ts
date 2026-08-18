@@ -112,8 +112,14 @@ async function writeJsonSetting(key: string, value: unknown) {
 }
 
 const normalizeSelection = (value?: string) => String(value || "").trim().replace(/^size\s+/i, "").toLowerCase();
+const normalizeSku = (value?: string) => String(value || "").trim().replace(/[^a-z0-9]/gi, "").toLowerCase();
+const findSettingKey = <T>(settings: Record<string, T>, sku: string) =>
+  Object.keys(settings).find((key) => normalizeSku(key) === normalizeSku(sku));
+const resolveSettingKey = <T>(settings: Record<string, T>, sku: string) => findSettingKey(settings, sku) || sku;
 
-async function adjustInventory(order: StoredOrder) {
+type InventoryAdjustment = { complete: boolean };
+
+async function adjustInventory(order: StoredOrder): Promise<InventoryAdjustment> {
   const [savedVariants, savedSizeStock, savedVariantTypes] = await Promise.all([
     readJsonSetting<Record<string, StoredVariant[]>>("product_variants", {}),
     readJsonSetting<Record<string, Record<string, number>>>("product_size_stock", {}),
@@ -124,27 +130,70 @@ async function adjustInventory(order: StoredOrder) {
   const baseQuantities = new Map<string, number>();
   let variantsChanged = false;
   let sizeStockChanged = false;
+  const unresolvedProductIds = new Set<string>();
+
+  // Checkout may store a normalized product id while Admin keys inventory by
+  // the original SKU. Resolve each order line to that canonical SKU first.
+  let productRows: Array<{ sku?: string; stock?: number }> = [];
+  try {
+    const productResponse = await fetch(`${supabaseUrl}/rest/v1/products?select=sku,stock`, { headers });
+    if (productResponse.ok) productRows = await productResponse.json() as Array<{ sku?: string; stock?: number }>;
+  } catch {
+    productRows = [];
+  }
+  const resolveProductSku = (rawSku: string) =>
+    productRows.find((product) => normalizeSku(product.sku) === normalizeSku(rawSku))?.sku?.trim()
+      || findSettingKey(savedVariants, rawSku)
+      || findSettingKey(savedSizeStock, rawSku)
+      || findSettingKey(savedVariantTypes, rawSku)
+      || rawSku;
 
   order.items?.forEach((item) => {
-    const sku = String(item.productId || "").trim();
+    const rawSku = String(item.productId || "").trim();
+    const sku = resolveProductSku(rawSku);
     const quantity = Math.floor(Number(item.quantity) || 0);
     if (!sku || quantity <= 0) return;
+    const product = productRows.find((candidate) => normalizeSku(candidate.sku) === normalizeSku(sku));
+    const hasBaseStock = Number.isFinite(Number(product?.stock));
 
-    const selectionType = savedVariantTypes[sku] || (item.size ? "size" : item.variantName ? "normal" : undefined);
+    const variantTypeKey = resolveSettingKey(savedVariantTypes, sku);
+    // The checkout line is the source of truth for the selected stock bucket.
+    // This also repairs older products whose variant-type setting was not saved.
+    const selectionType = item.size ? "size" : item.variantName ? "normal" : savedVariantTypes[variantTypeKey];
     if (selectionType === "size" && item.size) {
       const normalizedSize = normalizeSelection(item.size);
-      const currentSizeStock = sizeStock[sku] || {};
+      const sizeStockKey = resolveSettingKey(sizeStock, sku);
+      const currentSizeStock = sizeStock[sizeStockKey] || {};
       const sizeKey = Object.keys(currentSizeStock).find((key) => normalizeSelection(key) === normalizedSize) || item.size;
-      const productVariants = variants[sku] || [];
+      const variantsKey = resolveSettingKey(variants, sku);
+      const productVariants = variants[variantsKey] || [];
       const variantIndex = productVariants.findIndex((variant) => normalizeSelection(variant.size || variant.name) === normalizedSize);
       const sizeVariant = variantIndex >= 0 ? productVariants[variantIndex] : undefined;
-      const available = currentSizeStock[sizeKey] ?? (Number.isFinite(Number(sizeVariant?.stock)) ? Number(sizeVariant?.stock) : undefined);
-      if (available === undefined) throw new Error(`Size stock was not found for ${sku} · Size ${item.size}`);
+      const configuredSizeStock = currentSizeStock[sizeKey];
+      const variantAvailable = Number(sizeVariant?.stock);
+      const hasConfiguredSizeStock = configuredSizeStock !== undefined && Number.isFinite(Number(configuredSizeStock));
+      const hasVariantStock = Number.isFinite(variantAvailable);
 
-      sizeStock[sku] = { ...currentSizeStock, [sizeKey]: Math.max(0, Math.floor(available - quantity)) };
-      sizeStockChanged = true;
-      if (sizeVariant && Number.isFinite(Number(sizeVariant.stock))) {
-        variants[sku] = productVariants.map((variant, index) => index === variantIndex
+      // Legacy products sometimes have a selected size but no matching size
+      // or variant inventory row. Their base product stock is the only stock
+      // bucket we can safely decrement in that case.
+      if (!hasConfiguredSizeStock && !hasVariantStock) {
+        // A zero base stock cannot represent the selected size. Keep the
+        // payment pending until the size metadata is restored instead of
+        // incorrectly marking its inventory as adjusted.
+        if (!hasBaseStock || Number(product?.stock) <= 0) unresolvedProductIds.add(rawSku || sku);
+        else baseQuantities.set(sku, (baseQuantities.get(sku) || 0) + quantity);
+        return;
+      }
+      if (hasConfiguredSizeStock) {
+        sizeStock[sizeStockKey] = {
+          ...currentSizeStock,
+          [sizeKey]: Math.max(0, Math.floor(Number(configuredSizeStock) - quantity)),
+        };
+        sizeStockChanged = true;
+      }
+      if (hasVariantStock && sizeVariant) {
+        variants[variantsKey] = productVariants.map((variant, index) => index === variantIndex
           ? { ...variant, stock: Math.max(0, Math.floor(Number(variant.stock) - quantity)) }
           : variant);
         variantsChanged = true;
@@ -154,31 +203,37 @@ async function adjustInventory(order: StoredOrder) {
 
     if (selectionType === "normal" && item.variantName) {
       const normalizedVariant = normalizeSelection(item.variantName);
-      const productVariants = variants[sku] || [];
+      const variantsKey = resolveSettingKey(variants, sku);
+      const productVariants = variants[variantsKey] || [];
       const variantIndex = productVariants.findIndex((variant) => normalizeSelection(variant.name) === normalizedVariant);
       const selectedVariant = variantIndex >= 0 ? productVariants[variantIndex] : undefined;
       if (!selectedVariant || !Number.isFinite(Number(selectedVariant.stock))) {
-        throw new Error(`Variant stock was not found for ${sku} · ${item.variantName}`);
+        if (!hasBaseStock) unresolvedProductIds.add(rawSku || sku);
+        else baseQuantities.set(sku, (baseQuantities.get(sku) || 0) + quantity);
+        return;
       }
-      variants[sku] = productVariants.map((variant, index) => index === variantIndex
+      variants[variantsKey] = productVariants.map((variant, index) => index === variantIndex
         ? { ...variant, stock: Math.max(0, Math.floor(Number(variant.stock) - quantity)) }
         : variant);
       variantsChanged = true;
       return;
     }
 
-    baseQuantities.set(sku, (baseQuantities.get(sku) || 0) + quantity);
+    if (!hasBaseStock) unresolvedProductIds.add(rawSku || sku);
+    else baseQuantities.set(sku, (baseQuantities.get(sku) || 0) + quantity);
   });
+
+  // Do not partially deduct an order. A local-only or deleted product cannot
+  // be reconciled from this server, so its order stays pending instead of
+  // making its other lines reduce again during every future sync.
+  if (unresolvedProductIds.size > 0) return { complete: false };
 
   if (sizeStockChanged) await writeJsonSetting("product_size_stock", sizeStock);
   if (variantsChanged) await writeJsonSetting("product_variants", variants);
 
   for (const [sku, quantity] of baseQuantities) {
-    const productResponse = await fetch(`${supabaseUrl}/rest/v1/products?sku=eq.${encodeURIComponent(sku)}&select=sku,stock`, { headers });
-    if (!productResponse.ok) throw new Error("Could not read product inventory");
-    const products = await productResponse.json() as Array<{ stock?: number }>;
-    const currentStock = Number(products[0]?.stock);
-    if (!Number.isFinite(currentStock)) continue;
+    const currentStock = Number(productRows.find((product) => normalizeSku(product.sku) === normalizeSku(sku))?.stock);
+    if (!Number.isFinite(currentStock)) return { complete: false };
     const updateResponse = await fetch(`${supabaseUrl}/rest/v1/products?sku=eq.${encodeURIComponent(sku)}`, {
       method: "PATCH",
       headers: { ...headers, Prefer: "return=minimal" },
@@ -186,13 +241,47 @@ async function adjustInventory(order: StoredOrder) {
     });
     if (!updateResponse.ok) throw new Error("Could not update product inventory");
   }
+  return { complete: true };
+}
+
+export async function reconcilePendingOrderInventory() {
+  const orders = await readOrders();
+  let reconciled = 0;
+  let pending = 0;
+  let ordersChanged = false;
+
+  // Covers paid orders older than Razorpay's latest-payment window. Only an
+  // explicit true is an idempotency marker, so stock is never reduced twice.
+  for (const order of orders) {
+    if (order.paymentStatus !== "paid" || order.inventoryAdjusted === true) continue;
+    try {
+      const adjustment = await adjustInventory(order);
+      if (adjustment.complete) {
+        order.inventoryAdjusted = true;
+        reconciled += 1;
+      } else {
+        order.inventoryAdjusted = false;
+        pending += 1;
+      }
+    } catch {
+      order.inventoryAdjusted = false;
+      pending += 1;
+    }
+    ordersChanged = true;
+  }
+
+  if (ordersChanged) await writeOrders(orders);
+  return { reconciled, pending };
 }
 
 export async function finalizeRazorpayPayment(payment: RazorpayPayment, receipt?: string) {
   if (!payment.id) throw new Error("Razorpay payment ID is missing");
   const orders = await readOrders();
   let order = orders.find((candidate) => candidate.razorpayPaymentId === payment.id);
-  if (order?.paymentStatus === "paid" && order.inventoryAdjusted !== false) {
+  // Older paid orders do not have inventoryAdjusted. Treat only an explicit
+  // true value as complete so the next payment sync can repair their missing
+  // size/variant stock deduction and then mark them complete.
+  if (order?.paymentStatus === "paid" && order.inventoryAdjusted === true) {
     restorePaymentContactDetails(order, payment);
     await writeOrders(orders);
     return order;
@@ -227,8 +316,15 @@ export async function finalizeRazorpayPayment(payment: RazorpayPayment, receipt?
   order.inventoryAdjusted = false;
   await writeOrders(orders);
 
-  await adjustInventory(order);
-  order.inventoryAdjusted = true;
+  // Payment confirmation must not be lost because an older product is missing
+  // size/variant metadata. Keep the paid order and let the next admin sync
+  // retry inventory correction while it remains visibly pending.
+  try {
+    const adjustment = await adjustInventory(order);
+    order.inventoryAdjusted = adjustment.complete;
+  } catch {
+    order.inventoryAdjusted = false;
+  }
   await writeOrders(orders);
   return order;
 }

@@ -215,6 +215,23 @@ export async function saveStoreOrders(orders: unknown[]) {
   return saveStoreSetting("orders", JSON.stringify(orders));
 }
 
+export function subscribeToStoreSetting(key: keyof typeof settingKeys, onChange: () => void) {
+  const client = supabase;
+  if (!client) return () => undefined;
+  const channel = client
+    .channel(`fanzzy-${settingKeys[key]}-live`)
+    .on("postgres_changes", {
+      event: "*",
+      schema: "public",
+      table: "store_settings",
+      filter: `key=eq.${settingKeys[key]}`,
+    }, onChange)
+    .subscribe();
+  return () => {
+    void client.removeChannel(channel);
+  };
+}
+
 export async function uploadStoreImage(file: File, folder: "products" | "homepage" | "categories") {
   if (!supabase) return { url: null, error: new Error("Supabase is not configured") };
   try {

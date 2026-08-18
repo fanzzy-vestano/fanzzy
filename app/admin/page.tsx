@@ -16,13 +16,17 @@ import {
   saveCatalogProduct,
   saveStoreOrders,
   saveStoreSetting,
+  subscribeToStoreSetting,
   type ProductVariantType,
   uploadStoreImage,
 } from "../../lib/supabase/catalog";
 import { printOrderBill } from "../../lib/order-bill";
+import { supabase } from "../../lib/supabase/client";
 import {
   defaultPromotionForm,
+  isPromotionLive,
   offerTypeLabel,
+  normalizePromotionOffer,
   promotionStorageKey,
   type PromotionOffer,
   type PromotionOfferStatus,
@@ -44,6 +48,7 @@ type AdminProduct = {
   status: "Published" | "Draft" | "Low stock";
   image: string;
   hoverImage?: string;
+  compareAt?: number;
   barcode?: string;
   hsnCode?: string;
   billName?: string;
@@ -91,6 +96,7 @@ type ReportView = "overview" | "category" | "item" | "top-selling" | "inventory"
 type AdminPermission =
   | "Overview"
   | "Products"
+  | "Product Image Scanner"
   | "Categories"
   | "Collections"
   | "Orders"
@@ -112,6 +118,7 @@ type AdminRole = {
 const allAdminPermissions: AdminPermission[] = [
   "Overview",
   "Products",
+  "Product Image Scanner",
   "Categories",
   "Collections",
   "Orders",
@@ -413,6 +420,7 @@ const persistCatalog = (catalog: AdminProduct[]) => {
     status: product.status,
     price: Number(product.price.replace(/[^0-9]/g, "")) || 0,
     cost: Number(product.cost.replace(/[^0-9]/g, "")) || 0,
+    compareAt: product.compareAt,
     image: product.image,
     hoverImage: product.hoverImage || product.image,
     barcode: product.barcode || "",
@@ -484,6 +492,7 @@ const toCatalogProduct = (product: AdminProduct) => ({
   status: product.status,
   image: product.image,
   hoverImage: product.hoverImage || product.image,
+  compareAt: product.compareAt,
   sizes: product.sizes || [],
   variants: product.variants || [],
   imageAdjustments: product.imageAdjustments || defaultImageAdjustments,
@@ -573,6 +582,7 @@ const persistCategories = (
 const menu = [
   { label: "Overview", icon: "◌" },
   { label: "Products", icon: "◇", count: "24" },
+  { label: "Product Image Scanner", icon: "⌁" },
   { label: "Categories", icon: "▦" },
   { label: "Collections", icon: "✧" },
   { label: "Orders", icon: "↗", count: "12" },
@@ -586,7 +596,7 @@ const menu = [
   { label: "Announcement", icon: "▤" },
 ];
 
-type AdminAuthResponse = { authenticated?: boolean; error?: string };
+type AdminAuthResponse = { authenticated?: boolean; error?: string; message?: string; resetReady?: boolean };
 const isGitHubPagesHost = () =>
   typeof window !== "undefined" &&
   (window.location.hostname === "fanzzy.in" ||
@@ -594,6 +604,7 @@ const isGitHubPagesHost = () =>
     window.location.hostname.endsWith(".github.io"));
 const staticAdminEmail = process.env.NEXT_PUBLIC_STATIC_ADMIN_EMAIL ?? "";
 const staticAdminPassword = process.env.NEXT_PUBLIC_STATIC_ADMIN_PASSWORD ?? "";
+const adminRecoveryEmail = (staticAdminEmail || "fanzzy@vestanoretail.com").trim().toLowerCase();
 const staticAdminSessionKey = "fanzzy-github-pages-admin-authenticated";
 const hasStaticAdminSession = () =>
   typeof window !== "undefined" &&
@@ -616,10 +627,38 @@ function AdminLoginGate() {
   const staticPagesMode = isGitHubPagesHost();
   const [checked, setChecked] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
+  const [authView, setAuthView] = useState<"login" | "forgot" | "reset">(() => {
+    if (typeof window === "undefined") return "login";
+    const params = new URLSearchParams(window.location.search);
+    // Supabase sends these parameters when a recovery link is stale, already
+    // used, or was consumed by a mail scanner. Do not show a verified reset
+    // form for an invalid recovery attempt.
+    if (params.get("error") === "access_denied" || params.has("error_code")) return "forgot";
+    return params.has("admin-reset") ? "reset" : "login";
+  });
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
+  const [resetEmail, setResetEmail] = useState(adminRecoveryEmail);
+  const [resetToken, setResetToken] = useState(() =>
+    typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("admin-reset") || "" : "",
+  );
+  const [resetOtp, setResetOtp] = useState("");
+  const [resetPassword, setResetPassword] = useState("");
+  const [resetMessage, setResetMessage] = useState("");
+  const [resetCooldown, setResetCooldown] = useState(0);
+  const [error, setError] = useState(() => {
+    if (typeof window === "undefined") return "";
+    const params = new URLSearchParams(window.location.search);
+    return params.get("error") === "access_denied" || params.has("error_code")
+      ? "This reset link has expired or was already used. Request a new reset email."
+      : "";
+  });
   const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    if (resetCooldown <= 0) return;
+    const timer = window.setInterval(() => setResetCooldown((current) => Math.max(0, current - 1)), 1000);
+    return () => window.clearInterval(timer);
+  }, [resetCooldown]);
   useEffect(() => {
     if (staticPagesMode) {
       setAuthenticated(hasStaticAdminSession());
@@ -644,6 +683,16 @@ function AdminLoginGate() {
     setLoading(true);
     setError("");
     if (staticPagesMode) {
+      if (supabase) {
+        const { error: supabaseError } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+        if (!supabaseError) {
+          window.localStorage.setItem(staticAdminSessionKey, "true");
+          setAuthenticated(true);
+          setPassword("");
+          setLoading(false);
+          return;
+        }
+      }
       const isValid =
         email.trim().toLowerCase() === staticAdminEmail.trim().toLowerCase() &&
         password === staticAdminPassword &&
@@ -669,16 +718,157 @@ function AdminLoginGate() {
     finally { setLoading(false); }
   };
 
+  const openAuthView = (view: "login" | "forgot" | "reset") => {
+    setAuthView(view);
+    setError("");
+    setResetMessage("");
+  };
+
+  const requestPasswordReset = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (resetCooldown > 0) {
+      setError("Please wait before requesting another reset email. Use the latest email already in your inbox.");
+      return;
+    }
+    setLoading(true);
+    setError("");
+    setResetMessage("");
+    if (resetEmail.trim().toLowerCase() !== adminRecoveryEmail) {
+      setError(`Password reset is only available for ${adminRecoveryEmail}.`);
+      setLoading(false);
+      return;
+    }
+    try {
+      if (!supabase) {
+        setError("Supabase email recovery is not configured.");
+        return;
+      }
+      const redirectTo = `${window.location.origin}/admin?admin-reset=1`;
+      const { error: supabaseError } = await supabase.auth.resetPasswordForEmail(resetEmail.trim(), { redirectTo });
+      if (supabaseError) {
+        if (/rate limit|too many|email rate/i.test(supabaseError.message)) {
+          setError("Supabase has temporarily limited reset emails. Use the latest email already in your inbox and try again later.");
+          setResetCooldown(60);
+        } else {
+          setError(supabaseError.message || "Supabase could not send the reset email.");
+        }
+        return;
+      }
+      setResetMessage("Password reset email sent. Check fanzzy@vestanoretail.com inbox and spam folder.");
+      setResetCooldown(60);
+    } catch {
+      setError("Could not connect to Supabase email recovery.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const submitPasswordReset = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setLoading(true);
+    setError("");
+    setResetMessage("");
+    try {
+      if (supabase) {
+        let { data: sessionData } = await supabase.auth.getSession();
+        if (!sessionData.session) {
+          const recoveryCode = new URLSearchParams(window.location.search).get("code");
+          if (recoveryCode) {
+            const exchanged = await supabase.auth.exchangeCodeForSession(recoveryCode);
+            sessionData = exchanged.data.session ? { session: exchanged.data.session } : { session: null };
+          }
+        }
+        if (sessionData.session) {
+          const { error: supabaseError } = await supabase.auth.updateUser({ password: resetPassword });
+          if (supabaseError) {
+            setError(supabaseError.message || "Supabase could not update the password.");
+            return;
+          }
+          await supabase.auth.signOut();
+          setResetPassword("");
+          setPassword("");
+          setResetMessage("Password updated. You can sign in now.");
+          setAuthView("login");
+          window.history.replaceState({}, "", "/admin");
+          return;
+        }
+
+        // A Supabase recovery URL must have an active recovery session. Never
+        // fall through to the legacy local reset endpoint for a stale link.
+        setAuthView("forgot");
+        setError("This reset link has expired or was already used. Request a new reset email.");
+        return;
+      }
+      const response = await fetch("/api/admin-auth/reset", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: resetToken, otp: resetOtp, password: resetPassword }),
+      });
+      const result = await readAdminAuthResponse(response);
+      if (!response.ok) {
+        setError(result.error || "Could not reset the password.");
+        return;
+      }
+      setResetPassword("");
+      setPassword("");
+      setResetMessage(result.message || "Password updated. You can sign in now.");
+      setAuthView("login");
+      window.history.replaceState({}, "", "/admin");
+    } catch {
+      setError("Could not connect to the password reset service. Check that the local server is running.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   if (!checked) return <div className="admin-auth-loading">Loading admin workspace…</div>;
   if (authenticated) return <AdminDashboard />;
-  return <main className="admin-auth-page"><section className="admin-auth-card"><p className="eyebrow">FANZZY CONTROL ROOM</p><h1>Admin sign in</h1><p>Sign in to manage products, orders, stock, and store settings.</p><form onSubmit={signIn}><label>Email address<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" required /></label><label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required /></label>{error && <p className="admin-auth-error" role="alert">{error}</p>}<button className="module-primary" type="submit" disabled={loading}>{loading ? "Signing in…" : "Sign in"}</button></form></section></main>;
+  return <main className="admin-auth-page"><section className="admin-auth-card">
+    <p className="eyebrow">FANZZY CONTROL ROOM</p>
+    {authView === "login" && <>
+      <h1>Admin sign in</h1>
+      <p>Sign in to manage products, orders, stock, and store settings.</p>
+      <form onSubmit={signIn}>
+        <label>Email address<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" required /></label>
+        <label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required /></label>
+        <button className="admin-forgot-link" type="button" onClick={() => openAuthView("forgot")}>Forgot password?</button>
+        {error && <p className="admin-auth-error" role="alert">{error}</p>}
+        {resetMessage && <p className="admin-auth-success" role="status">{resetMessage}</p>}
+        <button className="module-primary" type="submit" disabled={loading}>{loading ? "Signing in…" : "Sign in"}</button>
+      </form>
+    </>}
+    {authView === "forgot" && <>
+      <h1>Reset password</h1>
+      <p>Enter your admin email and we’ll send a one-time password reset link.</p>
+      <form onSubmit={requestPasswordReset}>
+        <label>Admin email address<input type="email" value={resetEmail} readOnly autoComplete="email" required /></label>
+        {error && <p className="admin-auth-error" role="alert">{error}</p>}
+        {resetMessage && <p className="admin-auth-success" role="status">{resetMessage}</p>}
+        <button className="module-primary" type="submit" disabled={loading || resetCooldown > 0}>{loading ? "Sending email…" : resetCooldown > 0 ? `Try again in ${resetCooldown}s` : "Send reset email"}</button>
+        <button className="admin-auth-secondary" type="button" onClick={() => openAuthView("login")}>Back to sign in</button>
+      </form>
+    </>}
+    {authView === "reset" && <>
+      <h1>Choose a new password</h1>
+      <p>Your email link has securely verified this password reset. Choose a new password below.</p>
+      <form onSubmit={submitPasswordReset}>
+        <label>New password<input type="password" value={resetPassword} onChange={(event) => setResetPassword(event.target.value)} autoComplete="new-password" minLength={6} required /></label>
+        {error && <p className="admin-auth-error" role="alert">{error}</p>}
+        {resetMessage && <p className="admin-auth-success" role="status">{resetMessage}</p>}
+        <button className="module-primary" type="submit" disabled={loading}>{loading ? "Updating password…" : "Update password"}</button>
+        <button className="admin-auth-secondary" type="button" onClick={() => openAuthView("login")}>Back to sign in</button>
+      </form>
+    </>}
+  </section></main>;
 }
 
 function AdminDashboard() {
   const [active, setActive] = useState("Overview");
+  const [liveDate, setLiveDate] = useState(() => new Date());
   const [adminRoles, setAdminRoles] = useState<AdminRole[]>(defaultAdminRoles);
   const [activeRoleId, setActiveRoleId] = useState("vestano");
   const [reportsOpen, setReportsOpen] = useState(false);
+  const [productScannerRequest, setProductScannerRequest] = useState(0);
   const [reportView, setReportView] = useState<ReportView>("overview");
   const [query, setQuery] = useState("");
   const [toast, setToast] = useState("");
@@ -688,6 +878,10 @@ function AdminDashboard() {
   const [dashboardOrders, setDashboardOrders] = useState<OrderRecord[]>(adminOrders);
   const [productFilter, setProductFilter] = useState<ProductFilter>("all");
   const [categoryFilter, setCategoryFilter] = useState("All categories");
+  useEffect(() => {
+    const timer = window.setInterval(() => setLiveDate(new Date()), 60 * 1000);
+    return () => window.clearInterval(timer);
+  }, []);
   const categories = useMemo(
     () => [
       "All categories",
@@ -805,6 +999,17 @@ function AdminDashboard() {
     setToast(message);
     window.setTimeout(() => setToast(""), 2200);
   };
+  const logOut = async () => {
+    try {
+      if (isGitHubPagesHost()) {
+        window.localStorage.removeItem(staticAdminSessionKey);
+      } else {
+        await fetch("/api/admin-auth", { method: "DELETE", cache: "no-store" });
+      }
+    } finally {
+      window.location.assign(`${siteBasePath}/admin`);
+    }
+  };
   return (
     <main className="admin-shell">
       <aside className="admin-sidebar">
@@ -855,7 +1060,14 @@ function AdminDashboard() {
             <button
               key={item.label}
               className={active === item.label ? "active" : ""}
-              onClick={() => setActive(item.label)}
+              onClick={() => {
+                if (item.label === "Product Image Scanner") {
+                  setActive(item.label);
+                  setProductScannerRequest((current) => current + 1);
+                  return;
+                }
+                setActive(item.label);
+              }}
             >
               <span className="nav-icon">{item.icon}</span>
               {item.label}
@@ -866,6 +1078,9 @@ function AdminDashboard() {
         <div className="sidebar-bottom">
           <button onClick={() => canAccess("Settings") ? setActive("Settings") : notify(`${activeRole.title} cannot access Settings`)}>
             <span className="nav-icon">⚙</span>Settings
+          </button>
+          <button onClick={() => void logOut()}>
+            <span className="nav-icon">↪</span>Log out
           </button>
           <a href={`${siteBasePath}/`}>
             <span className="nav-icon">↩</span>View storefront
@@ -891,12 +1106,15 @@ function AdminDashboard() {
             <button onClick={() => notify("Preview opened")}>
               Preview store ↗
             </button>
+            <button className="admin-logout-button" onClick={() => void logOut()}>
+              Log out
+            </button>
             <div className="mini-avatar">VE</div>
           </div>
         </header>
         <div className="admin-page-heading">
           <div>
-            <p className="eyebrow">Saturday, 08 August 2026</p>
+            <p className="eyebrow">{liveDate.toLocaleDateString("en-IN", { weekday: "long", day: "2-digit", month: "long", year: "numeric" })}</p>
             <h1>
               Good morning, Vestano <span>✦</span>
             </h1>
@@ -906,7 +1124,7 @@ function AdminDashboard() {
           </div>
         </div>
         {active !== "Overview" && (
-          <ModuleWorkspace module={active} onNotify={notify} reportView={reportView} />
+          <ModuleWorkspace module={active} onNotify={notify} reportView={reportView} productScannerRequest={productScannerRequest} />
         )}
         <div className="stats-grid">
           <Stat
@@ -1396,11 +1614,15 @@ function ModuleWorkspace({
   module,
   onNotify,
   reportView = "overview",
+  productScannerRequest = 0,
 }: {
   module: string;
   onNotify: (message: string) => void;
   reportView?: ReportView;
+  productScannerRequest?: number;
 }) {
+  if (module === "Product Image Scanner")
+    return <ProductLibraryWorkspace onNotify={onNotify} productScannerRequest={productScannerRequest} scannerOnly />;
   if (module === "Products")
     return <ProductLibraryWorkspace onNotify={onNotify} />;
   if (module === "Reports") return <ReportsWorkspace onNotify={onNotify} view={reportView} />;
@@ -1468,6 +1690,313 @@ function ModuleWorkspace({
           </button>
         ))}
       </div>
+    </section>
+  );
+}
+
+type VisualFingerprint = {
+  color: number[];
+  luminance: number[];
+  edges: number[];
+  hash: number[];
+  aspect: number;
+};
+type ProductScannerMatch = {
+  product: AdminProduct;
+  variant?: ProductVariant;
+  confidence: number;
+};
+
+const createVisualFingerprint = (source: string) => new Promise<VisualFingerprint>((resolve, reject) => {
+  const image = new window.Image();
+  image.crossOrigin = "anonymous";
+  image.onerror = () => reject(new Error("Could not read product image"));
+  image.onload = () => {
+    const frameSize = 48;
+    const canvas = document.createElement("canvas");
+    canvas.width = frameSize;
+    canvas.height = frameSize;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) {
+      reject(new Error("Visual search is not supported in this browser"));
+      return;
+    }
+    const normalize = (values: number[]) => {
+      const total = values.reduce((sum, value) => sum + value, 0);
+      return total ? values.map((value) => value / total) : values;
+    };
+    const extractFrame = (cropRatio: number) => {
+      const imageWidth = Math.max(1, image.naturalWidth);
+      const imageHeight = Math.max(1, image.naturalHeight);
+      const cropSize = Math.min(imageWidth, imageHeight) * cropRatio;
+      const sourceX = (imageWidth - cropSize) / 2;
+      const sourceY = (imageHeight - cropSize) / 2;
+      context.fillStyle = "#f7f2ed";
+      context.fillRect(0, 0, frameSize, frameSize);
+      context.drawImage(image, sourceX, sourceY, cropSize, cropSize, 0, 0, frameSize, frameSize);
+      const pixels = context.getImageData(0, 0, frameSize, frameSize).data;
+      const color = new Array(20).fill(0);
+      const luminanceHistogram = new Array(16).fill(0);
+      const grayscale = new Array(frameSize * frameSize).fill(0);
+      for (let pixel = 0; pixel < pixels.length; pixel += 4) {
+        const red = pixels[pixel] / 255;
+        const green = pixels[pixel + 1] / 255;
+        const blue = pixels[pixel + 2] / 255;
+        const maximum = Math.max(red, green, blue);
+        const minimum = Math.min(red, green, blue);
+        const saturation = maximum === 0 ? 0 : (maximum - minimum) / maximum;
+        const luminance = red * 0.299 + green * 0.587 + blue * 0.114;
+        let hue = 0;
+        if (maximum !== minimum) {
+          const delta = maximum - minimum;
+          if (maximum === red) hue = ((green - blue) / delta + (green < blue ? 6 : 0)) / 6;
+          else if (maximum === green) hue = ((blue - red) / delta + 2) / 6;
+          else hue = ((red - green) / delta + 4) / 6;
+        }
+        const hueBin = Math.min(11, Math.floor(hue * 12));
+        color[hueBin] += saturation;
+        color[12 + Math.min(3, Math.floor(saturation * 4))] += 1;
+        color[16 + Math.min(3, Math.floor(maximum * 4))] += 1;
+        luminanceHistogram[Math.min(15, Math.floor(luminance * 16))] += 1;
+        grayscale[pixel / 4] = luminance;
+      }
+      const edges = new Array(8).fill(0);
+      for (let row = 0; row < frameSize - 1; row += 1) {
+        for (let column = 0; column < frameSize - 1; column += 1) {
+          const index = row * frameSize + column;
+          const horizontal = grayscale[index + 1] - grayscale[index];
+          const vertical = grayscale[index + frameSize] - grayscale[index];
+          const magnitude = Math.sqrt(horizontal ** 2 + vertical ** 2);
+          if (magnitude < 0.025) continue;
+          let angle = Math.atan2(vertical, horizontal);
+          if (angle < 0) angle += Math.PI;
+          edges[Math.min(7, Math.floor((angle / Math.PI) * 8))] += magnitude;
+        }
+      }
+      const hashSamples: number[] = [];
+      for (let row = 0; row < 8; row += 1) {
+        for (let column = 0; column < 8; column += 1) {
+          let total = 0;
+          for (let y = 0; y < 6; y += 1) {
+            for (let x = 0; x < 6; x += 1) total += grayscale[(row * 6 + y) * frameSize + column * 6 + x];
+          }
+          hashSamples.push(total / 36);
+        }
+      }
+      const hashAverage = hashSamples.reduce((sum, value) => sum + value, 0) / hashSamples.length;
+      return {
+        color: normalize(color),
+        luminance: normalize(luminanceHistogram),
+        edges: normalize(edges),
+        hash: hashSamples.map((value) => value >= hashAverage ? 1 : 0),
+      };
+    };
+    const frames = [extractFrame(1), extractFrame(0.72)];
+    const average = (key: "color" | "luminance" | "edges") => normalize(frames.reduce((combined, frame) => combined.map((value, index) => value + frame[key][index]), new Array(frames[0][key].length).fill(0)));
+    resolve({
+      color: average("color"),
+      luminance: average("luminance"),
+      edges: average("edges"),
+      hash: frames.flatMap((frame) => frame.hash),
+      aspect: image.naturalWidth / Math.max(1, image.naturalHeight),
+    });
+  };
+  image.src = source;
+});
+
+const compareVisualFingerprints = (left: VisualFingerprint, right: VisualFingerprint) => {
+  const histogramSimilarity = (first: number[], second: number[]) => {
+    const length = Math.min(first.length, second.length);
+    if (!length) return 0;
+    const distance = first.slice(0, length).reduce((sum, value, index) => sum + Math.abs(value - second[index]), 0);
+    return Math.max(0, 1 - distance / 2);
+  };
+  const hashSimilarity = (first: number[], second: number[]) => {
+    const length = Math.min(first.length, second.length);
+    if (!length) return 0;
+    const differences = first.slice(0, length).reduce((sum, value, index) => sum + (value === second[index] ? 0 : 1), 0);
+    return 1 - differences / length;
+  };
+  const colorSimilarity = histogramSimilarity(left.color, right.color);
+  const luminanceSimilarity = histogramSimilarity(left.luminance, right.luminance);
+  const edgeSimilarity = histogramSimilarity(left.edges, right.edges);
+  const hashScore = hashSimilarity(left.hash, right.hash);
+  const aspectSimilarity = Math.max(0, 1 - Math.min(1, Math.abs(Math.log(Math.max(0.1, left.aspect) / Math.max(0.1, right.aspect)))));
+  return Math.max(0, Math.min(100, Math.round((colorSimilarity * 0.24 + luminanceSimilarity * 0.12 + edgeSimilarity * 0.38 + hashScore * 0.21 + aspectSimilarity * 0.05) * 100)));
+};
+
+const readScannerPreview = async (file: File) => {
+  try {
+    return await makeLocalImage(file);
+  } catch {
+    return await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error ?? new Error("Could not read image"));
+      reader.readAsDataURL(file);
+    });
+  }
+};
+
+function ProductImageScanner({
+  products,
+  promotionOffers,
+  onClose,
+  onView,
+  onEdit,
+  onUpdateStock,
+  onAddNew,
+}: {
+  products: AdminProduct[];
+  promotionOffers: PromotionOffer[];
+  onClose: () => void;
+  onView: (product: AdminProduct) => void;
+  onEdit: (product: AdminProduct) => void;
+  onUpdateStock: (product: AdminProduct) => void;
+  onAddNew: (file: File, preview: string) => void;
+}) {
+  const [preview, setPreview] = useState("");
+  const [sourceFile, setSourceFile] = useState<File | null>(null);
+  const [matches, setMatches] = useState<ProductScannerMatch[]>([]);
+  const [status, setStatus] = useState<"idle" | "scanning" | "complete" | "error">("idle");
+  const [error, setError] = useState("");
+  const [cameraActive, setCameraActive] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+
+  const scanFile = async (file: File) => {
+    setSourceFile(file);
+    setMatches([]);
+    setError("");
+    setStatus("scanning");
+    try {
+      const imagePreview = await readScannerPreview(file);
+      setPreview(imagePreview);
+      if (!products.length) {
+        setStatus("complete");
+        setError("No catalog products are available to compare yet.");
+        return;
+      }
+      const queryFingerprint = await createVisualFingerprint(imagePreview);
+      const candidates = products.flatMap((product) => [
+        product.image ? { product, variant: undefined, source: product.image } : null,
+        ...(product.variants || []).filter((variant) => variant.image).map((variant) => ({ product, variant, source: variant.image })),
+      ].filter((candidate): candidate is { product: AdminProduct; variant: ProductVariant | undefined; source: string } => Boolean(candidate)));
+      const scored = await Promise.all(candidates.map(async (candidate) => {
+        try {
+          const fingerprint = await createVisualFingerprint(candidate.source);
+          return { ...candidate, confidence: compareVisualFingerprints(queryFingerprint, fingerprint) };
+        } catch {
+          return null;
+        }
+      }));
+      const bestByProduct = new Map<string, ProductScannerMatch>();
+      scored.filter((candidate): candidate is { product: AdminProduct; variant: ProductVariant | undefined; source: string; confidence: number } => Boolean(candidate)).forEach((candidate) => {
+        const current = bestByProduct.get(candidate.product.sku);
+        if (!current || candidate.confidence > current.confidence) bestByProduct.set(candidate.product.sku, { product: candidate.product, variant: candidate.variant, confidence: candidate.confidence });
+      });
+      const rankedMatches = Array.from(bestByProduct.values()).sort((left, right) => right.confidence - left.confidence);
+      const bestConfidence = rankedMatches[0]?.confidence || 0;
+      setMatches(rankedMatches.filter((match) => match.confidence >= 68 && match.confidence >= bestConfidence - 14).slice(0, 4));
+      setStatus("complete");
+    } catch (scanError) {
+      setError(scanError instanceof Error ? scanError.message : "Could not scan this image");
+      setStatus("error");
+    }
+  };
+  useEffect(() => () => {
+    cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
+    cameraStreamRef.current = null;
+  }, []);
+  const stopCamera = () => {
+    cameraStreamRef.current?.getTracks().forEach((track) => track.stop());
+    cameraStreamRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
+    setCameraActive(false);
+  };
+  const startCamera = async () => {
+    setError("");
+    setStatus("idle");
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError("Live camera is not supported in this browser. Please use a current mobile or desktop browser.");
+      setStatus("error");
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { ideal: "environment" },
+          height: { ideal: 720 },
+          width: { ideal: 1280 },
+        },
+      });
+      cameraStreamRef.current = stream;
+      setCameraActive(true);
+      window.requestAnimationFrame(() => {
+        if (!videoRef.current) return;
+        videoRef.current.srcObject = stream;
+        void videoRef.current.play();
+      });
+    } catch {
+      setError("Camera access was blocked. Allow camera permission and try again.");
+      setStatus("error");
+    }
+  };
+  const capturePhoto = () => {
+    const video = videoRef.current;
+    if (!video || video.readyState < 2 || !video.videoWidth) {
+      setError("Camera is still starting. Please wait a moment and try again.");
+      return;
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      setError("Could not capture the camera image. Please try again.");
+      return;
+    }
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        setError("Could not capture the camera image. Please try again.");
+        return;
+      }
+      const file = new File([blob], `fanzzy-scan-${Date.now()}.jpg`, { type: "image/jpeg" });
+      stopCamera();
+      void scanFile(file);
+    }, "image/jpeg", 0.92);
+  };
+  const statusLabel = (product: AdminProduct) => product.status === "Published" ? "Active" : "Inactive";
+  const matchStock = (match: ProductScannerMatch) => match.variant?.stock === undefined ? `${match.product.stock} units` : `${match.variant.stock} units`;
+  const matchVariant = (match: ProductScannerMatch) => match.variant ? [match.variant.name, match.variant.size ? `Size ${match.variant.size}` : ""].filter(Boolean).join(" · ") : "Main product image";
+  const mrp = (product: AdminProduct) => product.compareAt && product.compareAt > parseMoney(product.price) ? formatAdminCurrency(product.compareAt) : product.price;
+  const offerPrice = (product: AdminProduct) => {
+    const productKeys = new Set([product.sku.toLowerCase(), product.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")]);
+    const offer = promotionOffers.find((candidate) => isPromotionLive(candidate) && (!candidate.eligiblePaid.length || candidate.eligiblePaid.some((selection) => productKeys.has(String(selection.productId || "").toLowerCase()))));
+    if (!offer) return "—";
+    return offer.type === "bundle" ? formatAdminCurrency(offer.fixedBundlePrice) : product.price;
+  };
+
+  return (
+    <section className="product-image-scanner" aria-labelledby="product-image-scanner-title">
+      <div className="scanner-heading">
+        <div>
+          <p className="eyebrow">AI VISUAL SEARCH</p>
+          <h3 id="product-image-scanner-title">Product Image Scanner</h3>
+          <p>Compare shape, colour, pattern, and visual appearance against the existing Fanzzy catalog. Barcode and QR data are not used.</p>
+        </div>
+        <button className="product-modal-close scanner-close" onClick={onClose} aria-label="Close product image scanner">×</button>
+      </div>
+      <div className="scanner-stepper"><span className="active">01 Scan image</span><i>→</i><span className={status !== "idle" ? "active" : ""}>02 AI search</span><i>→</i><span className={matches.length ? "active" : ""}>03 Match details</span></div>
+      {!preview && !cameraActive && <div className="scanner-dropzone"><span>✦</span><strong>Open live camera to scan a product</strong><small>Use the rear camera and keep the jewellery centered in frame.</small><div className="scanner-actions"><button className="module-primary" onClick={() => void startCamera()}>Open live camera</button></div></div>}
+      {cameraActive && <div className="scanner-camera"><video ref={videoRef} autoPlay muted playsInline aria-label="Live product camera preview" /><p className="scanner-camera-hint">Center the product in the frame, then capture the photo.</p><div className="scanner-camera-actions"><button className="module-primary" onClick={capturePhoto}>Capture photo &amp; search</button><button className="module-secondary" onClick={stopCamera}>Cancel camera</button></div></div>}
+      {preview && <div className="scanner-query"><img src={preview} alt="Scanned product" /><div><p className="eyebrow">SCANNED IMAGE</p><strong>{status === "scanning" ? "Searching the product catalog…" : status === "error" ? "Scan could not be completed" : "Image ready"}</strong><small>{status === "scanning" ? `Comparing against ${products.length} product${products.length === 1 ? "" : "s"} images` : sourceFile?.name}</small><button className="module-secondary" onClick={() => { setPreview(""); setSourceFile(null); setMatches([]); setStatus("idle"); setError(""); }}>Scan another image</button></div></div>}
+      {status === "scanning" && <div className="scanner-progress"><span className="status-light" /> AI visual search is comparing catalog images…</div>}
+      {error && <p className="scanner-error">{error}</p>}
+      {status === "complete" && matches.length > 0 && <div className="scanner-results"><div className="scanner-results-heading"><div><p className="eyebrow">MATCHING PRODUCTS</p><h4>{matches[0].confidence >= 82 ? `${matches[0].confidence}% Match — Same Product Found` : "Visually Similar Products Found"}</h4></div><span>{matches.length} result{matches.length === 1 ? "" : "s"}</span></div><div className="scanner-match-list">{matches.map((match) => <article className="scanner-match-card" key={match.product.sku}><div className="scanner-match-image"><img src={match.variant?.image || match.product.image} alt={match.product.name} /><strong>{match.confidence}%</strong></div><div className="scanner-match-copy"><div className="scanner-match-title"><div><h5>{match.product.name}</h5><small>{match.product.sku} · {match.product.category}</small></div><span className={statusLabel(match.product) === "Active" ? "scanner-status active" : "scanner-status inactive"}>{statusLabel(match.product)}</span></div><p className="scanner-variant">Variant: <strong>{matchVariant(match)}</strong></p><div className="scanner-detail-grid"><span><small>Cost price / unit rate</small><strong>{match.product.cost}</strong></span><span><small>Selling price</small><strong>{match.product.price}</strong></span><span><small>MRP</small><strong>{mrp(match.product)}</strong></span><span><small>Offer price</small><strong>{offerPrice(match.product)}</strong></span><span><small>Available stock</small><strong>{matchStock(match)}</strong></span><span><small>Product ID / SKU</small><strong>{match.product.sku}</strong></span></div><div className="scanner-match-actions"><button className="module-secondary" onClick={() => onView(match.product)}>View Product</button><button className="module-secondary" onClick={() => onEdit(match.product)}>Edit Product</button><button className="module-primary" onClick={() => onUpdateStock(match.product)}>Update Stock</button></div></div></article>)}</div></div>}
+      {status === "complete" && matches.length === 0 && <div className="scanner-no-match"><span>❌</span><h4>No Matching Product Found in Fanzzy</h4><p>The image did not reach the visual-match threshold against the current catalog.</p>{sourceFile && <button className="module-primary" onClick={() => onAddNew(sourceFile, preview)}>+ Add as New Product</button>}</div>}
     </section>
   );
 }
@@ -3280,12 +3809,18 @@ function OrdersWorkspace({
   const [fromDate, setFromDate] = useState(() => `${new Date().toISOString().slice(0, 8)}01`);
   const [toDate, setToDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [selectedOrder, setSelectedOrder] = useState<OrderRecord | null>(null);
+  const [enlargedOrderImage, setEnlargedOrderImage] = useState<{ src: string; alt: string } | null>(null);
   const [phone, setPhone] = useState("");
+  const [lastOrdersSync, setLastOrdersSync] = useState<Date | null>(null);
   const [catalogProducts, setCatalogProducts] = useState<Array<{ id: string; name: string; sku: string; category: string; stock: number; price: number; status: string; image: string; variants: ProductVariant[] }>>([]);
   const [orderItemDraft, setOrderItemDraft] = useState({ productId: "", variantName: "", quantity: "1", price: "" });
 
   useEffect(() => {
+    let syncInFlight = false;
     const syncOrders = async (recoverCapturedPayments = false) => {
+      if (syncInFlight) return;
+      syncInFlight = true;
+      try {
       // Recover captured payments even when the customer's browser callback was interrupted.
       if (recoverCapturedPayments) {
         await fetch("/api/razorpay/sync-payments", { method: "POST" }).catch(() => undefined);
@@ -3326,14 +3861,20 @@ function OrdersWorkspace({
           variants: Array.isArray(variantsMap[product.sku]) ? variantsMap[product.sku].map((variant, index) => ({ ...variant, name: variant.name || `Option ${index + 1}` })) : [],
         })));
       }
+      setLastOrdersSync(new Date());
+      } finally {
+        syncInFlight = false;
+      }
     };
     const syncLiveOrders = () => { void syncOrders(false); };
     void syncOrders(true);
     const liveOrderTimer = window.setInterval(syncLiveOrders, 5000);
+    const unsubscribeFromLiveOrders = subscribeToStoreSetting("orders", syncLiveOrders);
     window.addEventListener("storage", syncLiveOrders);
     window.addEventListener("fanzzy-orders-updated", syncLiveOrders);
     return () => {
       window.clearInterval(liveOrderTimer);
+      unsubscribeFromLiveOrders();
       window.removeEventListener("storage", syncLiveOrders);
       window.removeEventListener("fanzzy-orders-updated", syncLiveOrders);
     };
@@ -3557,6 +4098,10 @@ function OrdersWorkspace({
           <i className="status-light" />
           {filteredOrders.length} orders found
         </span>
+        <span className="orders-live-status">
+          <i className="status-light" />
+          Live sync{lastOrdersSync ? ` · ${lastOrdersSync.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}` : " · connecting…"}
+        </span>
         <span>
           {filter === "custom"
             ? `${fromDate || "Any date"} → ${toDate || "Any date"}`
@@ -3574,7 +4119,7 @@ function OrdersWorkspace({
               <small>{formatOrderDate(order.date)}</small>
               <small className="order-list-products">Customer ID: {order.userId || "Legacy / guest"} · {order.customerName}</small>
               <small className="order-list-products">{order.items?.map((item) => item.name).join(", ") || "No saved item details"}</small>
-              <small className="order-list-products">Payment: {order.paymentStatus === "paid" ? "Paid" : "Awaiting Razorpay confirmation"} · Inventory: {order.inventoryAdjusted === false ? "Pending" : "Updated"}</small>
+              <small className="order-list-products">Payment: {order.paymentStatus === "paid" ? "Paid" : "Awaiting Razorpay confirmation"} · Inventory: {order.inventoryAdjusted === true ? "Updated" : "Pending"}</small>
             </span>
             <i className={`status-pill ${order.status.toLowerCase()}`}>
               {order.status}
@@ -3615,7 +4160,7 @@ function OrdersWorkspace({
               </p>
               <p className="product-detail-meta">Payment: {selectedOrder.paymentStatus === "paid" ? "Paid" : "Awaiting Razorpay confirmation"}{selectedOrder.razorpayPaymentId ? ` · Razorpay payment ${selectedOrder.razorpayPaymentId}` : selectedOrder.razorpayOrderId ? ` · Razorpay order ${selectedOrder.razorpayOrderId}` : ""}</p>
               <section className="admin-customer-details"><p className="eyebrow">CUSTOMER &amp; ORDER IDS</p><dl><div><dt>Order ID</dt><dd>{selectedOrder.id}</dd></div><div className="admin-customer-account"><dt>Customer Account ID</dt><dd>{selectedOrder.userId || "Legacy / guest order"}</dd></div><div><dt>Name</dt><dd>{selectedOrder.customerName || "Not provided"}</dd></div><div><dt>Login mobile</dt><dd>{selectedOrder.userPhone || selectedOrder.phone || "Not provided"}</dd></div><div><dt>Email</dt><dd>{selectedOrder.email || selectedOrder.userEmail || "Not provided"}</dd></div><div><dt>WhatsApp</dt><dd>{selectedOrder.phone || "Not provided"}</dd></div><div><dt>Fulfilment</dt><dd>{selectedOrder.fulfillmentMethod === "pickup" ? `Pickup from ${selectedOrder.pickupHubName || "hub"}` : "Delivery"}</dd></div><div className="admin-customer-address"><dt>{selectedOrder.fulfillmentMethod === "pickup" ? "Pickup hub / place" : "Delivery address"}</dt><dd>{selectedOrder.fulfillmentMethod === "pickup" ? `${selectedOrder.pickupHubName || "Hub"} · ${selectedOrder.pickupHubPlace || selectedOrder.address || "Place not saved"}` : selectedOrder.address || "Not provided"}</dd></div></dl>{selectedOrder.razorpayPaymentId && <button className="module-secondary admin-restore-payment-details" type="button" onClick={() => void restoreOrderDetailsFromRazorpay()}>Restore delivery details from Razorpay</button>}</section>
-              {selectedOrder.items?.length ? <section className="admin-order-items"><p className="eyebrow">ITEMS IN THIS ORDER</p><div>{selectedOrder.items.map((item) => { const product = getOrderedProduct(item); const size = item.size || item.name.match(/(?:^| · )Size (.+)$/i)?.[1] || ""; const variant = item.variantName || (item.name.includes(" · ") ? item.name.split(" · ").slice(1).filter((part) => !/^Size /i.test(part)).join(" · ") : ""); const selectedVariant = size ? product?.variants.find((candidate) => String(candidate.size || candidate.name).trim().replace(/^size\s+/i, "").toLowerCase() === size.trim().replace(/^size\s+/i, "").toLowerCase()) : variant ? product?.variants.find((candidate) => candidate.name.trim().toLowerCase() === variant.trim().toLowerCase()) : undefined; const selectionStock = selectedVariant?.stock ?? product?.stock; const displayImage = item.variantImage || selectedVariant?.image || item.image || product?.image; return <article key={`${selectedOrder.id}-${item.name}`}><>{displayImage ? <img src={displayImage} alt={variant ? `${item.name} variant` : ""} /> : <span className="admin-order-item-placeholder" aria-hidden="true">✦</span>}</><span><strong>{item.name}</strong>{product ? <><small>{product.category} · SKU {product.sku}</small><small>Current {size ? `size ${size}` : variant ? "variant" : "product"} stock: {selectionStock} · {product.status}</small></> : <small>Product no longer in the catalog</small>}{variant && <small>Selected variant: {variant}{displayImage ? " · Variant image shown" : ""}</small>}{size && <small>Selected size: {size}</small>}<em>Quantity ordered: {item.quantity}</em></span><b>{item.price}</b></article>; })}</div></section> : <section className="admin-order-items admin-order-item-repair"><p className="eyebrow">ADD MISSING ORDER DETAILS</p><p>This older paid order has no saved product information. Select the product and variant to restore its order record.</p><div className="admin-order-item-repair-fields"><label>Product<select value={orderItemDraft.productId} onChange={(event) => { const product = catalogProducts.find((candidate) => candidate.id === event.target.value); setOrderItemDraft({ productId: event.target.value, variantName: "", quantity: "1", price: product ? `₹${product.price.toLocaleString("en-IN")}` : "" }); }}><option value="">Select product</option>{catalogProducts.map((product) => <option key={product.id} value={product.id}>{product.name} · {product.sku}</option>)}</select></label>{draftProduct?.variants.length ? <label>Variant<select value={orderItemDraft.variantName} onChange={(event) => setOrderItemDraft((current) => ({ ...current, variantName: event.target.value }))}><option value="">Select variant</option>{draftProduct.variants.map((variant, index) => <option key={`${variant.name}-${index}`} value={variant.name}>{variant.name || `Option ${index + 1}`}</option>)}</select></label> : null}<label>Quantity<input type="number" min="1" value={orderItemDraft.quantity} onChange={(event) => setOrderItemDraft((current) => ({ ...current, quantity: event.target.value }))} /></label><label>Price<input value={orderItemDraft.price} onChange={(event) => setOrderItemDraft((current) => ({ ...current, price: event.target.value }))} placeholder="₹0" /></label></div>{draftProduct && <div className="admin-order-item-repair-preview">{orderItemDraft.variantName && draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image ? <img src={draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image} alt="Selected variant preview" /> : draftProduct.image ? <img src={draftProduct.image} alt="Selected product preview" /> : null}<span>{orderItemDraft.variantName ? `Selected variant: ${orderItemDraft.variantName}` : "Select a variant if applicable"}</span></div>}<button className="module-primary" type="button" onClick={addMissingOrderItem}>Add to this order</button></section>}
+              {selectedOrder.items?.length ? <section className="admin-order-items"><p className="eyebrow">ITEMS IN THIS ORDER</p><div>{selectedOrder.items.map((item) => { const product = getOrderedProduct(item); const size = item.size || item.name.match(/(?:^| · )Size (.+)$/i)?.[1] || ""; const variant = item.variantName || (item.name.includes(" · ") ? item.name.split(" · ").slice(1).filter((part) => !/^Size /i.test(part)).join(" · ") : ""); const selectedVariant = size ? product?.variants.find((candidate) => String(candidate.size || candidate.name).trim().replace(/^size\s+/i, "").toLowerCase() === size.trim().replace(/^size\s+/i, "").toLowerCase()) : variant ? product?.variants.find((candidate) => candidate.name.trim().toLowerCase() === variant.trim().toLowerCase()) : undefined; const selectionStock = selectedVariant?.stock ?? product?.stock; const displayImage = item.variantImage || selectedVariant?.image || item.image || product?.image; const imageAlt = variant ? `${item.name} variant` : item.name; return <article key={`${selectedOrder.id}-${item.name}`}><>{displayImage ? <button className="admin-order-image-button" type="button" onClick={() => setEnlargedOrderImage({ src: displayImage, alt: imageAlt })} aria-label={`Enlarge ${imageAlt}`}><img src={displayImage} alt={imageAlt} /></button> : <span className="admin-order-item-placeholder" aria-hidden="true">✦</span>}</><span><strong>{item.name}</strong>{product ? <><small>{product.category} · SKU {product.sku}</small><small>Current {size ? `size ${size}` : variant ? "variant" : "product"} stock: {selectionStock} · {product.status}</small></> : <small>Product no longer in the catalog</small>}{variant && <small>Selected variant: {variant}{displayImage ? " · Variant image shown" : ""}</small>}{size && <small>Selected size: {size}</small>}<em>Quantity ordered: {item.quantity}</em></span><b>{item.price}</b></article>; })}</div></section> : <section className="admin-order-items admin-order-item-repair"><p className="eyebrow">ADD MISSING ORDER DETAILS</p><p>This older paid order has no saved product information. Select the product and variant to restore its order record.</p><div className="admin-order-item-repair-fields"><label>Product<select value={orderItemDraft.productId} onChange={(event) => { const product = catalogProducts.find((candidate) => candidate.id === event.target.value); setOrderItemDraft({ productId: event.target.value, variantName: "", quantity: "1", price: product ? `₹${product.price.toLocaleString("en-IN")}` : "" }); }}><option value="">Select product</option>{catalogProducts.map((product) => <option key={product.id} value={product.id}>{product.name} · {product.sku}</option>)}</select></label>{draftProduct?.variants.length ? <label>Variant<select value={orderItemDraft.variantName} onChange={(event) => setOrderItemDraft((current) => ({ ...current, variantName: event.target.value }))}><option value="">Select variant</option>{draftProduct.variants.map((variant, index) => <option key={`${variant.name}-${index}`} value={variant.name}>{variant.name || `Option ${index + 1}`}</option>)}</select></label> : null}<label>Quantity<input type="number" min="1" value={orderItemDraft.quantity} onChange={(event) => setOrderItemDraft((current) => ({ ...current, quantity: event.target.value }))} /></label><label>Price<input value={orderItemDraft.price} onChange={(event) => setOrderItemDraft((current) => ({ ...current, price: event.target.value }))} placeholder="₹0" /></label></div>{draftProduct && <div className="admin-order-item-repair-preview">{orderItemDraft.variantName && draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image ? <img src={draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image} alt="Selected variant preview" /> : draftProduct.image ? <img src={draftProduct.image} alt="Selected product preview" /> : null}<span>{orderItemDraft.variantName ? `Selected variant: ${orderItemDraft.variantName}` : "Select a variant if applicable"}</span></div>}<button className="module-primary" type="button" onClick={addMissingOrderItem}>Add to this order</button></section>}
               <div className="order-status-editor">
                 <label>
                   Status
@@ -3667,6 +4212,7 @@ function OrdersWorkspace({
           </div>
         </div>
       )}
+      {enlargedOrderImage && <div className="product-modal-backdrop admin-order-image-lightbox" onClick={() => setEnlargedOrderImage(null)}><div className="admin-order-image-lightbox-card" onClick={(event) => event.stopPropagation()}><button className="product-modal-close" type="button" aria-label="Close enlarged product image" onClick={() => setEnlargedOrderImage(null)}>×</button><img src={enlargedOrderImage.src} alt={enlargedOrderImage.alt} /></div></div>}
     </section>
   );
 }
@@ -4571,10 +5117,15 @@ function CategoryWorkspace({
 
 function ProductLibraryWorkspace({
   onNotify,
+  productScannerRequest = 0,
+  scannerOnly = false,
 }: {
   onNotify: (message: string) => void;
+  productScannerRequest?: number;
+  scannerOnly?: boolean;
 }) {
   const [products, setProducts] = useState(adminProducts);
+  const [promotionOffers, setPromotionOffers] = useState<PromotionOffer[]>([]);
   const [selectedProduct, setSelectedProduct] = useState<AdminProduct | null>(
     null,
   );
@@ -4583,6 +5134,7 @@ function ProductLibraryWorkspace({
   const [productSearch, setProductSearch] = useState("");
   const [productCategoryFilter, setProductCategoryFilter] = useState("all");
   const [productVariantFilter, setProductVariantFilter] = useState("all");
+  const [scannerOpen, setScannerOpen] = useState(false);
   const [editValues, setEditValues] = useState({
     name: "",
     category: "",
@@ -4651,6 +5203,9 @@ function ProductLibraryWorkspace({
     variantType: "normal" as ProductVariantType,
   });
   useEffect(() => {
+    if (productScannerRequest > 0) setScannerOpen(true);
+  }, [productScannerRequest]);
+  useEffect(() => {
     let active = true;
     const loadProducts = async () => {
       const remote = await fetchCatalogProducts();
@@ -4663,6 +5218,16 @@ function ProductLibraryWorkspace({
       const sizesRemote = await fetchStoreSetting("productSizes");
       const sizeStockRemote = await fetchStoreSetting("productSizeStock");
       const imageAdjustmentsRemote = await fetchStoreSetting("productImageAdjustments");
+      const promotionalOffersRemote = await fetchStoreSetting("promotionalOffers");
+      const storedPromotionalOffers = promotionalOffersRemote.value || window.localStorage.getItem(promotionStorageKey);
+      if (storedPromotionalOffers) {
+        try {
+          const parsed = JSON.parse(storedPromotionalOffers) as unknown[];
+          if (Array.isArray(parsed)) setPromotionOffers(parsed.flatMap((value) => { const offer = normalizePromotionOffer(value); return offer ? [offer] : []; }));
+        } catch {
+          setPromotionOffers([]);
+        }
+      }
       let barcodeMap: Record<string, string> = {};
       let hsnCodeMap: Record<string, string> = {};
       let billNameMap: Record<string, string> = {};
@@ -4795,11 +5360,20 @@ function ProductLibraryWorkspace({
         const mapped: AdminProduct[] = remote.data.filter((product) => !isDemoProduct(product)).map((product) => {
           const savedAdjustments = imageAdjustmentsMap[product.sku];
           const variants = variantsMap[product.sku]?.length ? variantsMap[product.sku] : localVariantsMap[product.sku] || [];
-          const sizes = sizesMap[product.sku]?.length ? sizesMap[product.sku] : localSizesMap[product.sku] || [];
+          const sizes = sizesMap[product.sku]?.length
+            ? sizesMap[product.sku]
+            : localSizesMap[product.sku]?.length
+              ? localSizesMap[product.sku]
+              : Array.from(new Set(variants.map((variant) => variant.size).filter((size): size is string => Boolean(size))));
+          const savedSizeStock = sizeStockMap[product.sku] || {};
+          const sizeStock = Object.keys(savedSizeStock).length
+            ? savedSizeStock
+            : Object.fromEntries(variants.filter((variant) => variant.size && variant.stock !== undefined).map((variant) => [variant.size!, variant.stock!]));
           return {
           name: product.name,
           price: `₹${product.price.toLocaleString("en-IN")}`,
-          cost: `₹${(product.cost ?? 0).toLocaleString("en-IN")}`,
+           cost: `₹${(product.cost ?? 0).toLocaleString("en-IN")}`,
+           compareAt: product.compareAt,
           sku: product.sku,
           category: product.category,
           stock: product.stock,
@@ -4814,7 +5388,7 @@ function ProductLibraryWorkspace({
           markup: pricingMap[product.sku]?.markup || 0,
           costWithGst: calculatePricing(`₹${(product.cost ?? 0).toLocaleString("en-IN")}`, String(pricingMap[product.sku]?.gstRate || 0), String(pricingMap[product.sku]?.markup || 0)).costWithGst,
            sizes,
-           sizeStock: sizeStockMap[product.sku] || {},
+           sizeStock,
            variantType: variantTypeMap[product.sku] || (sizes.length ? "size" : "normal"),
            variants: variants.map((variant, index) => ({
             ...variant,
@@ -4855,6 +5429,9 @@ function ProductLibraryWorkspace({
                   product.sku ||
                   product.id?.toUpperCase() ||
                   `FZ-IMP-${String(index + 1).padStart(2, "0")}`;
+                const localVariants = product.variants?.length ? product.variants : variantsMap[sku]?.length ? variantsMap[sku] : localVariantsMap[sku] || [];
+                const localSizes = product.sizes?.length ? product.sizes : sizesMap[sku]?.length ? sizesMap[sku] : localSizesMap[sku] || Array.from(new Set(localVariants.map((variant) => variant.size).filter((size): size is string => Boolean(size))));
+                const localSizeStock = product.sizeStock || sizeStockMap[sku] || Object.fromEntries(localVariants.filter((variant) => variant.size && variant.stock !== undefined).map((variant) => [variant.size!, variant.stock!]));
                 return {
                   name: product.name!.trim(),
                   price:
@@ -4865,6 +5442,7 @@ function ProductLibraryWorkspace({
                     typeof rawCost === "number"
                       ? `₹${rawCost.toLocaleString("en-IN")}`
                       : rawCost || "₹0",
+                  compareAt: typeof product.compareAt === "number" ? product.compareAt : undefined,
                   sku,
                   category: product.category || "Uncategorised",
                   stock: product.stock ?? 0,
@@ -4880,10 +5458,10 @@ function ProductLibraryWorkspace({
                   gstRate: product.gstRate ?? pricingMap[sku]?.gstRate ?? 0,
                   markup: product.markup ?? pricingMap[sku]?.markup ?? 0,
                   costWithGst: product.costWithGst || calculatePricing(String(rawCost ?? "₹0"), String(product.gstRate ?? pricingMap[sku]?.gstRate ?? 0), String(product.markup ?? pricingMap[sku]?.markup ?? 0)).costWithGst,
-           sizes: product.sizes?.length ? product.sizes : sizesMap[sku]?.length ? sizesMap[sku] : localSizesMap[sku] || [],
-           sizeStock: product.sizeStock || sizeStockMap[sku] || {},
-           variantType: product.variantType || variantTypeMap[sku] || (product.sizes?.length || sizesMap[sku]?.length ? "size" : "normal"),
-           variants: product.variants?.length ? product.variants : variantsMap[sku]?.length ? variantsMap[sku] : localVariantsMap[sku] || [],
+           sizes: localSizes,
+           sizeStock: localSizeStock,
+           variantType: product.variantType || variantTypeMap[sku] || (localSizes.length ? "size" : "normal"),
+           variants: localVariants,
                 };
               }),
           );
@@ -4945,7 +5523,7 @@ function ProductLibraryWorkspace({
     const sizeStock = Object.fromEntries(sizes.map((size) => [size, current.sizeStock[size] ?? ""]));
     return { ...current, sizes: value, sizeStock };
   });
-  const openAddProduct = () => {
+  const openAddProduct = (scannedFile?: File, scannedPreview?: string) => {
     setNewProduct({
       name: "",
       category: "Earrings",
@@ -4964,8 +5542,8 @@ function ProductLibraryWorkspace({
       variants: [],
       variantType: "normal",
     });
-    setNewProductImage(adminPlaceholderImage);
-    setNewProductFile(null);
+    setNewProductImage(scannedPreview || adminPlaceholderImage);
+    setNewProductFile(scannedFile || null);
     setNewProductHoverImage(adminPlaceholderImage);
     setNewProductHoverFile(null);
     setNewImageAdjustments(defaultImageAdjustments);
@@ -5045,20 +5623,22 @@ function ProductLibraryWorkspace({
       hoverImageAdjustments: newHoverAdjustmentsEnabled ? newHoverAdjustments : defaultImageAdjustments,
     };
     const remoteError = await saveCatalogProduct(toCatalogProduct(product));
-    setProducts((current) => {
-      const next = [...current, product];
-      persistCatalog(next);
-      void saveProductBarcodes(next);
-      void saveProductHsnCodes(next);
-      void saveProductBillNames(next);
-      void saveProductPricing(next);
-      void saveProductSizes(next);
-      void saveProductSizeStock(next);
-      void saveProductVariants(next);
-      void saveProductVariantTypes(next);
-      void saveProductImageAdjustments(next);
-      return next;
-    });
+    const nextProducts = [...products, product];
+    setProducts(nextProducts);
+    persistCatalog(nextProducts);
+    // Finish the size/variant settings before reporting success so the
+    // storefront cannot load the product row before its size metadata exists.
+    await Promise.all([
+      saveProductBarcodes(nextProducts),
+      saveProductHsnCodes(nextProducts),
+      saveProductBillNames(nextProducts),
+      saveProductPricing(nextProducts),
+      saveProductSizes(nextProducts),
+      saveProductSizeStock(nextProducts),
+      saveProductVariants(nextProducts),
+      saveProductVariantTypes(nextProducts),
+      saveProductImageAdjustments(nextProducts),
+    ]);
     setNewProduct({
       name: "",
       category: "Earrings",
@@ -5343,22 +5923,22 @@ function ProductLibraryWorkspace({
     const remoteError = await saveCatalogProduct(toCatalogProduct(updated));
     if (!remoteError && updated.sku !== selectedProduct.sku)
       await removeCatalogProduct(selectedProduct.sku);
-    setProducts((current) => {
-      const next = current.map((product) =>
-        product.sku === selectedProduct.sku ? updated : product,
-      );
-      persistCatalog(next);
-      void saveProductBarcodes(next);
-      void saveProductHsnCodes(next);
-      void saveProductBillNames(next);
-      void saveProductPricing(next);
-      void saveProductSizes(next);
-      void saveProductSizeStock(next);
-      void saveProductVariants(next);
-      void saveProductVariantTypes(next);
-      void saveProductImageAdjustments(next);
-      return next;
-    });
+    const nextProducts = products.map((product) =>
+      product.sku === selectedProduct.sku ? updated : product,
+    );
+    setProducts(nextProducts);
+    persistCatalog(nextProducts);
+    await Promise.all([
+      saveProductBarcodes(nextProducts),
+      saveProductHsnCodes(nextProducts),
+      saveProductBillNames(nextProducts),
+      saveProductPricing(nextProducts),
+      saveProductSizes(nextProducts),
+      saveProductSizeStock(nextProducts),
+      saveProductVariants(nextProducts),
+      saveProductVariantTypes(nextProducts),
+      saveProductImageAdjustments(nextProducts),
+    ]);
     setSelectedProduct(updated);
     setIsEditing(false);
     onNotify(
@@ -5508,6 +6088,14 @@ function ProductLibraryWorkspace({
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
     onNotify(`${products.length} product${products.length === 1 ? "" : "s"} exported`);
   };
+  const scannerPanel = <ProductImageScanner products={products} promotionOffers={promotionOffers} onClose={() => setScannerOpen(false)} onView={(product) => { setScannerOpen(false); setSelectedProduct(product); setIsAdding(false); setIsEditing(false); }} onEdit={(product) => { setScannerOpen(false); startEditing(product); }} onUpdateStock={(product) => { setScannerOpen(false); startEditing(product); }} onAddNew={(file, preview) => { setScannerOpen(false); openAddProduct(file, preview); }} />;
+  if (scannerOnly) {
+    return (
+      <section className="panel module-workspace">
+        {scannerOpen ? scannerPanel : <div className="scanner-dropzone"><span>✦</span><strong>Product Image Scanner</strong><small>Open the live camera whenever you are ready to check a product.</small><div className="scanner-actions"><button className="module-primary" onClick={() => setScannerOpen(true)}>Open scanner</button></div></div>}
+      </section>
+    );
+  }
   return (
     <section className="panel module-workspace">
       <div className="module-workspace-head">
@@ -5535,7 +6123,7 @@ function ProductLibraryWorkspace({
           <button className="module-secondary" onClick={exportCsv}>
             Export CSV ↗
           </button>
-          <button className="module-primary" onClick={openAddProduct}>
+          <button className="module-primary" onClick={() => openAddProduct()}>
             + Add product
           </button>
         </div>

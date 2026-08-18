@@ -1,4 +1,4 @@
-import { clearAdminSessionCookie, createAdminSessionCookie, getAdminCredentials, isAdminConfigured, isAdminSessionValid } from "../../../lib/admin-auth";
+import { clearAdminSessionCookie, createAdminSessionCookie, getAdminCredentials, isAdminConfigured, isAdminSessionValid, verifySupabaseAdminCredentials } from "../../../lib/admin-auth";
 
 const json = (body: Record<string, unknown>, status = 200, headers?: HeadersInit) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
@@ -18,7 +18,9 @@ export async function POST(request: Request) {
   const credentials = getAdminCredentials();
   const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
   const password = typeof body.password === "string" ? body.password : "";
-  if (email !== credentials.email || password !== credentials.password) return json({ error: "Incorrect email or password." }, 401);
+  const validEnvironmentPassword = email === credentials.email && password === credentials.password;
+  const validSupabasePassword = !validEnvironmentPassword && await verifySupabaseAdminCredentials(email, password);
+  if (!validEnvironmentPassword && !validSupabasePassword) return json({ error: "Incorrect email or password." }, 401);
   return json({ authenticated: true }, 200, { "set-cookie": createAdminSessionCookie() });
 }
 

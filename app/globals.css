@@ -73,6 +73,8 @@ img { display: block; width: 100%; }
 .coupon-total strong { color: #567248; }
 .checkout-total span { color: var(--muted); font-size: 12px; }
 .checkout-total strong { color: var(--wine); font-family: var(--mono); font-size: 13px; font-weight: 400; }
+.checkout-total:not(.coupon-total):has(+ .checkout-total:not(.coupon-total)) { padding-bottom: 32px; position: relative; }
+.checkout-total:not(.coupon-total):has(+ .checkout-total:not(.coupon-total))::after { bottom: 10px; color: var(--muted); content: "Choose Hub pickup for free delivery, or get free delivery on orders above ₹500."; font-family: var(--mono); font-size: 8px; left: 0; letter-spacing: .02em; line-height: 1.45; position: absolute; text-transform: uppercase; }
 .checkout-actions { align-items: center; display: flex; gap: 20px; margin-top: 22px; }
 @media (max-width: 640px) { .checkout-backdrop { align-items: flex-start; overflow-y: auto; padding: 12px; }.checkout-modal { margin: auto 0; max-height: calc(100dvh - 24px); overscroll-behavior: contain; padding: 25px 20px max(32px, env(safe-area-inset-bottom)); }.checkout-modal .drawer-header h2 { font-size: 31px; }.checkout-grid { grid-template-columns: 1fr; }.checkout-wide { grid-column: auto; }.fulfillment-options { grid-template-columns: 1fr; }.checkout-actions { align-items: stretch; flex-direction: column; gap: 12px; } }
 
@@ -349,6 +351,11 @@ img { display: block; width: 100%; }
 .cart-fulfillment-options button { font-family: var(--mono); font-size: 9px; letter-spacing: .02em; line-height: 1.2; min-height: 44px; overflow: hidden; padding: 8px 10px; }
 .cart-fulfillment-options button small { font-size: 6px; line-height: 1.2; }
 .cart-fulfillment select { font-family: var(--mono); font-size: 9px; min-height: 36px; padding: 8px 10px; }
+/* Keep the cart as a simple item summary. Delivery is collected at checkout. */
+.cart-drawer .cart-fulfillment,
+.cart-drawer .drawer-footer > div:nth-last-of-type(2),
+.cart-drawer .drawer-footer .drawer-total,
+.cart-drawer .drawer-footer .drawer-total + p { display: none !important; }
 @media (max-width: 760px) {
   .cart-fulfillment { gap: 8px; margin: -2px 0 14px; padding-bottom: 14px; }
   .cart-fulfillment-options { gap: 6px; }

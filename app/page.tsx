@@ -8,6 +8,7 @@ import {
   fetchStoreSetting,
   saveStoreOrders,
   saveStoreSetting,
+  subscribeToStoreSetting,
   type ProductVariantType,
 } from "../lib/supabase/catalog";
 import { printOrderBill } from "../lib/order-bill";
@@ -58,6 +59,11 @@ type ProductImageAdjustments = {
   image?: ImageAdjustments;
   hoverImage?: ImageAdjustments;
   variants?: ImageAdjustments[];
+};
+type StorefrontPageHistoryState = {
+  activeCategory: string;
+  search: string;
+  scrollY: number;
 };
 type DeliveryCharge = { enabled: boolean; amount: number; freeAboveEnabled: boolean; freeAbove: number };
 type PickupHub = { id: string; name: string; place: string };
@@ -143,9 +149,24 @@ const isCustomerOrder = (order: CustomerOrder, customer: CustomerAuthUser) =>
 
 const formatINR = (value: number) => `₹${(Number.isFinite(value) ? value : 0).toLocaleString("en-IN")}`;
 const CUSTOMER_PRICE_MULTIPLIER = 2.2;
+const normalizeProductKey = (value?: string) => String(value || "").trim().replace(/[^a-z0-9]/gi, "").toLowerCase();
+const matchesProductKey = (product: Pick<Product, "id" | "sku">, value?: string) => {
+  const normalizedValue = normalizeProductKey(value);
+  return Boolean(normalizedValue) && (normalizedValue === normalizeProductKey(product.id) || normalizedValue === normalizeProductKey(product.sku));
+};
+const getProductSetting = <T,>(settings: Record<string, T>, ...keys: Array<string | undefined>) => {
+  for (const key of keys) {
+    if (key && settings[key] !== undefined) return settings[key];
+  }
+  const normalizedKeys = new Set(keys.map(normalizeProductKey).filter(Boolean));
+  return Object.entries(settings).find(([key]) => normalizedKeys.has(normalizeProductKey(key)))?.[1];
+};
 const getCustomerPrice = (product: Pick<Product, "price">) => product.price;
 const getComparePrice = (product: Pick<Product, "price">) => Math.round(product.price * CUSTOMER_PRICE_MULTIPLIER);
-const getProductVariantType = (product: Pick<Product, "variantType" | "sizes">): ProductVariantType => product.variantType || (product.sizes?.length ? "size" : "normal");
+const getProductVariantType = (product: Pick<Product, "variantType" | "sizes" | "sizeStock" | "variants">): ProductVariantType =>
+  product.sizes?.length || Object.keys(product.sizeStock || {}).length || product.variants?.some((variant) => Boolean(variant.size))
+    ? "size"
+    : product.variantType || "normal";
 const getProductSizes = (product: Pick<Product, "variantType" | "sizes" | "variants">) =>
   getProductVariantType(product) === "size" && product.variants?.length
     ? product.variants.map((variant) => variant.size || variant.name).filter(Boolean)
@@ -156,14 +177,17 @@ type StockProduct = Pick<Product, "stock"> & Partial<Pick<Product, "sizeStock" |
 const getSizeStock = (product: StockProduct, size?: string | null) => {
   if (!size) return product.stock;
   const normalizedSize = String(size).trim().replace(/^size\s+/i, "").toLowerCase();
+  const sizeStockKey = Object.keys(product.sizeStock || {}).find((key) => key.trim().replace(/^size\s+/i, "").toLowerCase() === normalizedSize);
+  const savedSizeStock = sizeStockKey ? product.sizeStock?.[sizeStockKey] : undefined;
+  // The dedicated size-stock record is shared inventory and therefore takes
+  // priority over any cached variant value from an older browser session.
+  if (savedSizeStock !== undefined) return Math.max(0, Math.floor(Number(savedSizeStock) || 0));
   const sizeVariant = product.variants?.find((variant) => String(variant.size || variant.name).trim().replace(/^size\s+/i, "").toLowerCase() === normalizedSize);
   if (sizeVariant?.stock !== undefined && sizeVariant.stock !== null) {
     const variantStock = Number(sizeVariant.stock);
     if (Number.isFinite(variantStock)) return Math.max(0, Math.floor(variantStock));
   }
-  const sizeStockKey = Object.keys(product.sizeStock || {}).find((key) => key.trim().replace(/^size\s+/i, "").toLowerCase() === normalizedSize);
-  const value = sizeStockKey ? product.sizeStock?.[sizeStockKey] : undefined;
-  return value === undefined ? product.stock : Math.max(0, Math.floor(Number(value) || 0));
+  return product.stock;
 };
 const getVariantStock = (product: StockProduct, variant?: ProductVariant | null) => {
   if (getProductVariantType(product) === "size" && product.size) return getSizeStock(product, product.size);
@@ -251,11 +275,23 @@ const siteBasePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 const siteAsset = (name: string) => `${siteBasePath}/${name}`;
 const productTones = ["#d9c4bc", "#dad7ce", "#d0c2b0", "#e5ddd1"];
 const formatOrderDate = (value: string) => new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", year: "numeric" }).format(new Date(`${value}T00:00:00`));
+const normalizeCouponCode = (value?: string) => String(value || "").trim().replace(/\s+/g, "").toUpperCase();
 const getCouponDiscount = (coupon: MarketingRecord, subtotal: number) => {
-  const percent = coupon.discount?.match(/(\d+(?:\.\d+)?)\s*%/);
-  if (percent) return Math.min(subtotal, Math.round((subtotal * Number(percent[1])) / 100));
-  const amount = coupon.discount?.match(/(?:₹|rs\.?|inr\s*)([\d,]+)/i);
-  if (amount) return Math.min(subtotal, Number(amount[1].replace(/,/g, "")) || 0);
+  const base = Math.max(0, Number.isFinite(subtotal) ? subtotal : 0);
+  const discount = String(coupon.discount || "").replace(/,/g, "").trim();
+  const roundCurrency = (value: number) => Math.round(value * 100) / 100;
+  if (!base || !discount) return 0;
+
+  const percent = discount.match(/(\d+(?:\.\d+)?)\s*%/);
+  if (percent) {
+    const rate = Math.min(100, Math.max(0, Number(percent[1])));
+    return roundCurrency(Math.min(base, (base * rate) / 100));
+  }
+
+  const currencyAmount = discount.match(/(?:₹|rs\.?|inr)\s*(\d+(?:\.\d+)?)|\b(\d+(?:\.\d+)?)\s*(?:₹|rs\.?|inr)\b/i);
+  const plainAmount = discount.match(/^\s*(?:flat\s+)?(\d+(?:\.\d+)?)(?:\s*(?:off|discount))?\s*$/i);
+  const amount = Number(currencyAmount?.[1] || currencyAmount?.[2] || plainAmount?.[1] || 0);
+  if (Number.isFinite(amount) && amount > 0) return roundCurrency(Math.min(base, amount));
   return 0;
 };
 const isBogoCampaign = (campaign: MarketingRecord | null) => {
@@ -321,6 +357,13 @@ function normalizeStoredProduct(value: unknown, index: number): Product | null {
         }))
         .filter((variant) => variant.name || variant.size || variant.image)
     : [];
+  const inferredSizes = sizes.length
+    ? sizes
+    : Array.from(new Set(variants.map((variant) => variant.size).filter((size): size is string => Boolean(size))));
+  const storedSizeStock = raw.sizeStock && typeof raw.sizeStock === "object" ? raw.sizeStock as Record<string, number> : {};
+  const inferredSizeStock = Object.keys(storedSizeStock).length
+    ? storedSizeStock
+    : Object.fromEntries(variants.filter((variant) => variant.size && variant.stock !== undefined).map((variant) => [variant.size!, variant.stock!]));
   const idValue = typeof raw.id === "string" ? raw.id : typeof raw.sku === "string" ? raw.sku : `${name}-${index}`;
   return {
     id: idValue.toLowerCase().replace(/[^a-z0-9]+/g, "-") || `product-${index}`,
@@ -335,21 +378,23 @@ function normalizeStoredProduct(value: unknown, index: number): Product | null {
     tag: typeof raw.tag === "string" ? raw.tag : undefined,
     tone: typeof raw.tone === "string" && raw.tone ? raw.tone : productTones[index % productTones.length],
     variants,
-    sizes,
-    sizeStock: raw.sizeStock && typeof raw.sizeStock === "object" ? raw.sizeStock as Record<string, number> : {},
-    variantType: raw.variantType === "size" || raw.variantType === "normal" ? raw.variantType : (sizes.length ? "size" : "normal"),
+    sizes: inferredSizes,
+    sizeStock: inferredSizeStock,
+    variantType: raw.variantType === "size" || raw.variantType === "normal" ? raw.variantType : (inferredSizes.length ? "size" : "normal"),
     billName: typeof raw.billName === "string" ? raw.billName.trim() : "",
     imageAdjustments: normalizeImageAdjustments(raw.imageAdjustments),
     hoverImageAdjustments: normalizeImageAdjustments(raw.hoverImageAdjustments),
   };
 }
 
+const isProductOutOfStock = (product: Product) => getProductVariantType(product) === "normal" && product.variants?.length
+  ? product.variants.every((variant) => getVariantStock(product, variant) <= 0)
+  : getProductVariantType(product) === "size" && getProductSizes(product).length
+    ? getProductSizes(product).every((size) => getSizeStock(product, size) <= 0)
+    : product.stock <= 0;
+
 function ProductCard({ product, wished, promotions, onWishlist, onAdd, onQuickView, onImageZoom }: { product: Product; wished: boolean; promotions: PromotionOffer[]; onWishlist: () => void; onAdd: () => void; onQuickView: () => void; onImageZoom: () => void }) {
-  const isOutOfStock = getProductVariantType(product) === "normal" && product.variants?.length
-    ? product.variants.every((variant) => getVariantStock(product, variant) <= 0)
-    : getProductVariantType(product) === "size" && getProductSizes(product).length
-      ? getProductSizes(product).every((size) => getSizeStock(product, size) <= 0)
-      : product.stock <= 0;
+  const isOutOfStock = isProductOutOfStock(product);
   return (
     <article className="product-card">
       <div className="product-media" style={{ backgroundColor: product.tone }}>
@@ -410,13 +455,15 @@ export default function Home() {
   const [otpSent, setOtpSent] = useState(false);
   const [otpCooldown, setOtpCooldown] = useState(0);
   const [authJustVerified, setAuthJustVerified] = useState(false);
-  const [authUser, setAuthUser] = useState<CustomerAuthUser | null>(() => readStoredCustomerAuthUser());
+  // Browser storage is restored after hydration so the server and the first
+  // client render produce identical markup.
+  const [authUser, setAuthUser] = useState<CustomerAuthUser | null>(null);
   const [checkoutForm, setCheckoutForm] = useState({ name: "", phone: "", email: "", address: "" });
   const [couponInput, setCouponInput] = useState("");
   const [appliedCoupon, setAppliedCoupon] = useState<MarketingRecord | null>(null);
   const [marketingRecords, setMarketingRecords] = useState<MarketingRecord[]>([]);
   const [promotionalOffers, setPromotionalOffers] = useState<PromotionOffer[]>([]);
-  const [quickProduct, setQuickProduct] = useState<Product | null>(() => readOverlayProduct());
+  const [quickProduct, setQuickProduct] = useState<Product | null>(null);
   const overlayHistoryStack = useRef<string[]>([]);
   const overlayScrollY = useRef<number | null>(null);
   const overlayHistoryCleanup = useRef(false);
@@ -437,7 +484,7 @@ export default function Home() {
   const [termsOpen, setTermsOpen] = useState(false);
   const [returnPolicyOpen, setReturnPolicyOpen] = useState(false);
   const [privacyOpen, setPrivacyOpen] = useState(false);
-  const [announcementText, setAnnouncementText] = useState("Complimentary shipping on orders above ₹999");
+  const [announcementText, setAnnouncementText] = useState("Complimentary shipping on orders above ₹500");
   const [deliveryCharge, setDeliveryCharge] = useState<DeliveryCharge>(defaultDeliveryCharge);
   const [pickupHubs, setPickupHubs] = useState<PickupHub[]>(defaultPickupHubs);
   const [fulfillmentMethod, setFulfillmentMethod] = useState<FulfillmentMethod>("delivery");
@@ -447,6 +494,21 @@ export default function Home() {
   const [heroSlideIndex, setHeroSlideIndex] = useState(0);
   const [heroSlideDuration, setHeroSlideDuration] = useState(defaultHeroSlideDuration);
   const profileName = authUser?.phone || "Fanzzy customer";
+  const openQuickProduct = useCallback((product: Product) => {
+    // Quick view replaces a temporary source drawer (search, saved pieces,
+    // orders, or the assistant). This leaves exactly one Back step: product
+    // view → the actual page underneath, without briefly showing that drawer.
+    quickProductCloseRequested.current = false;
+    setSearchOpen(false);
+    setAssistantOpen(false);
+    setSavedOpen(false);
+    setOrdersOpen(false);
+    setQuickProduct(product);
+  }, []);
+  const closeQuickProduct = useCallback(() => {
+    quickProductCloseRequested.current = true;
+    setQuickProduct(null);
+  }, []);
 
   useEffect(() => {
     if (otpCooldown <= 0) return;
@@ -482,11 +544,19 @@ export default function Home() {
       return;
     }
     if (quickProduct || quickProductCloseRequested.current) return;
-    const product = products.find((candidate) => candidate.id === productId || candidate.sku === productId);
+    const storedProduct = readOverlayProduct();
+    const product = products.find((candidate) => matchesProductKey(candidate, productId))
+      || (storedProduct && matchesProductKey(storedProduct, productId) ? storedProduct : null);
     if (product) {
       overlayRestoredFromUrl.current = true;
       setQuickProduct(product);
     }
+  }, [products, quickProduct]);
+
+  useEffect(() => {
+    if (!quickProduct) return;
+    const latestProduct = products.find((product) => matchesProductKey(product, quickProduct.id) || matchesProductKey(product, quickProduct.sku));
+    if (latestProduct && latestProduct !== quickProduct) setQuickProduct(latestProduct);
   }, [products, quickProduct]);
 
   useEffect(() => {
@@ -592,13 +662,19 @@ export default function Home() {
         try {
           const parsed: unknown = JSON.parse(stored);
           if (Array.isArray(parsed)) {
-            localProducts = parsed.filter((product) => !isDemoProduct(product as { name?: string; sku?: string })).map(normalizeStoredProduct).filter((product): product is Product => product !== null).map((product) => ({
-              ...product,
-              variants: product.variants?.length ? product.variants : localVariantsMap[product.id] || [],
-              sizes: product.sizes?.length ? product.sizes : sizesMap[product.sku || ""] || [],
-              sizeStock: product.sizeStock || sizeStockMap[product.sku || ""] || {},
-              variantType: product.variantType || variantTypeMap[product.sku || ""] || (product.sizes?.length ? "size" : "normal"),
-            }));
+            localProducts = parsed.filter((product) => !isDemoProduct(product as { name?: string; sku?: string })).map(normalizeStoredProduct).filter((product): product is Product => product !== null).map((product) => {
+              const savedVariants = getProductSetting(variantsMap, product.sku, product.id);
+              const savedSizes = getProductSetting(sizesMap, product.sku, product.id);
+              const savedSizeStock = getProductSetting(sizeStockMap, product.sku, product.id);
+              const savedVariantType = getProductSetting(variantTypeMap, product.sku, product.id);
+              return {
+                ...product,
+                variants: savedVariants?.length ? savedVariants : product.variants?.length ? product.variants : getProductSetting(localVariantsMap, product.sku, product.id) || [],
+                sizes: savedSizes?.length ? savedSizes : product.sizes?.length ? product.sizes : [],
+                sizeStock: savedSizeStock && Object.keys(savedSizeStock).length ? savedSizeStock : product.sizeStock || {},
+                variantType: savedVariantType || (savedSizes?.length ? "size" : product.variantType || (product.sizes?.length ? "size" : "normal")),
+              };
+            });
           }
         } catch {
           window.localStorage.removeItem("fanzzy-products");
@@ -606,8 +682,17 @@ export default function Home() {
       }
       if (!remote.error && remote.data !== null) {
         const remoteProducts = remote.data.filter((product) => !isDemoProduct(product)).map((product, index) => {
-          const savedAdjustments = imageAdjustmentsMap[product.sku];
-          const variants = variantsMap[product.sku] || localVariantsMap[product.sku] || product.variants;
+          const savedAdjustments = getProductSetting(imageAdjustmentsMap, product.sku);
+          const savedVariants = getProductSetting(variantsMap, product.sku);
+          const variants = (savedVariants?.length ? savedVariants : getProductSetting(localVariantsMap, product.sku) || product.variants) as ProductVariant[] | undefined;
+          const savedSizes = getProductSetting(sizesMap, product.sku);
+          const inferredSizes = savedSizes?.length
+            ? savedSizes
+            : Array.from(new Set((variants || []).map((variant) => variant.size).filter((size): size is string => Boolean(size))));
+          const savedSizeStock = getProductSetting(sizeStockMap, product.sku) || {};
+          const inferredSizeStock = Object.keys(savedSizeStock).length
+            ? savedSizeStock
+            : Object.fromEntries((variants || []).filter((variant) => variant.size && variant.stock !== undefined).map((variant) => [variant.size!, variant.stock!]));
           return normalizeStoredProduct({
           id: product.sku,
           sku: product.sku,
@@ -625,12 +710,12 @@ export default function Home() {
             name: variant.name || `Option ${variantIndex + 1}`,
             adjustments: normalizeImageAdjustments(savedAdjustments?.variants?.[variantIndex] || variant.adjustments),
           })),
-          sizes: sizesMap[product.sku] || [],
-          sizeStock: sizeStockMap[product.sku] || {},
-          variantType: variantTypeMap[product.sku] || (sizesMap[product.sku]?.length ? "size" : "normal"),
+          sizes: inferredSizes,
+          sizeStock: inferredSizeStock,
+          variantType: getProductSetting(variantTypeMap, product.sku) || (inferredSizes.length ? "size" : "normal"),
           imageAdjustments: savedAdjustments?.image,
           hoverImageAdjustments: savedAdjustments?.hoverImage,
-          billName: billNameMap[product.sku] || "",
+          billName: getProductSetting(billNameMap, product.sku) || "",
         }, index);
         }).filter((product): product is Product => product !== null);
         const remoteWithLocalVariants = remoteProducts.map((product) => ({
@@ -647,11 +732,16 @@ export default function Home() {
       if (localProducts.length) setProducts(localProducts);
     };
     void syncProducts();
-    window.addEventListener("storage", syncProducts);
-    window.addEventListener("fanzzy-products-updated", syncProducts);
+    const onProductsStorage = () => { void syncProducts(); };
+    const onProductsUpdated = () => { void syncProducts(); };
+    const unsubscribeFromProductSettings = (['productVariants', 'productVariantType', 'productSizes', 'productSizeStock'] as const)
+      .map((key) => subscribeToStoreSetting(key, () => { void syncProducts(); }));
+    window.addEventListener("storage", onProductsStorage);
+    window.addEventListener("fanzzy-products-updated", onProductsUpdated);
     return () => {
-      window.removeEventListener("storage", syncProducts);
-      window.removeEventListener("fanzzy-products-updated", syncProducts);
+      unsubscribeFromProductSettings.forEach((unsubscribe) => unsubscribe());
+      window.removeEventListener("storage", onProductsStorage);
+      window.removeEventListener("fanzzy-products-updated", onProductsUpdated);
     };
   }, []);
 
@@ -705,47 +795,65 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    const syncOrders = async () => {
-      // Recover captured payments even when the Razorpay browser callback was interrupted.
-      await fetch("/api/razorpay/sync-payments", { method: "POST" }).catch(() => undefined);
+    let syncInFlight = false;
+    const syncOrders = async (recoverCapturedPayments = false) => {
+      if (syncInFlight) return;
+      syncInFlight = true;
+      // Recover captured payments on the initial load only. Live order updates
+      // should read the shared order record directly without waiting on the
+      // payment provider.
+      if (recoverCapturedPayments) {
+        await fetch("/api/razorpay/sync-payments", { method: "POST" }).catch(() => undefined);
+      }
       const userId = authUser?.id;
       if (!userId) {
         setOrders([]);
+        syncInFlight = false;
         return;
       }
-      const remote = await fetchStoreOrders<CustomerOrder>();
-      const merged = new Map<string, CustomerOrder>();
-      remote.data?.forEach((order) => {
-        if (order?.id && isCustomerOrder(order, authUser)) {
-          merged.set(order.id, order);
-        }
-      });
       try {
-        const stored = window.localStorage.getItem(`fanzzy-orders:${userId}`);
-        const parsed = stored ? JSON.parse(stored) : [];
-        if (Array.isArray(parsed)) {
-          parsed.forEach((order) => {
-            if (order?.id && isCustomerOrder(order as CustomerOrder, authUser) && !merged.has(order.id)) {
-              merged.set(order.id, order as CustomerOrder);
-            }
-          });
-        }
-        const sharedStored = window.localStorage.getItem("fanzzy-orders");
-        const sharedParsed = sharedStored ? JSON.parse(sharedStored) : [];
-        if (Array.isArray(sharedParsed)) sharedParsed.forEach((order) => {
-          if (order?.id && isCustomerOrder(order as CustomerOrder, authUser) && !merged.has(order.id)) merged.set(order.id, order as CustomerOrder);
+        const remote = await fetchStoreOrders<CustomerOrder>();
+        const merged = new Map<string, CustomerOrder>();
+        remote.data?.forEach((order) => {
+          if (order?.id && isCustomerOrder(order, authUser)) {
+            merged.set(order.id, order);
+          }
         });
-      } catch {
-        setOrders([]);
+        try {
+          const stored = window.localStorage.getItem(`fanzzy-orders:${userId}`);
+          const parsed = stored ? JSON.parse(stored) : [];
+          if (Array.isArray(parsed)) {
+            parsed.forEach((order) => {
+              if (order?.id && isCustomerOrder(order as CustomerOrder, authUser) && !merged.has(order.id)) {
+                merged.set(order.id, order as CustomerOrder);
+              }
+            });
+          }
+          const sharedStored = window.localStorage.getItem("fanzzy-orders");
+          const sharedParsed = sharedStored ? JSON.parse(sharedStored) : [];
+          if (Array.isArray(sharedParsed)) sharedParsed.forEach((order) => {
+            if (order?.id && isCustomerOrder(order as CustomerOrder, authUser) && !merged.has(order.id)) merged.set(order.id, order as CustomerOrder);
+          });
+        } catch {
+          window.localStorage.removeItem(`fanzzy-orders:${userId}`);
+        }
+        setOrders(Array.from(merged.values()));
+      } finally {
+        syncInFlight = false;
       }
-      setOrders(Array.from(merged.values()));
     };
-    syncOrders();
-    window.addEventListener("storage", syncOrders);
-    window.addEventListener("fanzzy-orders-updated", syncOrders);
+    void syncOrders(true);
+    const liveOrderTimer = window.setInterval(() => { void syncOrders(false); }, 3000);
+    const unsubscribeFromLiveOrders = subscribeToStoreSetting("orders", () => { void syncOrders(false); });
+    const onStorageOrdersUpdated = () => { void syncOrders(false); };
+    const onLocalOrdersUpdated = () => { void syncOrders(false); };
+    window.addEventListener("storage", onStorageOrdersUpdated);
+    window.addEventListener("fanzzy-orders-updated", onLocalOrdersUpdated);
     return () => {
-      window.removeEventListener("storage", syncOrders);
-      window.removeEventListener("fanzzy-orders-updated", syncOrders);
+      window.clearInterval(liveOrderTimer);
+      unsubscribeFromLiveOrders();
+      window.removeEventListener("storage", onStorageOrdersUpdated);
+      window.removeEventListener("fanzzy-orders-updated", onLocalOrdersUpdated);
     };
   }, [authUser?.id]);
 
@@ -755,7 +863,7 @@ export default function Home() {
       const categoryMatch = activeCategory === "All pieces" || product.category === activeCategory;
       const searchMatch = !query || `${product.name} ${product.category}`.toLowerCase().includes(query);
       return categoryMatch && searchMatch;
-    });
+    }).sort((left, right) => Number(isProductOutOfStock(left)) - Number(isProductOutOfStock(right)));
   }, [activeCategory, products, search]);
 
   const offersForProduct = (product: Product) => promotionalOffers.filter((offer) => {
@@ -774,7 +882,7 @@ export default function Home() {
 
   const cartItems = Object.entries(cart).flatMap(([cartKey, quantity]) => {
     const productId = cartKey.split("::", 1)[0];
-    const product = products.find((item) => item.id === productId);
+    const product = products.find((item) => matchesProductKey(item, productId));
     return product ? [{ ...product, cartKey, quantity, variant: cartVariants[cartKey] ?? null, size: cartSizes[cartKey] ?? null, promotion: cartPromotionLines[cartKey] ?? null }] : [];
   });
   const cartStockIssues = cartItems.filter((product) => {
@@ -1091,22 +1199,18 @@ export default function Home() {
     setWishlist((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
     announce(wishlist.includes(id) ? "Removed from wishlist" : "Saved to wishlist");
   };
-  const closeQuickProduct = () => {
-    quickProductCloseRequested.current = true;
-    setQuickProduct(null);
-  };
   const addToCart = (product: Product, variant: ProductVariant | null = null, size: string | null = null) => {
     if (getProductVariantType(product) === "normal" && product.variants?.length && !variant) {
-      setQuickProduct(product);
+      openQuickProduct(product);
       return;
     }
     if (getProductVariantType(product) === "size" && getProductSizes(product).length && !size) {
-      setQuickProduct(product);
+      openQuickProduct(product);
       return;
     }
     if (getSelectionStock(product, variant, size) <= 0) return announce(`${product.name}${size ? ` · Size ${size}` : ""}${variant?.name ? ` · ${variant.name}` : ""} is sold out`);
     const cartKey = [product.id, variant ? (variant.name || variant.image) : "", size || ""].filter(Boolean).join("::");
-    setCart((current) => ({ ...current, [cartKey]: (current[cartKey] ?? 0) + 1 }));
+    setCart((current) => ({ ...current, [cartKey]: 1 }));
     if (variant) setCartVariants((current) => ({ ...current, [cartKey]: variant }));
     if (size) setCartSizes((current) => ({ ...current, [cartKey]: size }));
     setCartOpen(true);
@@ -1234,25 +1338,41 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).get("fanzzy-overlay")) return;
-    const savedScrollY = Number(window.sessionStorage.getItem("fanzzy-overlay-scroll"));
-    if (!Number.isFinite(savedScrollY)) return;
-
-    const restoreScroll = () => {
-      window.scrollTo({ top: savedScrollY, behavior: "auto" });
-      document.documentElement.scrollTop = savedScrollY;
-      document.body.scrollTop = savedScrollY;
-    };
-    restoreScroll();
-    [50, 200, 600, 1200, 2500].forEach((delay) => window.setTimeout(restoreScroll, delay));
-    window.setTimeout(() => window.sessionStorage.removeItem("fanzzy-overlay-scroll"), 2800);
-  }, []);
-
-  useEffect(() => {
     const previousLayers = overlayHistoryStack.current;
 
     if (overlayRestoredFromUrl.current) {
       overlayRestoredFromUrl.current = false;
+      // A quick-view URL can be restored directly (for example from a
+      // refreshed tab or a shared link). Normalize it to two entries so Back
+      // returns to this same listing page instead of leaving the storefront.
+      const restoredPageHistoryState: StorefrontPageHistoryState = {
+        activeCategory,
+        search,
+        scrollY: Math.round(window.scrollY),
+      };
+      const restoredScrollY = Math.round(window.scrollY);
+      window.history.replaceState(
+        {
+          ...window.history.state,
+          fanzzyPage: restoredPageHistoryState,
+          fanzzyOverlayScrollY: restoredScrollY,
+        },
+        "",
+        overlayHistoryUrl([], undefined),
+      );
+      for (let index = 0; index < activeOverlayLayers.length; index += 1) {
+        window.history.pushState(
+          {
+            ...window.history.state,
+            fanzzyOverlay: activeOverlayLayers[index],
+            fanzzyPage: restoredPageHistoryState,
+            fanzzyOverlayScrollY: restoredScrollY,
+          },
+          "",
+          overlayHistoryUrl(activeOverlayLayers.slice(0, index + 1), quickProduct?.id),
+        );
+      }
+      overlayScrollY.current = restoredScrollY;
       overlayHistoryStack.current = activeOverlayLayers;
       return;
     }
@@ -1276,14 +1396,27 @@ export default function Home() {
       // Opening a new layer (for example product popup, then photo zoom) gets
       // exactly one same-page history entry per layer.
       overlayLastBackUrl.current = null;
+      const pageHistoryState: StorefrontPageHistoryState = {
+        activeCategory,
+        search,
+        scrollY: Math.round(window.scrollY),
+      };
+      window.history.replaceState(
+        { ...window.history.state, fanzzyPage: pageHistoryState },
+        "",
+        window.location.href,
+      );
       if (previousLayers.length === 0) {
         overlayScrollY.current = Math.round(window.scrollY);
         window.history.replaceState(
-          { ...window.history.state, fanzzyOverlayScrollY: Math.round(window.scrollY) },
+          {
+            ...window.history.state,
+            fanzzyOverlayScrollY: Math.round(window.scrollY),
+            fanzzyPage: pageHistoryState,
+          },
           "",
           window.location.href,
         );
-        window.sessionStorage.setItem("fanzzy-overlay-scroll", String(window.scrollY));
       }
       if (quickProduct) window.sessionStorage.setItem("fanzzy-overlay-product", JSON.stringify(quickProduct));
       for (let index = previousLayers.length; index < activeOverlayLayers.length; index += 1) {
@@ -1301,22 +1434,47 @@ export default function Home() {
       overlayHistoryCleanup.current = true;
       if (activeOverlayLayers.length === 0) {
         overlayScrollY.current = null;
-        window.sessionStorage.removeItem("fanzzy-overlay-scroll");
       }
       window.history.go(-removedLayerCount);
       return;
     } else if (activeOverlayKey !== previousLayers.join("|") && activeOverlayLayers.length) {
       // Replacing one drawer with another (cart -> login, profile -> orders)
       // reuses the current entry instead of adding a misleading extra Back step.
+      const pageHistoryState: StorefrontPageHistoryState = {
+        activeCategory,
+        search,
+        scrollY: Math.round(window.scrollY),
+      };
       window.history.replaceState(
-        { ...window.history.state, fanzzyOverlay: activeOverlayLayers.at(-1) },
+        {
+          ...window.history.state,
+          fanzzyOverlay: activeOverlayLayers.at(-1),
+          fanzzyPage: pageHistoryState,
+          fanzzyOverlayScrollY: Math.round(window.scrollY),
+        },
         "",
         overlayHistoryUrl(activeOverlayLayers, quickProduct?.id),
       );
     }
 
     overlayHistoryStack.current = activeOverlayLayers;
-  }, [activeOverlayKey, activeOverlayLayers]);
+  }, [activeCategory, activeOverlayKey, activeOverlayLayers, search]);
+
+  useEffect(() => {
+    // Keep the current listing snapshot up to date without adding a history
+    // entry. This also records a live search query while the search drawer is
+    // open, before a product view replaces that drawer in the same entry.
+    const pageHistoryState: StorefrontPageHistoryState = {
+      activeCategory,
+      search,
+      scrollY: Math.round(window.scrollY),
+    };
+    window.history.replaceState(
+      { ...window.history.state, fanzzyPage: pageHistoryState },
+      "",
+      window.location.href,
+    );
+  }, [activeCategory, search]);
 
   useEffect(() => {
     const closeOverlayFromBack = () => {
@@ -1333,9 +1491,13 @@ export default function Home() {
       if (!topLayer) return;
 
       const savedScrollState = window.history.state?.fanzzyOverlayScrollY;
-      const savedScrollY = Number(overlayScrollY.current ?? savedScrollState ?? window.sessionStorage.getItem("fanzzy-overlay-scroll"));
+      const pageHistoryState = window.history.state?.fanzzyPage as Partial<StorefrontPageHistoryState> | undefined;
+      const savedScrollY = Number(overlayScrollY.current ?? savedScrollState ?? pageHistoryState?.scrollY);
       overlayClosedFromBack.current = true;
       overlayHistoryStack.current = activeOverlayLayers.slice(0, -1);
+
+      if (pageHistoryState?.activeCategory) setActiveCategory(pageHistoryState.activeCategory);
+      if (typeof pageHistoryState?.search === "string") setSearch(pageHistoryState.search);
 
       if (Number.isFinite(savedScrollY)) {
         const restoreScroll = () => {
@@ -1350,7 +1512,6 @@ export default function Home() {
             window.scrollTo({ top: savedScrollY, behavior: "auto" });
             if (activeOverlayLayers.length === 1) {
               overlayScrollY.current = null;
-              window.sessionStorage.removeItem("fanzzy-overlay-scroll");
             }
           });
         });
@@ -1527,10 +1688,10 @@ export default function Home() {
     setAuthOpen(true);
   };
   const applyCoupon = () => {
-    const code = couponInput.trim().toUpperCase();
+    const code = normalizeCouponCode(couponInput);
     if (!code) return announce("Enter a coupon code");
     const source = marketingRecords;
-    const coupon = source.find((record) => record.kind === "Coupon" && record.status === "Active" && record.code?.toUpperCase() === code);
+    const coupon = source.find((record) => String(record.kind || "").toLowerCase() === "coupon" && String(record.status || "").toLowerCase() === "active" && normalizeCouponCode(record.code) === code);
     if (!coupon) {
       setAppliedCoupon(null);
       return announce("That coupon is not active or does not exist");
@@ -1539,6 +1700,83 @@ export default function Home() {
     setAppliedCoupon(coupon);
     setCouponInput(code);
     announce(`${code} applied`);
+  };
+  const decrementLocalInventory = (items: NonNullable<CustomerOrder["items"]>) => {
+    const normalizeInventoryKey = (value?: string) => String(value || "").trim().replace(/[^a-z0-9]/gi, "").toLowerCase();
+    let changed = false;
+    const next = products.map((product) => {
+        const matchingItems = items.filter((item) => {
+          const itemId = normalizeInventoryKey(item.productId);
+          return itemId && (itemId === normalizeInventoryKey(product.id) || itemId === normalizeInventoryKey(product.sku));
+        });
+        if (!matchingItems.length) return product;
+
+        const updated: Product = {
+          ...product,
+          variants: product.variants?.map((variant) => ({ ...variant })),
+          sizeStock: { ...(product.sizeStock || {}) },
+        };
+        matchingItems.forEach((item) => {
+          const quantity = Math.max(0, Math.floor(Number(item.quantity) || 0));
+          if (!quantity) return;
+          const normalizedSize = normalizeInventoryKey(item.size);
+          const normalizedVariant = normalizeInventoryKey(item.variantName);
+          if (normalizedSize) {
+            const sizeKey = Object.keys(updated.sizeStock || {}).find((key) => normalizeInventoryKey(key) === normalizedSize) || item.size!;
+            const sizeVariantIndex = updated.variants?.findIndex((variant) => normalizeInventoryKey(variant.size || variant.name) === normalizedSize) ?? -1;
+            const sizeVariant = sizeVariantIndex >= 0 ? updated.variants?.[sizeVariantIndex] : undefined;
+            const currentSizeStock = updated.sizeStock?.[sizeKey] ?? (sizeVariant?.stock ?? updated.stock);
+            updated.sizeStock = { ...(updated.sizeStock || {}), [sizeKey]: Math.max(0, Math.floor(Number(currentSizeStock) - quantity)) };
+            if (sizeVariantIndex >= 0 && updated.variants) {
+              updated.variants[sizeVariantIndex] = {
+                ...updated.variants[sizeVariantIndex],
+                stock: Math.max(0, Math.floor(Number(updated.variants[sizeVariantIndex].stock ?? currentSizeStock) - quantity)),
+              };
+            }
+            changed = true;
+            return;
+          }
+          if (normalizedVariant && updated.variants?.length) {
+            const variantIndex = updated.variants.findIndex((variant) => normalizeInventoryKey(variant.name) === normalizedVariant);
+            if (variantIndex >= 0) {
+              const variant = updated.variants[variantIndex];
+              updated.variants[variantIndex] = {
+                ...variant,
+                stock: Math.max(0, Math.floor(Number(variant.stock ?? updated.stock) - quantity)),
+              };
+              changed = true;
+              return;
+            }
+          }
+          updated.stock = Math.max(0, Math.floor(Number(updated.stock) - quantity));
+          changed = true;
+        });
+        return updated;
+    });
+    if (!changed) return false;
+    setProducts(next);
+    window.localStorage.setItem("fanzzy-products", JSON.stringify(next));
+    const variantCache = Object.fromEntries(next.filter((product) => product.variants?.length).flatMap((product) => [
+      [product.sku, product.variants],
+      [product.id, product.variants],
+    ]));
+    window.localStorage.setItem(localProductVariantsKey, JSON.stringify(variantCache));
+    window.dispatchEvent(new Event("fanzzy-products-updated"));
+    return true;
+  };
+  const decrementLocalInventoryOnce = (order: CustomerOrder) => {
+    const adjustmentId = order.razorpayPaymentId || order.id;
+    if (!adjustmentId) return;
+    const storageKey = `fanzzy-local-inventory-adjustments:${authUser?.id || "guest"}`;
+    let adjustedIds: string[] = [];
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem(storageKey) || "[]") as unknown;
+      if (Array.isArray(parsed)) adjustedIds = parsed.filter((value): value is string => typeof value === "string");
+    } catch {
+      adjustedIds = [];
+    }
+    if (adjustedIds.includes(adjustmentId) || !decrementLocalInventory(order.items || [])) return;
+    window.localStorage.setItem(storageKey, JSON.stringify([...adjustedIds, adjustmentId].slice(-250)));
   };
   const persistPaidOrder = async (newOrder: CustomerOrder) => {
     if (!authUser) {
@@ -1573,6 +1811,7 @@ export default function Home() {
       window.localStorage.setItem("fanzzy-orders", JSON.stringify(Array.from(merged.values())));
       window.dispatchEvent(new Event("fanzzy-orders-updated"));
       setOrderConfirmation(existingPayment);
+      decrementLocalInventoryOnce(existingPayment);
       setCart({});
       setCartVariants({});
       setCartPromotionLines({});
@@ -1600,6 +1839,7 @@ export default function Home() {
     setCouponInput("");
     setAppliedCoupon(null);
     setIsPaying(false);
+    decrementLocalInventoryOnce(newOrder);
     window.dispatchEvent(new Event("fanzzy-products-updated"));
     announce(`${newOrder.id} placed successfully`);
   };
@@ -1708,9 +1948,9 @@ export default function Home() {
                   razorpaySignature: payment.razorpay_signature,
                 }),
               });
-              const verification = await readRazorpayResponse<{ verified?: boolean; error?: string }>(verifyResponse);
+              const verification = await readRazorpayResponse<{ verified?: boolean; error?: string; inventoryAdjusted?: boolean }>(verifyResponse);
               if (!verifyResponse.ok || !verification.verified) throw new Error(verification.error || "Payment verification failed");
-              const paidOrder = { ...pendingOrder, paymentStatus: "paid" as const, razorpayOrderId: payment.razorpay_order_id, razorpayPaymentId: payment.razorpay_payment_id, inventoryAdjusted: true };
+              const paidOrder = { ...pendingOrder, paymentStatus: "paid" as const, razorpayOrderId: payment.razorpay_order_id, razorpayPaymentId: payment.razorpay_payment_id, inventoryAdjusted: verification.inventoryAdjusted !== false };
               await persistPaidOrder(paidOrder);
             } catch (error) {
               setIsPaying(false);
@@ -1732,7 +1972,7 @@ export default function Home() {
   const getOrderedProduct = (item: NonNullable<CustomerOrder["items"]>[number]) => {
     const orderedName = item.name.split(" · ")[0].trim().toLowerCase();
     return products.find((candidate) =>
-      candidate.id === item.productId
+      matchesProductKey(candidate, item.productId)
       || candidate.name.trim().toLowerCase() === orderedName
       || candidate.billName?.trim().toLowerCase() === orderedName,
     );
@@ -1743,8 +1983,7 @@ export default function Home() {
       announce("This product is no longer available in the collection.");
       return;
     }
-    setOrdersOpen(false);
-    setQuickProduct(product);
+    openQuickProduct(product);
   };
 
   const visibleOrders = useMemo(() => {
@@ -1834,7 +2073,7 @@ export default function Home() {
           <label className="navbar-search"><span aria-hidden="true">⌕</span><input readOnly placeholder="Search jewellery" onFocus={openSearch} aria-label="Open search" /></label>
           <button className="header-action-with-icon saved-header-action" onClick={() => setSavedOpen(true)} aria-label="View saved pieces"><svg className="header-action-icon" viewBox="0 0 16 16" aria-hidden="true" fill="none"><path d="M8 13.25S2.75 10.15 2.75 6.55A2.55 2.55 0 0 1 8 5.8a2.55 2.55 0 0 1 5.25.75C13.25 10.15 8 13.25 8 13.25Z" /></svg><span className="action-label">Saved</span>{wishlist.length > 0 && <b>{wishlist.length}</b>}</button>
           <button className="header-action-with-icon" onClick={openOrders} aria-label="View my orders"><svg className="header-action-icon" viewBox="0 0 16 16" aria-hidden="true" fill="none"><path d="M5 2.5h6v11L8 11.7 5 13.5v-11Z" /><path d="M6.6 5.4h2.8M6.6 7.7h2.1" /></svg><span className="action-label">My orders</span>{orders.length > 0 && <b>{orders.length}</b>}</button>
-          <button className="header-action-with-icon" onClick={() => setCartOpen(true)} aria-label="Open shopping cart"><svg className="header-action-icon" viewBox="0 0 16 16" aria-hidden="true" fill="none"><path d="M4 5.5h8l-.65 8H4.65L4 5.5Z" /><path d="M6.25 5.5V4.25a1.75 1.75 0 0 1 3.5 0V5.5" /></svg><span className="action-label">Cart</span><span className="bag-count">({cartCount.toString().padStart(2, "0")})</span></button>
+          <button className="header-action-with-icon" onClick={() => setCartOpen(true)} aria-label={cartCount > 0 ? `Open shopping cart, ${cartCount} item${cartCount === 1 ? "" : "s"}` : "Open shopping cart"}><svg className="header-action-icon" viewBox="0 0 16 16" aria-hidden="true" fill="none"><path d="M4 5.5h8l-.65 8H4.65L4 5.5Z" /><path d="M6.25 5.5V4.25a1.75 1.75 0 0 1 3.5 0V5.5" /></svg><span className="action-label">Cart</span>{cartCount > 0 && <span className="bag-count">({cartCount})</span>}</button>
           <button className="profile-button" onClick={() => setProfileOpen(true)} aria-label="View account profile"><span className="profile-logo" data-signed-in={authUser ? "true" : "false"} aria-hidden="true"><span /></span><span className="action-label">Profile</span></button>
         </div>
         <button className="mobile-menu" onClick={() => setMobileNavOpen((current) => !current)} aria-label={mobileNavOpen ? "Close menu" : "Open menu"} aria-expanded={mobileNavOpen}>{mobileNavOpen ? "×" : "☰"}</button>
@@ -1852,7 +2091,7 @@ export default function Home() {
           <button onClick={() => { setMobileNavOpen(false); setSavedOpen(true); }}>Saved pieces <span>♡</span></button>
           <button onClick={() => { setMobileNavOpen(false); openOrders(); }}>My orders <span>↗</span></button>
           <button onClick={() => { setMobileNavOpen(false); setProfileOpen(true); }}>Profile <span className="mobile-profile-logo" aria-hidden="true"><span /></span></button>
-          <button onClick={() => { setMobileNavOpen(false); setCartOpen(true); }}>Your cart <span>({cartCount.toString().padStart(2, "0")})</span></button>
+          <button onClick={() => { setMobileNavOpen(false); setCartOpen(true); }}>Your cart {cartCount > 0 && <span>({cartCount})</span>}</button>
         </div>
       </div>}
 
@@ -1862,7 +2101,7 @@ export default function Home() {
 
       <section className="manifesto"><p className="eyebrow">THE FANZZY STANDARD</p><h2>Jewellery with a point of view.<br /><em>Made for your everyday extraordinary.</em></h2><p className="manifesto-copy">Fanzzy is a study in contrast — soft and sculptural, familiar and unexpected. Every piece is made in small batches with considered materials and a little bit of magic.</p></section>
 
-      <section className="section-block product-section" id="shop"><div className="section-heading"><div><p className="eyebrow">CURATED FOR YOU</p><h2>Pieces worth <em>keeping.</em></h2></div><a className="text-link" href="#footer">Shop all <span>↗</span></a></div>{promotionalOffers.length > 0 && <div className="storefront-offer-rail"><span className="eyebrow">LIVE OFFERS</span>{promotionalOffers.slice(0, 3).map((offer) => <button key={offer.id} onClick={() => { const first = products.find((product) => offersForProduct(product).some((item) => item.id === offer.id)); if (first) setQuickProduct(first); }}>{offerTypeLabel(offer)} <b>↗</b></button>)}</div>}<div className="filter-row"><div className="filter-pills"><button className={activeCategory === "All pieces" ? "active" : ""} onClick={() => setActiveCategory("All pieces")}>All pieces</button>{categories.map((category) => <button className={activeCategory === category.name ? "active" : ""} key={category.name} onClick={() => setActiveCategory(category.name)}>{category.name}</button>)}</div><span className="result-count">{filteredProducts.length} pieces</span></div><div className="product-grid">{filteredProducts.map((product) => <ProductCard key={product.id} product={product} promotions={offersForProduct(product)} wished={wishlist.includes(product.id)} onWishlist={() => toggleWishlist(product.id)} onAdd={() => (getProductVariantType(product) === "normal" && product.variants?.length) || (getProductVariantType(product) === "size" && product.sizes?.length) || offersForProduct(product).length ? setQuickProduct(product) : addToCart(product)} onQuickView={() => setQuickProduct(product)} onImageZoom={() => setZoomedImage({ src: product.image, alt: product.name, adjustments: product.imageAdjustments })} />)}</div></section>
+      <section className="section-block product-section" id="shop"><div className="section-heading"><div><p className="eyebrow">CURATED FOR YOU</p><h2>Pieces worth <em>keeping.</em></h2></div><a className="text-link" href="#footer">Shop all <span>↗</span></a></div>{promotionalOffers.length > 0 && <div className="storefront-offer-rail"><span className="eyebrow">LIVE OFFERS</span>{promotionalOffers.slice(0, 3).map((offer) => <button key={offer.id} onClick={() => { const first = products.find((product) => offersForProduct(product).some((item) => item.id === offer.id)); if (first) openQuickProduct(first); }}>{offerTypeLabel(offer)} <b>↗</b></button>)}</div>}<div className="filter-row"><div className="filter-pills"><button className={activeCategory === "All pieces" ? "active" : ""} onClick={() => setActiveCategory("All pieces")}>All pieces</button>{categories.map((category) => <button className={activeCategory === category.name ? "active" : ""} key={category.name} onClick={() => setActiveCategory(category.name)}>{category.name}</button>)}</div><span className="result-count">{filteredProducts.length} pieces</span></div><div className="product-grid">{filteredProducts.map((product) => <ProductCard key={product.id} product={product} promotions={offersForProduct(product)} wished={wishlist.includes(product.id)} onWishlist={() => toggleWishlist(product.id)} onAdd={() => (getProductVariantType(product) === "normal" && product.variants?.length) || (getProductVariantType(product) === "size" && product.sizes?.length) || offersForProduct(product).length ? openQuickProduct(product) : addToCart(product)} onQuickView={() => openQuickProduct(product)} onImageZoom={() => setZoomedImage({ src: product.image, alt: product.name, adjustments: product.imageAdjustments })} />)}</div></section>
 
       <section className="editorial" id="story"><div className="editorial-image"><img src="https://images.unsplash.com/photo-1515562141207-7a88fb7ce338?auto=format&fit=crop&w=1100&q=85" alt="Close-up of sculptural gold jewelry" /><span>THE ART OF<br /><em>ADORNMENT</em></span></div><div className="editorial-copy"><p className="eyebrow">A NOTE FROM THE STUDIO</p><h2>Less noise.<br /><em>More meaning.</em></h2><p>There is beauty in the in-between. The way a quiet chain layers with your favourite shirt. A ring that becomes part of your hand. Fanzzy is made for these small rituals — the ones that make a day feel like yours.</p><a className="button button-dark" href="#footer">Read our story <span>↗</span></a><div className="editorial-sign">F / 19<br /></div></div></section>
 
@@ -1879,13 +2118,13 @@ export default function Home() {
       {returnPolicyOpen && <div className="drawer-backdrop terms-backdrop" onClick={() => setReturnPolicyOpen(false)}><section className="terms-modal" role="dialog" aria-modal="true" aria-labelledby="return-policy-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">FANZZY</p><h2 id="return-policy-title">Return Policy</h2></div><button aria-label="Close return policy" onClick={() => setReturnPolicyOpen(false)}>×</button></div><div className="terms-content"><p>Customers may request a return for eligible products within the return period mentioned on our website.</p><p>Once a return request is approved, the <strong>customer must send the product to the return hub/address provided by Fanzzy</strong>.</p><ul><li>The product must be unused, undamaged, and returned in its original packaging with all tags/accessories intact.</li><li><strong>Return courier/shipping charges must be paid by the customer. Fanzzy will not bear the cost of sending the returned product to our hub.</strong></li><li>Customers are responsible for safely packing and dispatching the return item.</li><li>We recommend using a trackable courier service. Fanzzy will not be responsible for return parcels lost or damaged during transit.</li><li>Refund/replacement processing will begin only after the returned item reaches our hub and successfully passes the quality inspection.</li><li>Original delivery/shipping charges, if any, are non-refundable unless the return is due to a wrong or defective product supplied by Fanzzy.</li><li>Products that are used, damaged, altered, or returned without original packaging may not be eligible for refund or replacement.</li><li>Certain products may be marked as <strong>non-returnable</strong> for hygiene or other applicable reasons.</li></ul><p>If a customer receives a <strong>wrong, damaged, or defective product</strong>, they should contact Fanzzy customer support within the specified return period with the order details and supporting photos/videos.</p></div></section></div>}
       {privacyOpen && <div className="drawer-backdrop terms-backdrop" onClick={() => setPrivacyOpen(false)}><section className="terms-modal" role="dialog" aria-modal="true" aria-labelledby="privacy-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">FANZZY</p><h2 id="privacy-title">Privacy Policy</h2></div><button aria-label="Close privacy policy" onClick={() => setPrivacyOpen(false)}>×</button></div><div className="terms-content"><p>At <strong>Fanzzy</strong>, we respect and protect your privacy. We collect necessary information such as your name, contact details, address, and order information to process orders, arrange delivery, manage returns/refunds, and provide customer support.</p><p>Your information may be shared with trusted <strong>payment, courier, and service partners</strong> only when required to complete our services. We do not sell customers' personal information to third parties.</p><p>We take reasonable measures to keep your information secure. By using the Fanzzy website, you agree to this Privacy Policy and any updates made to it.</p></div></section></div>}
 
-      {assistantOpen && <div className="drawer-backdrop" onClick={() => setAssistantOpen(false)}><aside className="assistant-drawer" role="dialog" aria-modal="true" aria-labelledby="assistant-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">FANZZY AI</p><h2 id="assistant-title">How can I help?</h2></div><button aria-label="Close AI assistant" onClick={() => setAssistantOpen(false)}>×</button></div><div className="assistant-messages" aria-live="polite">{assistantMessages.map((message, index) => <div className={`assistant-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.text}{message.productIds?.length ? <div className="assistant-product-actions">{message.productIds.map((productId) => { const product = products.find((item) => item.id === productId); return product ? <button key={product.id} onClick={() => { setQuickProduct(product); setAssistantOpen(false); }}>View {product.name} · {formatINR(getCustomerPrice(product))} ↗</button> : null; })}</div> : null}</span></div>)}</div><div className="assistant-prompts"><button onClick={() => sendAssistantMessage("Help me choose a gift")}>Choose a gift</button><button onClick={() => sendAssistantMessage("Track my order")}>Track my order</button><button onClick={() => sendAssistantMessage("How do I care for my jewellery?")}>Jewellery care</button></div><form className="assistant-form" onSubmit={(event) => { event.preventDefault(); sendAssistantMessage(); }}><input value={assistantInput} onChange={(event) => setAssistantInput(event.target.value)} placeholder="Ask Fanzzy Assistant..." aria-label="Ask Fanzzy Assistant" /><button type="submit" aria-label="Send message">↗</button></form></aside></div>}
+      {assistantOpen && <div className="drawer-backdrop" onClick={() => setAssistantOpen(false)}><aside className="assistant-drawer" role="dialog" aria-modal="true" aria-labelledby="assistant-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">FANZZY AI</p><h2 id="assistant-title">How can I help?</h2></div><button aria-label="Close AI assistant" onClick={() => setAssistantOpen(false)}>×</button></div><div className="assistant-messages" aria-live="polite">{assistantMessages.map((message, index) => <div className={`assistant-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.text}{message.productIds?.length ? <div className="assistant-product-actions">{message.productIds.map((productId) => { const product = products.find((item) => item.id === productId); return product ? <button key={product.id} onClick={() => { openQuickProduct(product); setAssistantOpen(false); }}>View {product.name} · {formatINR(getCustomerPrice(product))} ↗</button> : null; })}</div> : null}</span></div>)}</div><div className="assistant-prompts"><button onClick={() => sendAssistantMessage("Help me choose a gift")}>Choose a gift</button><button onClick={() => sendAssistantMessage("Track my order")}>Track my order</button><button onClick={() => sendAssistantMessage("How do I care for my jewellery?")}>Jewellery care</button></div><form className="assistant-form" onSubmit={(event) => { event.preventDefault(); sendAssistantMessage(); }}><input value={assistantInput} onChange={(event) => setAssistantInput(event.target.value)} placeholder="Ask Fanzzy Assistant..." aria-label="Ask Fanzzy Assistant" /><button type="submit" aria-label="Send message">↗</button></form></aside></div>}
 
-      {searchOpen && <div className="overlay search-overlay" role="dialog" aria-modal="true" aria-label="Search"><div className="overlay-top"><span className="wordmark"><img src={siteAsset("fanzzy-mark.png")} alt="Fanzzy" className="brand-logo" /></span><button onClick={closeSearch}>Close&nbsp; ×</button></div><div className="search-content"><p className="eyebrow">SEARCH THE COLLECTION</p><div className="large-search"><input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Try “gold hoops”" /><span>⌕</span></div>{search && <div className="search-results">{filteredProducts.length ? filteredProducts.map((product) => <button key={product.id} onClick={() => { setQuickProduct(product); closeSearch(); }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(getCustomerPrice(product))}</small></span><b>↗</b></button>) : <p className="muted">No pieces found. Try another search.</p>}</div>}{!search && <div className="search-suggestions"><span>Trending now</span><button onClick={() => setSearch("hoops")}>Hoops</button><button onClick={() => setSearch("pearl")}>Pearls</button><button onClick={() => setSearch("chain")}>Chains</button></div>}</div></div>}
+      {searchOpen && <div className="overlay search-overlay" role="dialog" aria-modal="true" aria-label="Search"><div className="overlay-top"><span className="wordmark"><img src={siteAsset("fanzzy-mark.png")} alt="Fanzzy" className="brand-logo" /></span><button onClick={closeSearch}>Close&nbsp; ×</button></div><div className="search-content"><p className="eyebrow">SEARCH THE COLLECTION</p><div className="large-search"><input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Try “gold hoops”" /><span>⌕</span></div>{search && <div className="search-results">{filteredProducts.length ? filteredProducts.map((product) => <button key={product.id} onClick={() => { openQuickProduct(product) }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(getCustomerPrice(product))}</small></span><b>↗</b></button>) : <p className="muted">No pieces found. Try another search.</p>}</div>}{!search && <div className="search-suggestions"><span>Trending now</span><button onClick={() => setSearch("hoops")}>Hoops</button><button onClick={() => setSearch("pearl")}>Pearls</button><button onClick={() => setSearch("chain")}>Chains</button></div>}</div></div>}
 
       {orderConfirmation && <div className="drawer-backdrop" onClick={() => setOrderConfirmation(null)}><section className="order-confirmation" role="dialog" aria-modal="true" aria-labelledby="order-confirmation-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close payment confirmation" onClick={() => setOrderConfirmation(null)}>×</button><p className="eyebrow">PAYMENT SUCCESSFUL</p><h2 id="order-confirmation-title">Your payment is complete.</h2><p>We received <strong>{orderConfirmation.total}</strong> for order <strong>{orderConfirmation.id}</strong>. Your order has been confirmed.</p>{orderConfirmation.fulfillmentMethod === "pickup" && <p className="pickup-confirmation"><strong>Pickup from {orderConfirmation.pickupHubName || "hub"}</strong><br />{orderConfirmation.pickupHubPlace || "Pickup place saved with your order."}<br /><small>No delivery charges.</small></p>}{orderConfirmation.razorpayPaymentId && <p className="payment-reference">Payment ID: {orderConfirmation.razorpayPaymentId}</p>}<div className="confirmation-actions"><button className="button button-dark" onClick={() => downloadBill(orderConfirmation)}>Download bill <span>↗</span></button><button className="save-text" onClick={() => { setOrderConfirmation(null); setOrdersOpen(true); }}>View my orders</button></div></section></div>}
 
-      {savedOpen && <div className="drawer-backdrop" onClick={() => setSavedOpen(false)}><aside className="orders-drawer saved-drawer" role="dialog" aria-modal="true" aria-labelledby="saved-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR EDIT</p><h2 id="saved-title">Saved pieces</h2></div><button aria-label="Close saved pieces" onClick={() => setSavedOpen(false)}>×</button></div>{wishlist.length ? <div className="saved-list">{wishlist.map((productId) => { const product = products.find((item) => item.id === productId); return product ? <article className="saved-card" key={product.id}><button className="saved-product" onClick={() => { setQuickProduct(product); setSavedOpen(false); }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(getCustomerPrice(product))}</small></span><b>↗</b></button><div className="saved-card-actions"><button className="module-secondary" onClick={() => { addToCart(product); setSavedOpen(false); }}>Add to cart</button><button className="saved-remove" onClick={() => toggleWishlist(product.id)}>Remove</button></div></article> : null; })}</div> : <div className="orders-empty saved-empty"><div>♡</div><h3>Your edit is waiting.</h3><p>Tap the heart on any piece to keep it close while you decide.</p><button className="button button-dark" onClick={() => { setSavedOpen(false); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}>Explore pieces <span>↗</span></button></div>}</aside></div>}
+      {savedOpen && <div className="drawer-backdrop" onClick={() => setSavedOpen(false)}><aside className="orders-drawer saved-drawer" role="dialog" aria-modal="true" aria-labelledby="saved-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR EDIT</p><h2 id="saved-title">Saved pieces</h2></div><button aria-label="Close saved pieces" onClick={() => setSavedOpen(false)}>×</button></div>{wishlist.length ? <div className="saved-list">{wishlist.map((productId) => { const product = products.find((item) => item.id === productId); return product ? <article className="saved-card" key={product.id}><button className="saved-product" onClick={() => { openQuickProduct(product); setSavedOpen(false); }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(getCustomerPrice(product))}</small></span><b>↗</b></button><div className="saved-card-actions"><button className="module-secondary" onClick={() => { addToCart(product); setSavedOpen(false); }}>Add to cart</button><button className="saved-remove" onClick={() => toggleWishlist(product.id)}>Remove</button></div></article> : null; })}</div> : <div className="orders-empty saved-empty"><div>♡</div><h3>Your edit is waiting.</h3><p>Tap the heart on any piece to keep it close while you decide.</p><button className="button button-dark" onClick={() => { setSavedOpen(false); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}>Explore pieces <span>↗</span></button></div>}</aside></div>}
 
       {profileOpen && <div className="drawer-backdrop" onClick={() => setProfileOpen(false)}><aside className="orders-drawer profile-drawer" role="dialog" aria-modal="true" aria-labelledby="profile-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR FANZZY ACCOUNT</p><h2 id="profile-title">Profile</h2></div><button aria-label="Close profile" onClick={() => setProfileOpen(false)}>×</button></div>{authUser ? <div className="profile-content"><div className="profile-avatar" aria-hidden="true">{profileName.slice(0, 1).toUpperCase()}</div><p className="eyebrow">SIGNED IN</p><h3>{profileName}</h3><p className="profile-welcome">Your saved pieces, cart and order history stay together here.</p><dl className="profile-details"><div><dt>Login mobile number</dt><dd>{authUser.phone}</dd></div><div><dt>Account ID</dt><dd>{authUser.id}</dd></div></dl><div className="profile-shortcuts"><button onClick={() => { setProfileOpen(false); setOrdersOpen(true); }}><span>Orders</span><b>{orders.length.toString().padStart(2, "0")} ↗</b></button><button onClick={() => { setProfileOpen(false); setSavedOpen(true); }}><span>Saved</span><b>{wishlist.length.toString().padStart(2, "0")} ♡</b></button></div><button className="button button-dark full-width" onClick={() => { setProfileOpen(false); setCartOpen(true); }}>Open my cart <span>↗</span></button><button className="profile-sign-out" onClick={signOut}>Sign out</button></div> : <div className="profile-content profile-signed-out"><div className="profile-avatar" aria-hidden="true">○</div><p className="eyebrow">NOT SIGNED IN</p><h3>Welcome to Fanzzy.</h3><p>Sign in with a one-time SMS or voice code to keep your cart and orders connected to your mobile number.</p><button className="button button-dark full-width" onClick={() => { setProfileOpen(false); setAuthMessage(""); setAuthOpen(true); }}>Sign in with mobile OTP <span>↗</span></button></div>}</aside></div>}
 
