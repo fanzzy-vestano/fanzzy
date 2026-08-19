@@ -1884,7 +1884,9 @@ export default function Home() {
             return;
           }
           if (normalizedVariant && updated.variants?.length) {
-            const variantIndex = updated.variants.findIndex((variant) => normalizeInventoryKey(variant.name) === normalizedVariant);
+            const variantIndex = updated.variants.findIndex((variant, index) =>
+              normalizeInventoryKey(variant.name || `Option ${index + 1}`) === normalizedVariant,
+            );
             if (variantIndex >= 0) {
               const variant = updated.variants[variantIndex];
               updated.variants[variantIndex] = {

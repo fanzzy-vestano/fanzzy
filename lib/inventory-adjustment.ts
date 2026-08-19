@@ -125,7 +125,11 @@ export async function adjustOrderInventory(order: InventoryOrder, config: Invent
       const normalizedVariant = normalizeSelection(item.variantName);
       const variantsKey = resolveSettingKey(variants, sku);
       const productVariants = variants[variantsKey] || [];
-      const variantIndex = productVariants.findIndex((variant) => normalizeSelection(variant.name) === normalizedVariant);
+      // Storefront labels an unnamed choice as “Option 1”, “Option 2”, etc.
+      // Match that generated label here as well so its stock bucket is found.
+      const variantIndex = productVariants.findIndex((variant, index) =>
+        normalizeSelection(variant.name || `Option ${index + 1}`) === normalizedVariant,
+      );
       const selectedVariant = variantIndex >= 0 ? productVariants[variantIndex] : undefined;
       if (!selectedVariant || !Number.isFinite(Number(selectedVariant.stock))) {
         if (!hasBaseStock) unresolvedProductIds.add(rawSku || sku);

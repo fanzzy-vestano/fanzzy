@@ -205,7 +205,9 @@ async function adjustInventory(order: StoredOrder): Promise<InventoryAdjustment>
       const normalizedVariant = normalizeSelection(item.variantName);
       const variantsKey = resolveSettingKey(variants, sku);
       const productVariants = variants[variantsKey] || [];
-      const variantIndex = productVariants.findIndex((variant) => normalizeSelection(variant.name) === normalizedVariant);
+      const variantIndex = productVariants.findIndex((variant, index) =>
+        normalizeSelection(variant.name || `Option ${index + 1}`) === normalizedVariant,
+      );
       const selectedVariant = variantIndex >= 0 ? productVariants[variantIndex] : undefined;
       if (!selectedVariant || !Number.isFinite(Number(selectedVariant.stock))) {
         if (!hasBaseStock) unresolvedProductIds.add(rawSku || sku);

@@ -12,6 +12,7 @@ const { d1, r2 } = hostingConfig;
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 const defaultCustomerAuthApiUrl = "https://pdrcrkxeyqxqgpwfxqpu.supabase.co/functions/v1/customer-auth";
 const defaultRazorpayApiUrl = "https://fanzzy-razorpay-api.fanzzy.workers.dev";
+const usesExternalPaymentApi = process.env.GITHUB_PAGES === "true" || process.env.NODE_ENV === "production";
 
 const localBindingConfig = {
   main: "./worker/index.ts",
@@ -59,9 +60,7 @@ export default defineConfig(async () => {
           : "",
       ),
       "process.env.NEXT_PUBLIC_RAZORPAY_API_URL": JSON.stringify(
-        process.env.GITHUB_PAGES === "true"
-          ? process.env.RAZORPAY_API_URL?.trim() || defaultRazorpayApiUrl
-          : "",
+        usesExternalPaymentApi ? process.env.RAZORPAY_API_URL?.trim() || defaultRazorpayApiUrl : "",
       ),
     },
     server: isCodexSeatbeltSandbox
