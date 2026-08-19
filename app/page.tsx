@@ -667,13 +667,26 @@ export default function Home() {
 
   useEffect(() => {
     const syncProducts = async () => {
-      const remote = await fetchCatalogProducts();
-      const variantsRemote = await fetchStoreSetting("productVariants");
-      const variantTypeRemote = await fetchStoreSetting("productVariantType");
-      const sizesRemote = await fetchStoreSetting("productSizes");
-      const sizeStockRemote = await fetchStoreSetting("productSizeStock");
-      const imageAdjustmentsRemote = await fetchStoreSetting("productImageAdjustments");
-      const billNameRemote = await fetchStoreSetting("productBillNames");
+      // Load the shared catalog and its product settings together. Previously
+      // these requests ran one by one, leaving an old cached list on screen
+      // while the storefront waited for every product setting to finish.
+      const [
+        remote,
+        variantsRemote,
+        variantTypeRemote,
+        sizesRemote,
+        sizeStockRemote,
+        imageAdjustmentsRemote,
+        billNameRemote,
+      ] = await Promise.all([
+        fetchCatalogProducts(),
+        fetchStoreSetting("productVariants"),
+        fetchStoreSetting("productVariantType"),
+        fetchStoreSetting("productSizes"),
+        fetchStoreSetting("productSizeStock"),
+        fetchStoreSetting("productImageAdjustments"),
+        fetchStoreSetting("productBillNames"),
+      ]);
       let variantsMap: Record<string, ProductVariant[]> = {};
       let variantTypeMap: Record<string, ProductVariantType> = {};
       let sizesMap: Record<string, string[]> = {};
