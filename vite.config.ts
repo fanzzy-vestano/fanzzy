@@ -12,7 +12,6 @@ const { d1, r2 } = hostingConfig;
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 const defaultCustomerAuthApiUrl = "https://pdrcrkxeyqxqgpwfxqpu.supabase.co/functions/v1/customer-auth";
 const defaultRazorpayApiUrl = "https://fanzzy-razorpay-api.fanzzy.workers.dev";
-const usesExternalPaymentApi = process.env.GITHUB_PAGES === "true" || process.env.NODE_ENV === "production";
 
 const localBindingConfig = {
   main: "./worker/index.ts",
@@ -36,7 +35,11 @@ const localBindingConfig = {
     : [],
 };
 
-export default defineConfig(async () => {
+export default defineConfig(async ({ command }) => {
+  // Sites runs Vite's build command without setting GITHUB_PAGES. Use the
+  // deployed payment worker for every production bundle, but retain local API
+  // routes while running the development server.
+  const usesExternalPaymentApi = process.env.GITHUB_PAGES === "true" || command === "build";
   // Keep Wrangler and Miniflare state project-local. These are non-secret tool
   // settings; application environment belongs in ignored `.env*` files.
   process.env.WRANGLER_WRITE_LOGS ??= "false";
