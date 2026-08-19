@@ -1,7 +1,23 @@
+import { adjustOrderInventory, type InventoryOrder } from "../lib/inventory-adjustment";
+
 type WorkerEnv = {
   RAZORPAY_KEY_ID: string;
   RAZORPAY_KEY_SECRET: string;
+  SUPABASE_URL?: string;
+  SUPABASE_SERVICE_ROLE_KEY?: string;
+  SUPABASE_PUBLISHABLE_KEY?: string;
 };
+
+type StoredOrder = InventoryOrder & {
+  id: string;
+  paymentStatus?: "pending" | "paid";
+  razorpayOrderId?: string;
+  razorpayPaymentId?: string;
+  inventoryAdjusted?: boolean;
+};
+
+const defaultSupabaseUrl = "https://pdrcrkxeyqxqgpwfxqpu.supabase.co";
+const defaultSupabasePublishableKey = "sb_publishable_OTSfS6G2tlrAGINfyY3VGA_yi_3BPAV";
 
 const allowedOrigins = new Set([
   "https://fanzzy.in",
@@ -24,6 +40,79 @@ const json = (request: Request, body: Record<string, unknown>, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: headersFor(request) });
 
 const razorpayAuth = (env: WorkerEnv) => `Basic ${btoa(`${env.RAZORPAY_KEY_ID}:${env.RAZORPAY_KEY_SECRET}`)}`;
+
+const supabaseConfig = (env: WorkerEnv) => {
+  const supabaseKey = env.SUPABASE_SERVICE_ROLE_KEY || env.SUPABASE_PUBLISHABLE_KEY || defaultSupabasePublishableKey;
+  return {
+    supabaseUrl: (env.SUPABASE_URL || defaultSupabaseUrl).replace(/\/$/, ""),
+    supabaseKey,
+  };
+};
+
+const supabaseHeaders = (env: WorkerEnv) => {
+  const { supabaseKey } = supabaseConfig(env);
+  return {
+    apikey: supabaseKey,
+    Authorization: `Bearer ${supabaseKey}`,
+    "Content-Type": "application/json",
+  };
+};
+
+async function readOrders(env: WorkerEnv) {
+  const { supabaseUrl } = supabaseConfig(env);
+  const response = await fetch(`${supabaseUrl}/rest/v1/store_settings?key=eq.orders&select=value`, {
+    headers: supabaseHeaders(env),
+  });
+  if (!response.ok) throw new Error("Could not read saved orders");
+  const rows = await response.json() as Array<{ value?: string }>;
+  try {
+    const parsed = JSON.parse(rows[0]?.value || "[]") as unknown;
+    return Array.isArray(parsed) ? parsed as StoredOrder[] : [];
+  } catch {
+    return [] as StoredOrder[];
+  }
+}
+
+async function writeOrders(env: WorkerEnv, orders: StoredOrder[]) {
+  const { supabaseUrl } = supabaseConfig(env);
+  const response = await fetch(`${supabaseUrl}/rest/v1/store_settings?on_conflict=key`, {
+    method: "POST",
+    headers: { ...supabaseHeaders(env), Prefer: "resolution=merge-duplicates,return=minimal" },
+    body: JSON.stringify([{ key: "orders", value: JSON.stringify(orders), updated_at: new Date().toISOString() }]),
+  });
+  if (!response.ok) throw new Error("Could not save the confirmed payment");
+}
+
+async function finalizeOrderInventory(
+  env: WorkerEnv,
+  payment: { id?: string; order_id?: string; notes?: Record<string, unknown> },
+) {
+  const orders = await readOrders(env);
+  const notedOrderId = typeof payment.notes?.fanzzy_order_id === "string" ? payment.notes.fanzzy_order_id.trim() : "";
+  const order = orders.find((candidate) => candidate.razorpayPaymentId === payment.id)
+    || orders.find((candidate) => candidate.razorpayOrderId && candidate.razorpayOrderId === payment.order_id)
+    || (notedOrderId ? orders.find((candidate) => candidate.id === notedOrderId) : undefined);
+
+  // The order is saved before checkout opens. If it cannot be found, do not
+  // touch inventory: the next verified attempt can safely retry it.
+  if (!order) return false;
+  if (order.paymentStatus === "paid" && order.inventoryAdjusted === true) return true;
+
+  order.paymentStatus = "paid";
+  order.razorpayOrderId = payment.order_id || order.razorpayOrderId;
+  order.razorpayPaymentId = payment.id || order.razorpayPaymentId;
+  order.inventoryAdjusted = false;
+  await writeOrders(env, orders);
+
+  try {
+    const adjustment = await adjustOrderInventory(order, supabaseConfig(env));
+    order.inventoryAdjusted = adjustment.complete;
+  } catch {
+    order.inventoryAdjusted = false;
+  }
+  await writeOrders(env, orders);
+  return order.inventoryAdjusted === true;
+}
 
 const createOrder = async (request: Request, env: WorkerEnv) => {
   let body: { amount?: unknown; receipt?: unknown; fanzzyOrderId?: unknown };
@@ -77,13 +166,14 @@ const verifyPayment = async (request: Request, env: WorkerEnv) => {
 
   try {
     const response = await fetch(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}`, { headers: { Authorization: razorpayAuth(env) } });
-    const payment = await response.json() as { id?: string; order_id?: string; status?: string; error?: { description?: string } };
+    const payment = await response.json() as { id?: string; order_id?: string; status?: string; notes?: Record<string, unknown>; error?: { description?: string } };
     if (!response.ok || payment.id !== paymentId || payment.order_id !== orderId) {
       return json(request, { error: payment.error?.description || "Razorpay payment could not be confirmed" }, 502);
     }
-    return json(request, { verified: true, razorpayOrderId: orderId, razorpayPaymentId: paymentId });
-  } catch {
-    return json(request, { error: "Razorpay payment confirmation is temporarily unavailable" }, 502);
+    const inventoryAdjusted = await finalizeOrderInventory(env, payment);
+    return json(request, { verified: true, razorpayOrderId: orderId, razorpayPaymentId: paymentId, inventoryAdjusted });
+  } catch (error) {
+    return json(request, { error: error instanceof Error ? error.message : "Razorpay payment confirmation is temporarily unavailable" }, 502);
   }
 };
 

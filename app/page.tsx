@@ -1945,7 +1945,7 @@ export default function Home() {
       window.localStorage.setItem("fanzzy-orders", JSON.stringify(Array.from(merged.values())));
       window.dispatchEvent(new Event("fanzzy-orders-updated"));
       setOrderConfirmation(existingPayment);
-      decrementLocalInventoryOnce(existingPayment);
+      if (existingPayment.inventoryAdjusted === true) decrementLocalInventoryOnce(existingPayment);
       setCart({});
       setCartVariants({});
       setCartPromotionLines({});
@@ -1973,7 +1973,7 @@ export default function Home() {
     setCouponInput("");
     setAppliedCoupon(null);
     setIsPaying(false);
-    decrementLocalInventoryOnce(newOrder);
+    if (newOrder.inventoryAdjusted === true) decrementLocalInventoryOnce(newOrder);
     window.dispatchEvent(new Event("fanzzy-products-updated"));
     announce(`${newOrder.id} placed successfully`);
   };
@@ -2098,7 +2098,7 @@ export default function Home() {
               });
               const verification = await readRazorpayResponse<{ verified?: boolean; error?: string; inventoryAdjusted?: boolean }>(verifyResponse);
               if (!verifyResponse.ok || !verification.verified) throw new Error(verification.error || "Payment verification failed");
-              const paidOrder = { ...pendingOrder, paymentStatus: "paid" as const, razorpayOrderId: payment.razorpay_order_id, razorpayPaymentId: payment.razorpay_payment_id, inventoryAdjusted: verification.inventoryAdjusted !== false };
+              const paidOrder = { ...pendingOrder, paymentStatus: "paid" as const, razorpayOrderId: payment.razorpay_order_id, razorpayPaymentId: payment.razorpay_payment_id, inventoryAdjusted: verification.inventoryAdjusted === true };
               await persistPaidOrder(paidOrder);
             } catch (error) {
               setIsPaying(false);
