@@ -10,6 +10,8 @@ const OTP_WINDOW_MS = 15 * 60 * 1000;
 const OTP_MAX_REQUESTS = 5;
 const OTP_VERIFY_WINDOW_MS = 10 * 60 * 1000;
 const OTP_MAX_VERIFY_ATTEMPTS = 8;
+// Keep the external session valid across browser restarts until the customer signs out.
+const CUSTOMER_SESSION_MAX_AGE_MS = 3650 * 24 * 60 * 60 * 1000;
 
 type PendingOtp = { kind: "pending"; phone: string; code: string; expiresAt: number };
 type CustomerSession = { kind: "session"; id: string; phone: string; expiresAt: number };
@@ -178,7 +180,7 @@ const route = async (request: Request) => {
     const code = String(body.code || "").replace(/\D/g, "");
     if (!pending) return response({ error: "OTP expired" }, 410, origin);
     if (code.length !== 6 || code !== pending.code) return response({ error: "Invalid OTP. Please try again." }, 401, origin);
-    return response({ user: { id: `phone:${pending.phone}`, phone: `+${pending.phone}` }, sessionToken: await createToken({ kind: "session", id: `phone:${pending.phone}`, phone: `+${pending.phone}`, expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000 }) }, 200, origin);
+    return response({ user: { id: `phone:${pending.phone}`, phone: `+${pending.phone}` }, sessionToken: await createToken({ kind: "session", id: `phone:${pending.phone}`, phone: `+${pending.phone}`, expiresAt: Date.now() + CUSTOMER_SESSION_MAX_AGE_MS }) }, 200, origin);
   }
 
   if (action === "session") {

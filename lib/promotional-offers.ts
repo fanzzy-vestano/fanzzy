@@ -77,8 +77,10 @@ export const defaultPromotionForm = () => ({
   allowMixVariants: true,
   allowDifferentColours: true,
   allowDifferentSizes: true,
-  allowSameVariantMultipleTimes: false,
-  maxQuantityPerVariant: 1,
+  // Buy 1 Get X offers may give several copies of the same product option.
+  // The storefront still checks live inventory before adding the offer.
+  allowSameVariantMultipleTimes: true,
+  maxQuantityPerVariant: 4,
   requireExactFreeQuantity: true,
   allowDifferentProducts: false,
   autoSelectOnlyOption: true,

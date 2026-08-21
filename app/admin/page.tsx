@@ -20,7 +20,7 @@ import {
   type ProductVariantType,
   uploadStoreImage,
 } from "../../lib/supabase/catalog";
-import { printOrderBill } from "../../lib/order-bill";
+import { defaultBillDesignSettings, printOrderBill, type BillDesignSettings } from "../../lib/order-bill";
 import { supabase } from "../../lib/supabase/client";
 import {
   defaultPromotionForm,
@@ -30,7 +30,6 @@ import {
   promotionStorageKey,
   type PromotionOffer,
   type PromotionOfferStatus,
-  type PromotionOfferType,
   type PromotionSelection,
 } from "../../lib/promotional-offers";
 import "../globals.css";
@@ -69,6 +68,16 @@ type ProductImageAdjustments = {
   hoverImage?: ImageAdjustments;
   variants?: ImageAdjustments[];
 };
+type ProductDamageRecord = {
+  id: string;
+  sku: string;
+  productName: string;
+  quantity: number;
+  reason: string;
+  stockScope: string;
+  createdAt: string;
+};
+type ProductDamageMap = Record<string, ProductDamageRecord[]>;
 type MarketingKind = "Campaign" | "Coupon" | "Newsletter";
 type MarketingStatus = "Active" | "Scheduled" | "Draft";
 type MarketingRecord = {
@@ -92,7 +101,7 @@ type OrderDateFilter =
   | "this-month"
   | "all-time"
   | "custom";
-type ReportView = "overview" | "category" | "item" | "top-selling" | "inventory" | "orders";
+type ReportView = "overview" | "sales" | "category" | "item" | "top-selling" | "inventory" | "orders" | "damaged";
 type AdminPermission =
   | "Overview"
   | "Products"
@@ -102,7 +111,7 @@ type AdminPermission =
   | "Orders"
   | "Customers"
   | "Marketing"
-  | "Buy One Get X & Bundle Offers"
+  | "Buy 1 Get X Free"
   | "Homepage"
   | "Delivery charge"
   | "Hub"
@@ -124,7 +133,7 @@ const allAdminPermissions: AdminPermission[] = [
   "Orders",
   "Customers",
   "Marketing",
-  "Buy One Get X & Bundle Offers",
+  "Buy 1 Get X Free",
   "Homepage",
   "Delivery charge",
   "Hub",
@@ -400,6 +409,7 @@ const localImageToFile = async (source: string, name: string) => {
   return new File([blob], name, { type: blob.type || "image/webp" });
 };
 const localProductVariantsKey = "fanzzy-product-variants";
+const localProductDamagesKey = "fanzzy-product-damages";
 const parseProductSizes = (value: string) => Array.from(new Set(value.split(",").map((size) => size.trim()).filter(Boolean)));
 const normalizeSizeStock = (value: Record<string, number | ""> | undefined): Record<string, number> =>
   Object.fromEntries(Object.entries(value || {}).filter(([, quantity]) => quantity !== "" && Number.isFinite(Number(quantity))).map(([size, quantity]) => [size, Math.max(0, Math.floor(Number(quantity)))]));
@@ -481,6 +491,15 @@ const persistCatalog = (catalog: AdminProduct[]) => {
     }
   }
   window.dispatchEvent(new Event("fanzzy-products-updated"));
+};
+const persistProductDamages = (damages: ProductDamageMap) => {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(localProductDamagesKey, JSON.stringify(damages));
+  } catch {
+    // Product images can fill localStorage; damage history remains in React/Supabase.
+  }
+  window.dispatchEvent(new Event("fanzzy-product-damages-updated"));
 };
 const toCatalogProduct = (product: AdminProduct) => ({
   name: product.name,
@@ -588,7 +607,7 @@ const menu = [
   { label: "Orders", icon: "↗", count: "12" },
   { label: "Customers", icon: "♧" },
   { label: "Marketing", icon: "◈" },
-  { label: "Buy One Get X & Bundle Offers", icon: "✦" },
+  { label: "Buy 1 Get X Free", icon: "✦" },
   { label: "Homepage", icon: "⌂" },
   { label: "Delivery charge", icon: "₹" },
   { label: "Hub", icon: "⌖" },
@@ -1048,11 +1067,13 @@ function AdminDashboard() {
               {reportsOpen && <div className="admin-subnav">
                 {([
                   ["overview", "All reports"],
+                  ["sales", "Sales report"],
                   ["category", "Category report"],
                   ["item", "Item report"],
                   ["top-selling", "Top-selling item report"],
                   ["inventory", "Inventory / aged report"],
                   ["orders", "Order status report"],
+                  ["damaged", "Damaged items report"],
                 ] as Array<[ReportView, string]>).map(([view, label]) => <button key={view} className={active === "Reports" && reportView === view ? "active" : ""} onClick={() => { setActive("Reports"); setReportView(view); setReportsOpen(true); }}>{label}</button>)}
               </div>}
             </div>
@@ -1075,15 +1096,15 @@ function AdminDashboard() {
             </button>
           ))}
         </nav>
-        <div className="sidebar-bottom">
-          <button onClick={() => canAccess("Settings") ? setActive("Settings") : notify(`${activeRole.title} cannot access Settings`)}>
+        <div className="sidebar-actions">
+          <button className={active === "Settings" ? "active" : ""} onClick={() => canAccess("Settings") ? setActive("Settings") : notify(`${activeRole.title} cannot access Settings`)}>
             <span className="nav-icon">⚙</span>Settings
           </button>
           <button onClick={() => void logOut()}>
             <span className="nav-icon">↪</span>Log out
           </button>
           <a href={`${siteBasePath}/`}>
-            <span className="nav-icon">↩</span>View storefront
+            <span className="nav-icon">↩</span>Storefront
           </a>
         </div>
       </aside>
@@ -1572,10 +1593,10 @@ const moduleContent: Record<
     secondary: "New coupon",
     rows: [],
   },
-  "Buy One Get X & Bundle Offers": {
+  "Buy 1 Get X Free": {
     eyebrow: "PROMOTIONS",
-    title: "Buy One Get X & Bundle Offers",
-    description: "Create variant-aware promotions, fixed-price bundles, and controlled free-item offers.",
+    title: "Buy 1 Get X Free",
+    description: "Create one-product offers with 1–4 free variants or sizes.",
     primary: "Create offer",
     secondary: "View report",
     rows: [],
@@ -1634,7 +1655,7 @@ function ModuleWorkspace({
     return <DeliveryChargeWorkspace onNotify={onNotify} />;
   if (module === "Hub") return <HubWorkspace onNotify={onNotify} />;
   if (module === "Marketing") return <MarketingWorkspace onNotify={onNotify} />;
-  if (module === "Buy One Get X & Bundle Offers") return <PromotionOffersWorkspace onNotify={onNotify} />;
+  if (module === "Buy 1 Get X Free") return <PromotionOffersWorkspace onNotify={onNotify} />;
   if (module === "Collections")
     return <CollectionsWorkspace onNotify={onNotify} />;
   if (module === "Customers") return <CustomersWorkspace onNotify={onNotify} />;
@@ -2002,6 +2023,7 @@ function ProductImageScanner({
 }
 
 type ReportPeriod = "this-month" | "last-month" | "all-time" | "custom";
+type ReportMovementFilter = "all" | "sales" | "slow" | "no-sales" | "out-of-stock";
 type ProductReportRow = {
   product: AdminProduct;
   units: number;
@@ -2027,6 +2049,8 @@ function ReportsWorkspace({
   const [toDate, setToDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [orders, setOrders] = useState<OrderRecord[]>(adminOrders);
   const [products, setProducts] = useState<AdminProduct[]>(adminProducts);
+  const [productDamages, setProductDamages] = useState<ProductDamageMap>({});
+  const [itemMovementFilter, setItemMovementFilter] = useState<ReportMovementFilter>("all");
 
   useEffect(() => {
     let active = true;
@@ -2076,6 +2100,40 @@ function ReportsWorkspace({
     };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    const readLocalDamages = () => {
+      const stored = window.localStorage.getItem(localProductDamagesKey);
+      if (!stored) return;
+      try {
+        const parsed = JSON.parse(stored) as ProductDamageMap;
+        if (active && parsed && typeof parsed === "object" && !Array.isArray(parsed)) setProductDamages(parsed);
+      } catch {
+        // Ignore malformed local damage history.
+      }
+    };
+    const loadDamages = async () => {
+      const remote = await fetchStoreSetting("productDamages");
+      const stored = remote.value || window.localStorage.getItem(localProductDamagesKey);
+      if (!stored) return;
+      try {
+        const parsed = JSON.parse(stored) as ProductDamageMap;
+        if (active && parsed && typeof parsed === "object" && !Array.isArray(parsed)) setProductDamages(parsed);
+      } catch {
+        readLocalDamages();
+      }
+    };
+    const runLoadDamages = () => { void loadDamages().catch(() => undefined); };
+    runLoadDamages();
+    window.addEventListener("fanzzy-product-damages-updated", readLocalDamages);
+    window.addEventListener("storage", readLocalDamages);
+    return () => {
+      active = false;
+      window.removeEventListener("fanzzy-product-damages-updated", readLocalDamages);
+      window.removeEventListener("storage", readLocalDamages);
+    };
+  }, []);
+
   const latestDate = new Date().toISOString().slice(0, 10);
   const filteredOrders = useMemo(() => {
     let from = "0000-01-01";
@@ -2095,13 +2153,41 @@ function ReportsWorkspace({
     return orders.filter((order) => order.date >= from && order.date <= to);
   }, [fromDate, latestDate, orders, period, toDate]);
 
+  const filteredDamages = useMemo(() => {
+    let from = "0000-01-01";
+    let to = "9999-12-31";
+    if (period === "this-month") {
+      from = `${latestDate.slice(0, 8)}01`;
+      to = latestDate;
+    }
+    if (period === "last-month") {
+      from = "2026-07-01";
+      to = "2026-07-31";
+    }
+    if (period === "custom") {
+      from = fromDate || from;
+      to = toDate || to;
+    }
+    return Object.values(productDamages)
+      .flat()
+      .filter((record) => {
+        const date = String(record.createdAt || "").slice(0, 10);
+        return date >= from && date <= to;
+      })
+      .sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)));
+  }, [fromDate, latestDate, period, productDamages, toDate]);
+
   const report = useMemo(() => {
-    const productsByName = new Map(products.map((product) => [reportNameKey(product.name), product]));
+    const productsByKey = new Map<string, AdminProduct>();
+    products.forEach((product) => {
+      productsByKey.set(reportNameKey(product.name), product);
+      productsByKey.set(reportNameKey(product.sku), product);
+    });
     const sales = new Map<string, ProductReportRow>();
     products.forEach((product) => sales.set(product.sku, { product, units: 0, revenue: 0 }));
     filteredOrders.forEach((order) => {
       order.items?.forEach((item) => {
-        const match = productsByName.get(reportNameKey(item.name));
+        const match = (item.productId && productsByKey.get(reportNameKey(item.productId))) || productsByKey.get(reportNameKey(item.name));
         if (!match) return;
         const row = sales.get(match.sku);
         if (!row) return;
@@ -2110,60 +2196,162 @@ function ReportsWorkspace({
         row.revenue += parseReportMoney(item.price) * units;
       });
     });
-    const productRows = Array.from(sales.values());
-    const topProducts = [...productRows].filter((row) => row.units > 0).sort((a, b) => b.units - a.units || b.revenue - a.revenue).slice(0, 5);
-    const agedProducts = [...productRows].filter((row) => row.product.stock > 0).sort((a, b) => a.units - b.units || b.product.stock - a.product.stock).slice(0, 5);
-    const categories = new Map<string, { units: number; revenue: number }>();
+    const productRows = Array.from(sales.values()).map((row) => {
+      const cost = parseReportMoney(row.product.cost) * row.units;
+      const stockValue = parseReportMoney(row.product.price) * Math.max(0, row.product.stock);
+      const costValue = parseReportMoney(row.product.cost) * Math.max(0, row.product.stock);
+      return {
+        ...row,
+        cost,
+        profit: row.revenue - cost,
+        stockValue,
+        costValue,
+        movement: row.product.stock <= 0 ? "Out of stock" : row.units === 0 ? "No sales" : row.units < 3 ? "Slow moving" : "Moving",
+      };
+    });
+    const topProducts = [...productRows].filter((row) => row.units > 0).sort((a, b) => b.units - a.units || b.revenue - a.revenue).slice(0, 10);
+    const agedProducts = [...productRows].filter((row) => row.product.stock > 0).sort((a, b) => a.units - b.units || b.product.stock - a.product.stock).slice(0, 10);
+    const inventoryRows = [...productRows].sort((a, b) => Number(a.product.stock > 0) - Number(b.product.stock > 0) || a.units - b.units || b.product.stock - a.product.stock);
+    const categories = new Map<string, { products: number; units: number; revenue: number; profit: number; stockUnits: number; stockValue: number; costValue: number }>();
     productRows.forEach((row) => {
-      const current = categories.get(row.product.category) ?? { units: 0, revenue: 0 };
+      const current = categories.get(row.product.category) ?? { products: 0, units: 0, revenue: 0, profit: 0, stockUnits: 0, stockValue: 0, costValue: 0 };
+      current.products += 1;
       current.units += row.units;
       current.revenue += row.revenue;
+      current.profit += row.profit;
+      current.stockUnits += Math.max(0, row.product.stock);
+      current.stockValue += row.stockValue;
+      current.costValue += row.costValue;
       categories.set(row.product.category, current);
     });
-    const categoryRows = Array.from(categories.entries()).map(([name, values]) => ({ name, ...values })).sort((a, b) => b.units - a.units || b.revenue - a.revenue);
+    const categoryRows = Array.from(categories.entries()).map(([name, values]) => ({ name, ...values })).sort((a, b) => b.revenue - a.revenue || b.units - a.units);
+    const damagedRows = filteredDamages.map((record) => {
+      const product = (record.sku && productsByKey.get(reportNameKey(record.sku))) || productsByKey.get(reportNameKey(record.productName));
+      const quantity = Math.max(0, Number(record.quantity) || 0);
+      const unitPrice = product ? parseReportMoney(product.price) : 0;
+      const unitCost = product ? parseReportMoney(product.cost) : 0;
+      return {
+        ...record,
+        productName: product?.name || record.productName || record.sku,
+        category: product?.category || "Archived product",
+        quantity,
+        unitPrice,
+        unitCost,
+        retailValue: unitPrice * quantity,
+        costValue: unitCost * quantity,
+      };
+    });
     const totalRevenue = filteredOrders.reduce((sum, order) => sum + parseReportMoney(order.total), 0);
     const unitsSold = productRows.reduce((sum, row) => sum + row.units, 0);
     const stockValue = products.reduce((sum, product) => sum + parseReportMoney(product.price) * Math.max(0, product.stock), 0);
-    const statuses = ["Delivered", "Processing", "Shipped", "Packed", "Cancelled"].map((status) => ({
+    const totalCost = productRows.reduce((sum, row) => sum + row.cost, 0);
+    const statusNames = Array.from(new Set(["Delivered", "Processing", "Shipped", "Packed", "Cancelled", ...filteredOrders.map((order) => order.status)]));
+    const statuses = statusNames.map((status) => ({
       name: status,
       count: filteredOrders.filter((order) => order.status === status).length,
     }));
-    return { topProducts, agedProducts, categoryRows, totalRevenue, unitsSold, stockValue, statuses, hasItemSales: unitsSold > 0 };
-  }, [filteredOrders, products]);
+    const daily = new Map<string, { revenue: number; orders: number; units: number }>();
+    filteredOrders.forEach((order) => {
+      const current = daily.get(order.date) ?? { revenue: 0, orders: 0, units: 0 };
+      current.revenue += parseReportMoney(order.total);
+      current.orders += 1;
+      current.units += order.items?.reduce((sum, item) => sum + Math.max(0, Number(item.quantity) || 0), 0) || 0;
+      daily.set(order.date, current);
+    });
+    const dailyRows = Array.from(daily.entries()).map(([date, values]) => ({ date, ...values })).sort((a, b) => b.date.localeCompare(a.date));
+    const payments = [
+      { name: "Online", count: filteredOrders.filter((order) => Boolean(order.razorpayPaymentId)).length, revenue: filteredOrders.filter((order) => Boolean(order.razorpayPaymentId)).reduce((sum, order) => sum + parseReportMoney(order.total), 0) },
+      { name: "Cash / other", count: filteredOrders.filter((order) => !order.razorpayPaymentId).length, revenue: filteredOrders.filter((order) => !order.razorpayPaymentId).reduce((sum, order) => sum + parseReportMoney(order.total), 0) },
+    ];
+    const fulfilment = [
+      { name: "Delivery", count: filteredOrders.filter((order) => order.fulfillmentMethod !== "pickup").length },
+      { name: "Pickup", count: filteredOrders.filter((order) => order.fulfillmentMethod === "pickup").length },
+    ];
+    return {
+      topProducts,
+      agedProducts,
+      inventoryRows,
+      allProductRows: [...productRows].sort((a, b) => b.revenue - a.revenue || b.units - a.units),
+      categoryRows,
+      damagedRows,
+      damagedUnits: damagedRows.reduce((sum, row) => sum + row.quantity, 0),
+      damagedRetailValue: damagedRows.reduce((sum, row) => sum + row.retailValue, 0),
+      damagedCostValue: damagedRows.reduce((sum, row) => sum + row.costValue, 0),
+      dailyRows,
+      payments,
+      fulfilment,
+      orderRows: [...filteredOrders].sort((a, b) => b.date.localeCompare(a.date)),
+      totalRevenue,
+      unitsSold,
+      stockValue,
+      costValue: productRows.reduce((sum, row) => sum + row.costValue, 0),
+      totalCost,
+      grossProfit: totalRevenue - totalCost,
+      averageOrder: filteredOrders.length ? totalRevenue / filteredOrders.length : 0,
+      stockUnits: products.reduce((sum, product) => sum + Math.max(0, product.stock), 0),
+      statuses,
+      hasItemSales: unitsSold > 0,
+    };
+  }, [filteredDamages, filteredOrders, products]);
 
   const periodLabel = period === "this-month" ? "This month" : period === "last-month" ? "Last month" : period === "all-time" ? "All dates" : `${fromDate || "Start"} → ${toDate || "End"}`;
   const maxCategoryUnits = Math.max(1, report.categoryRows[0]?.units ?? 0);
   const showProductReport = view === "overview" || view === "item" || view === "top-selling";
+  const showSalesReport = view === "sales";
   const showCategoryReport = view === "overview" || view === "category";
   const showInventoryReport = view === "overview" || view === "inventory";
   const showOrderReport = view === "overview" || view === "orders";
+  const showDamagedReport = view === "overview" || view === "damaged";
+  const detailTitle = view === "overview" ? "All report details" : view === "sales" ? "Sales report details" : view === "category" ? "Category report details" : view === "item" ? "Item report details" : view === "top-selling" ? "Top-selling item details" : view === "inventory" ? "Inventory / aged report details" : view === "orders" ? "Order status report details" : "Damaged items report details";
+  const itemReportRows = report.allProductRows.filter((row) => {
+    if (itemMovementFilter === "sales") return row.units > 0 && row.product.stock > 0;
+    if (itemMovementFilter === "slow") return row.movement === "Slow moving";
+    if (itemMovementFilter === "no-sales") return row.movement === "No sales";
+    if (itemMovementFilter === "out-of-stock") return row.product.stock <= 0;
+    return true;
+  });
   const exportReport = () => {
     const escapeCsv = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
     let headers: string[] = [];
     let rows: unknown[][] = [];
-    if (view === "category") {
-      headers = ["category", "units_sold", "revenue"];
-      rows = report.categoryRows.map((category) => [category.name, category.units, formatAdminCurrency(category.revenue)]);
-    } else if (view === "item" || view === "top-selling") {
-      headers = ["product", "sku", "category", "units_sold", "revenue", "stock"];
-      rows = report.topProducts.map((row) => [row.product.name, row.product.sku, row.product.category, row.units, formatAdminCurrency(row.revenue), row.product.stock]);
+    if (view === "sales") {
+      headers = ["date", "orders", "units_sold", "revenue"];
+      rows = report.dailyRows.map((day) => [day.date, day.orders, day.units, formatAdminCurrency(day.revenue)]);
+    } else if (view === "category") {
+      headers = ["category", "products", "units_sold", "revenue", "profit", "stock_units", "stock_value", "cost_value"];
+      rows = report.categoryRows.map((category) => [category.name, category.products, category.units, formatAdminCurrency(category.revenue), formatAdminCurrency(category.profit), category.stockUnits, formatAdminCurrency(category.stockValue), formatAdminCurrency(category.costValue)]);
+    } else if (view === "item") {
+      headers = ["product", "sku", "category", "units_sold", "revenue", "profit", "stock", "stock_value", "cost_value", "movement"];
+      rows = itemReportRows.map((row) => [row.product.name, row.product.sku, row.product.category, row.units, formatAdminCurrency(row.revenue), formatAdminCurrency(row.profit), row.product.stock, formatAdminCurrency(row.stockValue), formatAdminCurrency(row.costValue), row.movement]);
+    } else if (view === "top-selling") {
+      headers = ["rank", "product", "sku", "category", "units_sold", "revenue", "profit", "stock", "cost_value"];
+      rows = report.topProducts.map((row, index) => [index + 1, row.product.name, row.product.sku, row.product.category, row.units, formatAdminCurrency(row.revenue), formatAdminCurrency(row.profit), row.product.stock, formatAdminCurrency(row.costValue)]);
     } else if (view === "inventory") {
-      headers = ["product", "sku", "stock", "units_sold", "stock_value"];
-      rows = report.agedProducts.map((row) => [row.product.name, row.product.sku, row.product.stock, row.units, formatAdminCurrency(parseReportMoney(row.product.price) * row.product.stock)]);
+      headers = ["product", "sku", "category", "status", "movement", "stock", "units_sold", "unit_price", "stock_value", "cost_value"];
+      rows = report.inventoryRows.map((row) => [row.product.name, row.product.sku, row.product.category, row.product.status, row.movement, row.product.stock, row.units, formatAdminCurrency(parseReportMoney(row.product.price)), formatAdminCurrency(row.stockValue), formatAdminCurrency(row.costValue)]);
     } else if (view === "orders") {
-      headers = ["order_status", "order_count"];
-      rows = report.statuses.map((status) => [status.name, status.count]);
+      headers = ["order_id", "date", "customer", "status", "payment", "fulfilment", "items", "total", "phone", "email"];
+      rows = report.orderRows.map((order) => [order.id, order.date, order.customerName, order.status, order.razorpayPaymentId ? "Online" : "Cash / other", order.fulfillmentMethod === "pickup" ? `Pickup · ${order.pickupHubName || "Hub"}` : "Delivery", order.items?.reduce((sum, item) => sum + Math.max(0, Number(item.quantity) || 0), 0) || 0, order.total, order.userPhone || order.phone, order.userEmail || order.email || ""]);
+    } else if (view === "damaged") {
+      headers = ["date", "product", "sku", "category", "quantity", "stock_scope", "reason", "estimated_retail_value", "estimated_cost_value"];
+      rows = report.damagedRows.map((row) => [row.createdAt.slice(0, 10), row.productName, row.sku, row.category, row.quantity, row.stockScope, row.reason, formatAdminCurrency(row.retailValue), formatAdminCurrency(row.costValue)]);
     } else {
       headers = ["report_section", "name", "value", "detail"];
       rows = [
         ["KPI", "Revenue", formatAdminCurrency(report.totalRevenue), periodLabel],
         ["KPI", "Units sold", report.unitsSold, "From order items"],
         ["KPI", "Orders", filteredOrders.length, periodLabel],
+        ["KPI", "Gross profit", formatAdminCurrency(report.grossProfit), "Revenue less product cost"],
+        ["KPI", "Average order", formatAdminCurrency(report.averageOrder), "Revenue divided by orders"],
+        ["KPI", "Stock units", report.stockUnits, "Current catalog"],
         ["KPI", "Stock value", formatAdminCurrency(report.stockValue), "Current catalog"],
+        ["KPI", "Cost value", formatAdminCurrency(report.costValue), "Current stock at cost"],
+        ...report.dailyRows.map((day) => ["Daily sales", day.date, formatAdminCurrency(day.revenue), `${day.orders} orders · ${day.units} units`]),
         ...report.categoryRows.map((category) => ["Category", category.name, category.units, formatAdminCurrency(category.revenue)]),
         ...report.topProducts.map((row) => ["Top-selling item", row.product.name, row.units, formatAdminCurrency(row.revenue)]),
-        ...report.agedProducts.map((row) => ["Inventory / aged", row.product.name, row.product.stock, `${row.units} units sold`]),
-        ...report.statuses.map((status) => ["Order status", status.name, status.count, "Orders"]),
+         ...report.inventoryRows.map((row) => ["Inventory", row.product.name, row.product.stock, `${row.units} units sold · ${row.movement}`]),
+         ["Damaged items", "Units", report.damagedUnits, `${formatAdminCurrency(report.damagedCostValue)} estimated cost`],
+         ...report.statuses.map((status) => ["Order status", status.name, status.count, "Orders"]),
       ];
     }
     const csv = [headers, ...rows].map((row) => row.map(escapeCsv).join(",")).join("\r\n");
@@ -2206,9 +2394,17 @@ function ReportsWorkspace({
         <div className="report-kpi"><small>Revenue</small><strong>{formatAdminCurrency(report.totalRevenue)}</strong><span>{periodLabel}</span></div>
         <div className="report-kpi"><small>Units sold</small><strong>{report.unitsSold}</strong><span>From order items</span></div>
         <div className="report-kpi"><small>Orders</small><strong>{filteredOrders.length}</strong><span>Selected period</span></div>
+        <div className="report-kpi"><small>Gross profit</small><strong>{formatAdminCurrency(report.grossProfit)}</strong><span>Revenue less cost</span></div>
+        <div className="report-kpi"><small>Average order</small><strong>{formatAdminCurrency(report.averageOrder)}</strong><span>Per confirmed order</span></div>
+        <div className="report-kpi"><small>Stock units</small><strong>{report.stockUnits}</strong><span>Current catalog</span></div>
         <div className="report-kpi"><small>Stock value</small><strong>{formatAdminCurrency(report.stockValue)}</strong><span>Current catalog</span></div>
+        <div className="report-kpi"><small>Cost value</small><strong>{formatAdminCurrency(report.costValue)}</strong><span>Current stock at cost</span></div>
       </div>
       <div className="reports-grid">
+        {showSalesReport && <article className="report-card report-card-wide">
+          <div className="report-card-head"><div><p className="eyebrow">SALES REPORT</p><h3>Daily sales performance</h3></div><span>{report.dailyRows.length} active dates</span></div>
+          {report.dailyRows.length ? <div className="report-table"><div className="report-row sales-report-header"><span><strong>Date</strong></span><em>Orders / units</em><strong>Revenue</strong></div>{report.dailyRows.map((day) => <div className="report-row sales-report-row" key={day.date}><span><strong>{day.date}</strong><small>{day.orders} confirmed orders</small></span><em>{day.units} units</em><strong>{formatAdminCurrency(day.revenue)}</strong></div>)}</div> : <div className="report-empty">No confirmed sales in this period.</div>}
+        </article>}
         {showProductReport && <article className="report-card report-card-wide">
           <div className="report-card-head"><div><p className="eyebrow">PRODUCT PERFORMANCE</p><h3>{view === "top-selling" ? "Top-selling items" : "Item performance"}</h3></div><span>Units sold</span></div>
           {report.hasItemSales ? <div className="report-table">{report.topProducts.map((row, index) => <div className="report-row" key={row.product.sku}><b>{String(index + 1).padStart(2, "0")}</b><span><strong>{row.product.name}</strong><small>{row.product.category}</small></span><em>{row.units} units</em><strong>{formatAdminCurrency(row.revenue)}</strong></div>)}</div> : <div className="report-empty">Item-level sales will appear here after orders include products.</div>}
@@ -2217,22 +2413,44 @@ function ReportsWorkspace({
           <div className="report-card-head"><div><p className="eyebrow">CATEGORY PERFORMANCE</p><h3>Best-selling categories</h3></div></div>
           <div className="category-report-list">{report.categoryRows.map((category) => <div className="category-report-row" key={category.name}><div><strong>{category.name}</strong><span>{category.units} units · {formatAdminCurrency(category.revenue)}</span></div><div className="category-report-bar"><i style={{ width: `${Math.max(5, (category.units / maxCategoryUnits) * 100)}%` }} /></div></div>)}</div>
         </article>}
-        {showInventoryReport && <article className="report-card">
-          <div className="report-card-head"><div><p className="eyebrow">INVENTORY HEALTH</p><h3>Slow / aged inventory</h3></div><span>Lowest movement</span></div>
-          <div className="report-table">{report.agedProducts.map((row) => <div className="report-row aged-report-row" key={row.product.sku}><span><strong>{row.product.name}</strong><small>{row.units ? `${row.units} units sold` : "No recorded sales"}</small></span><em>{row.product.stock} in stock</em><strong>{formatAdminCurrency(parseReportMoney(row.product.price) * row.product.stock)}</strong></div>)}</div>
-          <p className="report-help">Prioritise these products for a campaign, bundle, or clearance review.</p>
-        </article>}
-        {showOrderReport && <article className="report-card">
+         {showInventoryReport && <article className="report-card">
+           <div className="report-card-head"><div><p className="eyebrow">INVENTORY HEALTH</p><h3>Slow / aged inventory</h3></div><span>Lowest movement</span></div>
+           <div className="report-table">{report.agedProducts.map((row) => <div className="report-row aged-report-row" key={row.product.sku}><span><strong>{row.product.name}</strong><small>{row.units ? `${row.units} units sold` : "No recorded sales"}</small></span><em>{row.product.stock} in stock</em><strong>{formatAdminCurrency(parseReportMoney(row.product.price) * row.product.stock)}</strong></div>)}</div>
+           <p className="report-help">Prioritise these products for a campaign, bundle, or clearance review.</p>
+         </article>}
+         {showDamagedReport && <article className="report-card">
+           <div className="report-card-head"><div><p className="eyebrow">DAMAGE REPORT</p><h3>Damaged items</h3></div><span>{report.damagedRows.length} records</span></div>
+           {report.damagedRows.length ? <div className="report-table">{report.damagedRows.slice(0, 5).map((row) => <div className="report-row aged-report-row" key={row.id}><span><strong>{row.productName}</strong><small>{row.reason}</small></span><em>{row.quantity} unit{row.quantity === 1 ? "" : "s"}</em><strong>{formatAdminCurrency(row.costValue)}</strong></div>)}</div> : <div className="report-empty">No damaged items in this period.</div>}
+           <p className="report-help">Estimated cost value: {formatAdminCurrency(report.damagedCostValue)} · {report.damagedUnits} units removed.</p>
+         </article>}
+         {showOrderReport && <article className="report-card">
           <div className="report-card-head"><div><p className="eyebrow">ORDER HEALTH</p><h3>Order status report</h3></div></div>
           <div className="status-report-list">{report.statuses.map((status) => <div key={status.name}><span>{status.name}</span><strong>{status.count}</strong></div>)}</div>
           <button className="report-link" onClick={() => onNotify("Open Orders to manage fulfilment")}>Manage orders ↗</button>
         </article>}
       </div>
+      <section className="report-detail-panel">
+        <div className="report-detail-head"><div><p className="eyebrow">FULL BREAKDOWN</p><h3>{detailTitle}</h3><span>{periodLabel} · {filteredOrders.length} confirmed orders · {products.length} catalog items</span></div><span className="report-detail-note">Use Export report for the same detail in CSV format.</span></div>
+        {view === "overview" && <div className="report-detail-split">
+          <div className="report-detail-block"><div className="report-detail-block-head"><strong>Daily sales detail</strong><span>{report.dailyRows.length} active dates</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Date</th><th>Orders</th><th>Units</th><th>Revenue</th></tr></thead><tbody>{report.dailyRows.length ? report.dailyRows.map((day) => <tr key={day.date}><td>{day.date}</td><td>{day.orders}</td><td>{day.units}</td><td>{formatAdminCurrency(day.revenue)}</td></tr>) : <tr><td colSpan={4}>No confirmed sales in this period.</td></tr>}</tbody></table></div></div>
+          <div className="report-detail-block"><div className="report-detail-block-head"><strong>Payment &amp; fulfilment</strong><span>Order mix</span></div><div className="report-mini-list">{report.payments.map((payment) => <div key={payment.name}><span>{payment.name}<small>{formatAdminCurrency(payment.revenue)}</small></span><strong>{payment.count}</strong></div>)}{report.fulfilment.map((method) => <div key={method.name}><span>{method.name}<small>Fulfilment method</small></span><strong>{method.count}</strong></div>)}</div></div>
+        </div>}
+        {view === "sales" && <div className="report-detail-split">
+          <div className="report-detail-block"><div className="report-detail-block-head"><strong>Daily sales detail</strong><span>{report.dailyRows.length} active dates</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Date</th><th>Orders</th><th>Units</th><th>Revenue</th></tr></thead><tbody>{report.dailyRows.length ? report.dailyRows.map((day) => <tr key={day.date}><td>{day.date}</td><td>{day.orders}</td><td>{day.units}</td><td>{formatAdminCurrency(day.revenue)}</td></tr>) : <tr><td colSpan={4}>No confirmed sales in this period.</td></tr>}</tbody></table></div></div>
+          <div className="report-detail-block"><div className="report-detail-block-head"><strong>Payment &amp; fulfilment</strong><span>Order mix</span></div><div className="report-mini-list">{report.payments.map((payment) => <div key={payment.name}><span>{payment.name}<small>{formatAdminCurrency(payment.revenue)}</small></span><strong>{payment.count}</strong></div>)}{report.fulfilment.map((method) => <div key={method.name}><span>{method.name}<small>Fulfilment method</small></span><strong>{method.count}</strong></div>)}</div></div>
+        </div>}
+        {view === "overview" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Category summary</strong><span>{report.categoryRows.length} categories</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Category</th><th>Products</th><th>Units sold</th><th>Revenue</th><th>Profit</th><th>Stock value</th><th>Cost value</th></tr></thead><tbody>{report.categoryRows.map((category) => <tr key={category.name}><td>{category.name}</td><td>{category.products}</td><td>{category.units}</td><td>{formatAdminCurrency(category.revenue)}</td><td>{formatAdminCurrency(category.profit)}</td><td>{formatAdminCurrency(category.stockValue)}</td><td>{formatAdminCurrency(category.costValue)}</td></tr>)}</tbody></table></div></div>}
+        {view === "category" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Every category</strong><span>{report.categoryRows.length} rows</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Category</th><th>Products</th><th>Units sold</th><th>Revenue</th><th>Profit</th><th>Stock units</th><th>Stock value</th><th>Cost value</th></tr></thead><tbody>{report.categoryRows.map((category) => <tr key={category.name}><td>{category.name}</td><td>{category.products}</td><td>{category.units}</td><td>{formatAdminCurrency(category.revenue)}</td><td>{formatAdminCurrency(category.profit)}</td><td>{category.stockUnits}</td><td>{formatAdminCurrency(category.stockValue)}</td><td>{formatAdminCurrency(category.costValue)}</td></tr>)}</tbody></table></div></div>}
+        {(view === "item" || view === "top-selling") && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><div><strong>{view === "top-selling" ? "Ranked best sellers" : "Every catalog item"}</strong><span>{view === "top-selling" ? report.topProducts.length : itemReportRows.length} rows</span></div>{view === "item" && <label className="report-table-filter">Filter items<select value={itemMovementFilter} onChange={(event) => setItemMovementFilter(event.target.value as ReportMovementFilter)}><option value="all">All items</option><option value="sales">Sales items</option><option value="slow">Slow moving</option><option value="no-sales">No sales</option><option value="out-of-stock">Out of stock</option></select></label>}</div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>{view === "top-selling" ? "Rank" : "Product"}</th><th>{view === "top-selling" ? "Product" : "SKU"}</th><th>Category</th><th>Units</th><th>Revenue</th><th>Profit</th><th>Stock</th><th>Stock value</th><th>Cost value</th><th>Movement</th></tr></thead><tbody>{(view === "top-selling" ? report.topProducts : itemReportRows).map((row, index) => <tr key={row.product.sku}><td>{view === "top-selling" ? String(index + 1).padStart(2, "0") : row.product.name}</td><td>{view === "top-selling" ? row.product.name : row.product.sku}</td><td>{row.product.category}</td><td>{row.units}</td><td>{formatAdminCurrency(row.revenue)}</td><td>{formatAdminCurrency(row.profit)}</td><td>{row.product.stock}</td><td>{formatAdminCurrency(row.stockValue)}</td><td>{formatAdminCurrency(row.costValue)}</td><td><span className={`report-movement ${row.movement.toLowerCase().replace(/\s+/g, "-")}`}>{row.movement}</span></td></tr>)}</tbody></table></div></div>}
+        {view === "inventory" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Complete inventory movement</strong><span>{report.inventoryRows.length} products</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Product</th><th>SKU</th><th>Category</th><th>Status</th><th>Movement</th><th>Stock</th><th>Units sold</th><th>Unit price</th><th>Stock value</th><th>Cost value</th></tr></thead><tbody>{report.inventoryRows.map((row) => <tr key={row.product.sku}><td>{row.product.name}</td><td>{row.product.sku}</td><td>{row.product.category}</td><td>{row.product.status}</td><td><span className={`report-movement ${row.movement.toLowerCase().replace(/\s+/g, "-")}`}>{row.movement}</span></td><td>{row.product.stock}</td><td>{row.units}</td><td>{formatAdminCurrency(parseReportMoney(row.product.price))}</td><td>{formatAdminCurrency(row.stockValue)}</td><td>{formatAdminCurrency(row.costValue)}</td></tr>)}</tbody></table></div></div>}
+         {view === "orders" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Every confirmed order</strong><span>{report.orderRows.length} orders</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Order</th><th>Date</th><th>Customer</th><th>Status</th><th>Payment</th><th>Fulfilment</th><th>Items</th><th>Total</th><th>Phone</th></tr></thead><tbody>{report.orderRows.length ? report.orderRows.map((order) => <tr key={order.id}><td>{order.id}</td><td>{order.date}</td><td>{order.customerName}</td><td><span className={`report-order-status ${order.status.toLowerCase()}`}>{order.status}</span></td><td>{order.razorpayPaymentId ? "Online" : "Cash / other"}</td><td>{order.fulfillmentMethod === "pickup" ? `Pickup · ${order.pickupHubName || "Hub"}` : "Delivery"}</td><td>{order.items?.reduce((sum, item) => sum + Math.max(0, Number(item.quantity) || 0), 0) || 0}</td><td>{order.total}</td><td>{order.userPhone || order.phone}</td></tr>) : <tr><td colSpan={9}>No confirmed orders in this period.</td></tr>}</tbody></table></div></div>}
+         {view === "damaged" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Every damaged item</strong><span>{report.damagedRows.length} records · {report.damagedUnits} units</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Date</th><th>Product</th><th>SKU</th><th>Category</th><th>Quantity</th><th>Scope</th><th>Reason</th><th>Retail value</th><th>Cost value</th></tr></thead><tbody>{report.damagedRows.length ? report.damagedRows.map((row) => <tr key={row.id}><td>{row.createdAt.slice(0, 10)}</td><td>{row.productName}</td><td>{row.sku}</td><td>{row.category}</td><td>{row.quantity}</td><td>{row.stockScope}</td><td>{row.reason}</td><td>{formatAdminCurrency(row.retailValue)}</td><td>{formatAdminCurrency(row.costValue)}</td></tr>) : <tr><td colSpan={9}>No damaged items in this period.</td></tr>}</tbody></table></div></div>}
+      </section>
     </section>
   );
 }
 
-type SettingsSection = "Store profile" | "Shipping rules" | "Payment methods" | "Admin roles";
+type SettingsSection = "Store profile" | "Shipping rules" | "Payment methods" | "Printer" | "Bill design" | "Admin roles";
 
 function SettingsWorkspace({
   onNotify,
@@ -2256,6 +2474,8 @@ function SettingsWorkspace({
     cod: true,
     provider: "Razorpay",
   });
+  const [printerName, setPrinterName] = useState("Essae PR-55");
+  const [billDesign, setBillDesign] = useState<BillDesignSettings>(defaultBillDesignSettings);
   const [roles, setRoles] = useState<AdminRole[]>(defaultAdminRoles);
 
   useEffect(() => {
@@ -2271,6 +2491,26 @@ function SettingsWorkspace({
     setProfile(read("fanzzy-store-profile", profile));
     setShipping(read("fanzzy-shipping-rules", shipping));
     setPayments(read("fanzzy-payment-methods", payments));
+    setPrinterName(window.localStorage.getItem("fanzzy-printer-name")?.replace("Essae PR 55", "Essae PR-55") || "Essae PR-55");
+    setBillDesign(read("fanzzy-bill-design", defaultBillDesignSettings));
+    void fetchStoreSetting("printerName").then((remote) => {
+      if (!remote.error && remote.value) {
+        const normalizedPrinter = remote.value.replace("Essae PR 55", "Essae PR-55");
+        setPrinterName(normalizedPrinter);
+        window.localStorage.setItem("fanzzy-printer-name", normalizedPrinter);
+      }
+    });
+    void fetchStoreSetting("billDesign").then((remote) => {
+      if (!remote.error && remote.value) {
+        try {
+          const normalizedDesign = { ...defaultBillDesignSettings, ...(JSON.parse(remote.value) as Partial<BillDesignSettings>) };
+          setBillDesign(normalizedDesign);
+          window.localStorage.setItem("fanzzy-bill-design", JSON.stringify(normalizedDesign));
+        } catch {
+          // Keep the local/default design when a remote value is malformed.
+        }
+      }
+    });
     setRoles(defaultAdminRoles);
     window.localStorage.setItem("fanzzy-admin-roles", JSON.stringify(defaultAdminRoles));
     // These values are only read on mount; the defaults above provide the first render.
@@ -2281,6 +2521,10 @@ function SettingsWorkspace({
     window.localStorage.setItem("fanzzy-store-profile", JSON.stringify(profile));
     window.localStorage.setItem("fanzzy-shipping-rules", JSON.stringify(shipping));
     window.localStorage.setItem("fanzzy-payment-methods", JSON.stringify(payments));
+    window.localStorage.setItem("fanzzy-printer-name", printerName);
+    void saveStoreSetting("printerName", printerName);
+    window.localStorage.setItem("fanzzy-bill-design", JSON.stringify(billDesign));
+    void saveStoreSetting("billDesign", JSON.stringify(billDesign));
     window.localStorage.setItem("fanzzy-admin-roles", JSON.stringify(roles));
     window.dispatchEvent(new Event("fanzzy-store-settings-updated"));
     onNotify("Store settings saved");
@@ -2290,6 +2534,8 @@ function SettingsWorkspace({
     if (section === "Store profile") return profile.storeName ? "Configured" : "Needs details";
     if (section === "Shipping rules") return `${Object.values(shipping).filter(Boolean).length} active`;
     if (section === "Payment methods") return `${payments.online || payments.cod ? payments.provider + " ready" : "No methods active"}`;
+    if (section === "Printer") return printerName || "Needs selection";
+    if (section === "Bill design") return billDesign.logoText ? `${billDesign.logoText} ready` : "Needs design";
     return "1 full access role";
   };
 
@@ -2308,7 +2554,7 @@ function SettingsWorkspace({
       </div>
       <div className="module-summary"><span><i className="status-light" />Live workspace</span><span>4 active records</span></div>
       <div className="settings-list">
-        {(["Store profile", "Shipping rules", "Payment methods", "Admin roles"] as SettingsSection[]).map((section, index) => (
+        {(["Store profile", "Shipping rules", "Payment methods", "Printer", "Bill design", "Admin roles"] as SettingsSection[]).map((section, index) => (
           <button key={section} onClick={() => setSelectedSection(section)}>
             <span className="module-row-number">0{index + 1}</span>
             <strong>{section}</strong>
@@ -2343,6 +2589,30 @@ function SettingsWorkspace({
             <label className="settings-check"><input type="checkbox" checked={payments.online} onChange={(event) => setPayments((current) => ({ ...current, online: event.target.checked }))} /><span>Online payments</span><small>Accept payments through your configured gateway.</small></label>
             <label className="settings-check"><input type="checkbox" checked={payments.cod} onChange={(event) => setPayments((current) => ({ ...current, cod: event.target.checked }))} /><span>Cash on delivery</span><small>Let customers choose COD at checkout.</small></label>
             <label>Payment provider<input value={payments.provider} onChange={(event) => setPayments((current) => ({ ...current, provider: event.target.value }))} /></label>
+          </div>}
+
+          {selectedSection === "Printer" && <div className="settings-form-grid">
+            <label className="settings-wide">Printer selection<select value="browser" disabled><option value="browser">Choose printer when printing</option></select></label>
+          <p className="settings-help settings-wide">Bills open the browser printer window, not a PDF download. If it shows “Save to PDF” by default, open Destination and select any printer installed on this device, including an 80 mm thermal printer.</p>
+          </div>}
+
+          {selectedSection === "Bill design" && <div className="settings-form-grid bill-design-settings">
+            <label className="settings-wide">Top logo<select value={billDesign.showLogo ? billDesign.logoAsset : "none"} onChange={(event) => setBillDesign((current) => ({ ...current, showLogo: event.target.value !== "none", logoAsset: event.target.value === "custom" ? "custom" : "fanzzy-mark.png" }))}><option value="fanzzy-mark.png">Fanzzy logo mark</option><option value="custom">Uploaded logo</option><option value="none">Text logo only</option></select></label>
+            <label className="settings-wide">Upload logo PNG / JPG<input type="file" accept="image/png,image/jpeg" onChange={(event) => { const file = event.target.files?.[0]; if (!file) return; const reader = new FileReader(); reader.onload = () => { const result = typeof reader.result === "string" ? reader.result : ""; if (result) setBillDesign((current) => ({ ...current, showLogo: true, logoAsset: "custom", logoDataUrl: result })); }; reader.readAsDataURL(file); }} /><small className="settings-upload-name">{billDesign.logoDataUrl ? "Uploaded logo ready" : "Choose a logo image for the top of the bill."}</small></label>
+            {billDesign.showLogo && <div className="bill-logo-preview settings-wide"><img src={billDesign.logoDataUrl || "/fanzzy-mark.png"} alt="Bill logo preview" /><span>{billDesign.logoAsset === "custom" && billDesign.logoDataUrl ? "Custom logo" : "Fanzzy logo mark"}</span></div>}
+            <label className="settings-wide">Bill QR code<select value={billDesign.showQrCode ? billDesign.qrCodeAsset : "none"} onChange={(event) => setBillDesign((current) => ({ ...current, showQrCode: event.target.value !== "none", qrCodeAsset: event.target.value === "custom" ? "custom" : "vestano-retail-qr-code.png" }))}><option value="vestano-retail-qr-code.png">Vestano QR code</option><option value="custom">Uploaded QR code</option><option value="none">No QR code</option></select></label>
+            <label className="settings-wide">Upload QR code PNG / JPG<input type="file" accept="image/png,image/jpeg" onChange={(event) => { const file = event.target.files?.[0]; if (!file) return; const reader = new FileReader(); reader.onload = () => { const result = typeof reader.result === "string" ? reader.result : ""; if (result) setBillDesign((current) => ({ ...current, showQrCode: true, qrCodeAsset: "custom", qrCodeDataUrl: result })); }; reader.readAsDataURL(file); }} /><small className="settings-upload-name">{billDesign.qrCodeDataUrl ? "Uploaded QR code ready" : "Choose a QR image for the bill footer."}</small></label>
+            {billDesign.showQrCode && <div className="bill-logo-preview settings-wide"><img src={billDesign.qrCodeDataUrl || "/vestano-retail-qr-code.png"} alt="Bill QR code preview" /><span>{billDesign.qrCodeAsset === "custom" && billDesign.qrCodeDataUrl ? "Custom QR code" : "Vestano QR code"}</span></div>}
+            <label>Logo / brand text<input value={billDesign.logoText} onChange={(event) => setBillDesign((current) => ({ ...current, logoText: event.target.value }))} placeholder="fanZZy" /></label>
+            <label>Top tagline<input value={billDesign.tagline} onChange={(event) => setBillDesign((current) => ({ ...current, tagline: event.target.value }))} placeholder="JEWELLERY WITH INTENTION" /></label>
+            <label>Separator style<select value={billDesign.separator} onChange={(event) => setBillDesign((current) => ({ ...current, separator: event.target.value as BillDesignSettings["separator"] }))}><option value="dotted">Dotted</option><option value="dashed">Dashed</option></select></label>
+            <label>Thank-you text<input value={billDesign.thankYouText} onChange={(event) => setBillDesign((current) => ({ ...current, thankYouText: event.target.value }))} /></label>
+            <div className="settings-check-grid settings-wide">
+              <label className="settings-check"><input type="checkbox" checked={billDesign.showStatus} onChange={(event) => setBillDesign((current) => ({ ...current, showStatus: event.target.checked }))} /><span>Show order status</span></label>
+              <label className="settings-check"><input type="checkbox" checked={billDesign.showPhone} onChange={(event) => setBillDesign((current) => ({ ...current, showPhone: event.target.checked }))} /><span>Show customer phone</span></label>
+              <label className="settings-check"><input type="checkbox" checked={billDesign.showAddress} onChange={(event) => setBillDesign((current) => ({ ...current, showAddress: event.target.checked }))} /><span>Show delivery address</span></label>
+            </div>
+            <p className="settings-help settings-wide">These options change the receipt shown in the browser print dialog. Save changes, then print a new bill.</p>
           </div>}
 
           {selectedSection === "Admin roles" && <div className="settings-roles-form"><div className="settings-role-list"><div className="settings-role-card"><div className="settings-role-fixed"><div><strong>Vestano</strong><small>Super admin</small></div><span>Full access</span></div><p className="settings-role-access-copy">This is the only admin role. It can access every workspace section and all store settings.</p></div></div></div>}
@@ -3645,7 +3915,10 @@ type PromotionCatalogOption = {
   image: string;
   price: number;
   stock: number;
-  variants: Array<{ name: string; image?: string; stock?: number; price?: number }>;
+  variantType?: ProductVariantType;
+  sizes: string[];
+  sizeStock: Record<string, number>;
+  variants: Array<{ name: string; size?: string; image?: string; stock?: number; price?: number }>;
 };
 
 function PromotionOffersWorkspace({ onNotify }: { onNotify: (message: string) => void }) {
@@ -3688,7 +3961,14 @@ function PromotionOffersWorkspace({ onNotify }: { onNotify: (message: string) =>
         image: String(product.image || ""),
         price: Number(product.price || 0),
         stock: Number(product.stock || 0),
-        variants: Array.isArray(product.variants) ? product.variants : [],
+        variantType: product.variantType || (Array.isArray(product.sizes) && product.sizes.length ? "size" : "normal"),
+        sizes: Array.isArray(product.sizes) ? product.sizes : [],
+        sizeStock: product.sizeStock && typeof product.sizeStock === "object" ? product.sizeStock : {},
+        variants: Array.isArray(product.variants) && product.variants.length
+          ? product.variants
+          : Array.isArray(product.sizes)
+            ? product.sizes.map((size: string) => ({ name: String(size), size: String(size), image: String(product.image || ""), stock: Number(product.sizeStock?.[size] ?? product.stock), price: Number(product.price || 0) }))
+            : [],
       }));
       if (alive) setCatalog(mapped);
     };
@@ -3706,6 +3986,7 @@ function PromotionOffersWorkspace({ onNotify }: { onNotify: (message: string) =>
   const openNew = () => {
     setEditingId(null);
     setForm(defaultPromotionForm());
+    setSearch("");
     setFormOpen(true);
   };
   const openEdit = (offer: PromotionOffer) => {
@@ -3714,37 +3995,69 @@ function PromotionOffersWorkspace({ onNotify }: { onNotify: (message: string) =>
     setForm({
       ...defaultPromotionForm(),
       ...offer,
+      type: "bogo",
+      buyQuantity: 1,
+      freeQuantity: Math.min(4, Math.max(1, Number(offer.freeQuantity) || 1)),
       name: String(offer.name || ""),
       description: String(offer.description || ""),
       couponCode: String(offer.couponCode || ""),
-      eligiblePaid: Array.isArray(offer.eligiblePaid) ? offer.eligiblePaid : [],
+      eligiblePaid: Array.isArray(offer.eligiblePaid) ? offer.eligiblePaid.slice(0, 1).map((item) => ({ ...item, variantName: undefined, size: undefined })) : [],
       eligibleFree: Array.isArray(offer.eligibleFree) ? offer.eligibleFree : [],
     });
+    setSearch("");
     setFormOpen(true);
   };
-  const toggleSelection = (bucket: "eligiblePaid" | "eligibleFree", selection: PromotionSelection) => {
-    setForm((current) => {
-      const existing = current[bucket].some((item) => JSON.stringify(item) === JSON.stringify(selection));
-      return { ...current, [bucket]: existing ? current[bucket].filter((item) => JSON.stringify(item) !== JSON.stringify(selection)) : [...current[bucket], selection] };
-    });
-  };
-  const selectionForProduct = (product: PromotionCatalogOption, variant?: PromotionCatalogOption["variants"][number]): PromotionSelection => ({
+  const selectedProductId = String(form.eligiblePaid[0]?.productId || "");
+  const selectionForProduct = (product: PromotionCatalogOption, variant?: PromotionCatalogOption["variants"][number], size?: string): PromotionSelection => ({
     productId: product.id,
     sku: product.sku,
-    variantName: variant?.name,
+    variantName: product.variantType === "size" ? undefined : variant?.name,
+    size: size || (product.variantType === "size" ? variant?.size || variant?.name : undefined),
     price: (variant as { price?: number } | undefined)?.price ? Number((variant as { price?: number }).price) : product.price,
-    stock: variant?.stock === undefined ? product.stock : Number(variant.stock),
+    stock: size
+      ? Number(product.sizeStock[size] ?? product.stock)
+      : variant?.stock === undefined ? product.stock : Number(variant.stock),
   });
+  const productOptions = (product: PromotionCatalogOption) => product.variantType === "size"
+    ? product.sizes.length
+      ? product.sizes.map((size) => selectionForProduct(product, undefined, size))
+      : product.variants.map((variant) => selectionForProduct(product, variant))
+    : product.variants.map((variant) => selectionForProduct(product, variant));
+  const selectProduct = (product: PromotionCatalogOption) => {
+    setForm((current) => {
+      const alreadySelected = current.eligiblePaid[0]?.productId === product.id;
+      return {
+        ...current,
+        type: "bogo",
+        buyQuantity: 1,
+        eligiblePaid: alreadySelected ? [] : [selectionForProduct(product)],
+        eligibleFree: [],
+      };
+    });
+  };
+  const toggleFreeOption = (selection: PromotionSelection) => {
+    setForm((current) => {
+      const existing = current.eligibleFree.some((item) => JSON.stringify(item) === JSON.stringify(selection));
+      return { ...current, eligibleFree: existing ? current.eligibleFree.filter((item) => JSON.stringify(item) !== JSON.stringify(selection)) : [...current.eligibleFree, selection] };
+    });
+  };
   const saveOffer = async () => {
     const name = String(form.name || "").trim();
     const description = String(form.description || "").trim();
     const couponCode = String(form.couponCode || "").trim().toUpperCase();
     if (!name) return onNotify("Add an offer name before saving");
-    if (form.type === "bundle" && (form.bundleQuantity < 2 || form.fixedBundlePrice <= 0)) return onNotify("Add a valid bundle quantity and fixed price");
-    if (form.type !== "bundle" && form.freeQuantity < 1) return onNotify("Add a free quantity");
+    if (form.eligiblePaid.length !== 1) return onNotify("Select one product for this offer");
+    if (form.freeQuantity < 1 || form.freeQuantity > 4) return onNotify("Choose between 1 and 4 free items");
     const now = new Date().toISOString();
     const offer: PromotionOffer = {
       ...form,
+      type: "bogo",
+      buyQuantity: 1,
+      freeQuantity: Math.min(4, Math.max(1, Math.floor(Number(form.freeQuantity) || 1))),
+      allowDifferentProducts: false,
+      allowMixProducts: false,
+      allowSameVariantMultipleTimes: true,
+      maxQuantityPerVariant: 4,
       id: editingId || `offer-${Date.now()}`,
       name,
       description,
@@ -3767,32 +4080,32 @@ function PromotionOffersWorkspace({ onNotify }: { onNotify: (message: string) =>
     setSelected((current) => current?.id === offer.id ? { ...offer, status } : current);
   };
   const visibleCatalog = catalog.filter((product) => `${product.name} ${product.sku} ${product.category}`.toLowerCase().includes(search.toLowerCase()));
-  const selectedCount = form.eligiblePaid.length + form.eligibleFree.length;
+  const selectedCount = form.eligiblePaid.length ? 1 + form.eligibleFree.length : 0;
 
   return (
     <section className="panel module-workspace promotion-workspace">
       <div className="module-workspace-head">
-        <div><p className="eyebrow">PROMOTIONS</p><h2>Buy One Get X &amp; Bundle Offers</h2><p>Create offers that understand products, variants, colour, size, stock, customer limits, and linked cart lines.</p></div>
+        <div><p className="eyebrow">PROMOTIONS</p><h2>Buy 1 Get X Free</h2><p>Choose one product, then let customers select 1–4 free variants or sizes from that same product.</p></div>
         <div className="module-actions"><button className="module-secondary" onClick={() => onNotify("Offer report is ready from usage data")}>View report ↗</button><button className="module-primary" onClick={openNew}>+ Create offer</button></div>
       </div>
-      <div className="offer-capability-strip"><span>9 offer modes</span><span>Variant-aware selection</span><span>Linked cart groups</span><span>Inventory-safe lines</span></div>
+      <div className="offer-capability-strip"><span>One product per offer</span><span>Buy 1 fixed</span><span>Get 1–4 free</span><span>Variant + size aware</span></div>
       <div className="promotion-list">
         {offers.length ? offers.map((offer, index) => (
           <div className="promotion-list-row" key={offer.id}>
             <button className="promotion-list-main" onClick={() => setSelected(offer)}><span className="module-row-number">{String(index + 1).padStart(2, "0")}</span><span><strong>{offer.name}</strong><small>{offerTypeLabel(offer)} · {offer.eligiblePaid.length + offer.eligibleFree.length || "All catalog"} eligible selections</small></span><i className={`status-pill ${offer.status.toLowerCase()}`}>{offer.status}</i><b>↗</b></button>
             <div className="product-row-actions"><button onClick={() => openEdit(offer)} aria-label={`Edit ${offer.name}`}><Pencil size={15} /></button><button className="delete-action" onClick={() => void deleteOffer(offer)} aria-label={`Archive ${offer.name}`}><Trash2 size={15} /></button></div>
           </div>
-        )) : <div className="promotion-empty"><span>✦</span><h3>No promotional offers yet</h3><p>Create Buy 1 Get 1, Buy 1 Get 3, cheapest-free, or Pick Any X bundles from one form.</p><button className="module-primary" onClick={openNew}>Create your first offer</button></div>}
+        )) : <div className="promotion-empty"><span>✦</span><h3>No promotional offers yet</h3><p>Create a Buy 1 Get 1, Buy 1 Get 2, Buy 1 Get 3, or Buy 1 Get 4 offer for one product.</p><button className="module-primary" onClick={openNew}>Create your first offer</button></div>}
       </div>
       <div className="promotion-footnote"><strong>Operational safeguards</strong><span>Offers are stored with reusable product/variant IDs. Status, dates, usage limits, and selection rules are checked before a storefront application is accepted.</span></div>
 
       {selected && <div className="product-modal-backdrop" onClick={() => setSelected(null)}><div className="product-detail-card promotion-detail-modal" onClick={(event) => event.stopPropagation()}><p className="eyebrow">{offerTypeLabel(selected)}</p><h3>{selected.name}</h3><p className="product-detail-meta">{selected.description || "No description added."}</p><div className="promotion-detail-grid"><span><small>Status</small><strong>{selected.status}</strong></span><span><small>Usage</small><strong>{selected.usageCount}{selected.maxTotalUsage ? ` / ${selected.maxTotalUsage}` : ""}</strong></span><span><small>Paid scope</small><strong>{selected.eligiblePaid.length || "All"}</strong></span><span><small>Free scope</small><strong>{selected.eligibleFree.length || "Same product"}</strong></span></div><p className="promotion-rules">{selected.allowMultipleQualifyingSets ? "Multiple qualifying sets enabled" : "Applies once per cart"} · {selected.allowSameVariantMultipleTimes ? "Repeat variants allowed" : "Unique variants only"} · {selected.automatic ? "Automatic" : `Coupon ${selected.couponCode || "required"}`}</p><div className="product-detail-actions"><button className="module-primary" onClick={() => openEdit(selected)}>Edit offer</button><button className="module-secondary" onClick={() => void toggleOffer(selected)}>{selected.status === "Active" ? "Deactivate" : "Activate"}</button><button className="module-secondary" onClick={() => setSelected(null)}>Close</button></div></div></div>}
 
-      {formOpen && <div className="product-modal-backdrop" onClick={() => setFormOpen(false)}><div className="product-form-card product-modal-card promotion-form-modal" onClick={(event) => event.stopPropagation()}><button className="product-modal-close" onClick={() => setFormOpen(false)} aria-label="Close offer form">×</button><p className="eyebrow">{editingId ? "EDIT OFFER" : "NEW OFFER"}</p><h3>{editingId ? "Edit promotional offer" : "Build a promotional offer"}</h3><p className="promotion-form-intro">Every selection below points to an existing product or variant ID. No duplicate catalog records are created.</p>
-        <div className="promotion-form-section"><h4>Offer basics</h4><div className="product-form-grid"><label>Offer name<input value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} placeholder="e.g. Bracelet · Buy 1 Get 3" /></label><label>Offer type<select value={form.type} onChange={(event) => setForm((current) => ({ ...current, type: event.target.value as PromotionOfferType }))}><option value="bogo">Buy X Get Y</option><option value="cheapest-free">Cheapest eligible item free</option><option value="bundle">Pick Any X Items for a Fixed Price</option></select></label><label className="marketing-form-wide">Offer description<input value={form.description} onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))} placeholder="Explain what customers receive." /></label><label>Active status<select value={form.status} onChange={(event) => setForm((current) => ({ ...current, status: event.target.value as PromotionOfferStatus }))}><option>Active</option><option>Inactive</option><option>Archived</option></select></label><label>Start date/time<input type="datetime-local" value={form.startsAt} onChange={(event) => setForm((current) => ({ ...current, startsAt: event.target.value }))} /></label><label>End date/time<input type="datetime-local" value={form.endsAt} onChange={(event) => setForm((current) => ({ ...current, endsAt: event.target.value }))} /></label></div></div>
-        <div className="promotion-form-section"><h4>{form.type === "bundle" ? "Fixed-price bundle" : "Buy / get rules"}</h4><div className="product-form-grid">{form.type !== "bundle" && <><label>Buy quantity<input type="number" min="1" value={form.buyQuantity} onChange={(event) => setForm((current) => ({ ...current, buyQuantity: Math.max(1, Number(event.target.value)) }))} /></label><label>Free quantity<input type="number" min="1" value={form.freeQuantity} onChange={(event) => setForm((current) => ({ ...current, freeQuantity: Math.max(1, Number(event.target.value)) }))} /></label></>}{form.type === "bundle" && <><label>Required bundle quantity<input type="number" min="2" value={form.bundleQuantity} onChange={(event) => setForm((current) => ({ ...current, bundleQuantity: Math.max(2, Number(event.target.value)) }))} /></label><label>Fixed bundle price<input type="number" min="0" value={form.fixedBundlePrice} onChange={(event) => setForm((current) => ({ ...current, fixedBundlePrice: Math.max(0, Number(event.target.value)) }))} /></label></>}<label>Minimum cart value<input type="number" min="0" value={form.minCartValue} onChange={(event) => setForm((current) => ({ ...current, minCartValue: Math.max(0, Number(event.target.value)) }))} /></label><label>Per-customer usage limit<input type="number" min="0" value={form.perCustomerLimit} onChange={(event) => setForm((current) => ({ ...current, perCustomerLimit: Math.max(0, Number(event.target.value)) }))} placeholder="0 = unlimited" /></label><label>Maximum total usage<input type="number" min="0" value={form.maxTotalUsage} onChange={(event) => setForm((current) => ({ ...current, maxTotalUsage: Math.max(0, Number(event.target.value)) }))} placeholder="0 = unlimited" /></label><label className="promotion-check"><input type="checkbox" checked={form.automatic} onChange={(event) => setForm((current) => ({ ...current, automatic: event.target.checked }))} /> Automatic offer</label>{!form.automatic && <label>Coupon code<input value={form.couponCode} onChange={(event) => setForm((current) => ({ ...current, couponCode: event.target.value.toUpperCase() }))} placeholder="FANZZYBOGO" /></label>}</div></div>
-        <div className="promotion-form-section"><h4>Variant and bundle controls</h4><div className="promotion-toggle-grid">{([["allowMixVariants", "Allow customers to mix variants"],["allowDifferentColours", "Allow different colours"],["allowDifferentSizes", "Allow different sizes"],["allowSameVariantMultipleTimes", "Allow same variant multiple times"],["requireExactFreeQuantity", "Require exact free-item quantity"],["allowDifferentProducts", "Allow paid/free from different products"],["allowMixProducts", "Allow mixing products in bundles"],["allowMultipleBundles", "Allow multiple bundles per cart"],["allowMultipleQualifyingSets", "Allow offer multiplication"],["allowOtherCoupons", "Allow other coupons"],["allowOtherDiscounts", "Allow other discounts"],["autoSelectOnlyOption", "Auto-select when one option exists"]] as Array<[keyof ReturnType<typeof defaultPromotionForm>, string]>).map(([key, label]) => <label key={String(key)}><input type="checkbox" checked={Boolean(form[key])} onChange={(event) => setForm((current) => ({ ...current, [key]: event.target.checked }))} />{label}</label>)}</div><label className="promotion-limit-field">Maximum quantity per variant<input type="number" min="1" value={form.maxQuantityPerVariant} onChange={(event) => setForm((current) => ({ ...current, maxQuantityPerVariant: Math.max(1, Number(event.target.value)) }))} /></label></div>
-        <div className="promotion-form-section"><div className="promotion-selector-header"><div><h4>Eligible products and variants</h4><p>Search by product name or SKU. Choose paid and free scopes separately.</p></div><strong>{selectedCount} selections</strong></div><input className="promotion-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search product, SKU, colour, size…" /><div className="promotion-selector-list">{visibleCatalog.length ? visibleCatalog.map((product) => { const productSelection = selectionForProduct(product); return <div className="promotion-selector-product" key={product.id}><div className="promotion-product-heading"><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.sku} · {product.stock} in stock · ₹{product.price.toLocaleString("en-IN")}</small></span></div><div className="promotion-selection-row"><label><input type="checkbox" checked={form.eligiblePaid.some((item) => JSON.stringify(item) === JSON.stringify(productSelection))} onChange={() => toggleSelection("eligiblePaid", productSelection)} /> Paid product</label><label><input type="checkbox" checked={form.eligibleFree.some((item) => JSON.stringify(item) === JSON.stringify(productSelection))} onChange={() => toggleSelection("eligibleFree", productSelection)} /> Free product</label></div>{product.variants.length ? <div className="promotion-variant-grid">{product.variants.map((variant) => { const selection = selectionForProduct(product, variant); return <div className="promotion-variant-option" key={`${product.id}-${variant.name}`}><img src={variant.image || product.image} alt="" /><span><strong>{variant.name}</strong><small>{variant.stock ?? product.stock} stock · ₹{(Number(variant.price) || product.price).toLocaleString("en-IN")}</small></span><label title="Eligible paid variant"><input type="checkbox" checked={form.eligiblePaid.some((item) => JSON.stringify(item) === JSON.stringify(selection))} onChange={() => toggleSelection("eligiblePaid", selection)} />Paid</label><label title="Eligible free variant"><input type="checkbox" checked={form.eligibleFree.some((item) => JSON.stringify(item) === JSON.stringify(selection))} onChange={() => toggleSelection("eligibleFree", selection)} />Free</label></div>; })}</div> : null}</div>; }) : <p className="variant-empty">No products found. Add products in Products first, then return here.</p>}</div></div>
+      {formOpen && <div className="product-modal-backdrop" onClick={() => setFormOpen(false)}><div className="product-form-card product-modal-card promotion-form-modal" onClick={(event) => event.stopPropagation()}><button className="product-modal-close" onClick={() => setFormOpen(false)} aria-label="Close offer form">×</button><p className="eyebrow">{editingId ? "EDIT OFFER" : "NEW OFFER"}</p><h3>{editingId ? "Edit Buy 1 Get X offer" : "Build a Buy 1 Get X offer"}</h3><p className="promotion-form-intro">Select one product only. The customer buys one selected item and chooses the free variants or sizes from that same product.</p>
+        <div className="promotion-form-section"><h4>Offer basics</h4><div className="product-form-grid"><label>Offer name<input value={form.name} onChange={(event) => setForm((current) => ({ ...current, type: "bogo", buyQuantity: 1, name: event.target.value }))} placeholder="e.g. Bracelet · Buy 1 Get 3" /></label><label>Offer type<span className="field-help">Buy 1 Get X Free</span></label><label className="marketing-form-wide">Offer description<input value={form.description} onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))} placeholder="Explain what customers receive." /></label><label>Active status<select value={form.status} onChange={(event) => setForm((current) => ({ ...current, status: event.target.value as PromotionOfferStatus }))}><option>Active</option><option>Inactive</option><option>Archived</option></select></label><label>Start date/time<input type="datetime-local" value={form.startsAt} onChange={(event) => setForm((current) => ({ ...current, startsAt: event.target.value }))} /></label><label>End date/time<input type="datetime-local" value={form.endsAt} onChange={(event) => setForm((current) => ({ ...current, endsAt: event.target.value }))} /></label></div></div>
+        <div className="promotion-form-section"><h4>Buy / get rules</h4><div className="product-form-grid"><label>Buy quantity<span className="field-help">1 item</span></label><label>Free quantity<select value={form.freeQuantity} onChange={(event) => setForm((current) => ({ ...current, type: "bogo", buyQuantity: 1, freeQuantity: Number(event.target.value) }))}><option value={1}>1 free</option><option value={2}>2 free</option><option value={3}>3 free</option><option value={4}>4 free</option></select></label><label>Minimum cart value<input type="number" min="0" value={form.minCartValue} onChange={(event) => setForm((current) => ({ ...current, minCartValue: Math.max(0, Number(event.target.value)) }))} /></label><label>Per-customer usage limit<input type="number" min="0" value={form.perCustomerLimit} onChange={(event) => setForm((current) => ({ ...current, perCustomerLimit: Math.max(0, Number(event.target.value)) }))} placeholder="0 = unlimited" /></label><label>Maximum total usage<input type="number" min="0" value={form.maxTotalUsage} onChange={(event) => setForm((current) => ({ ...current, maxTotalUsage: Math.max(0, Number(event.target.value)) }))} placeholder="0 = unlimited" /></label><label className="promotion-check"><input type="checkbox" checked={form.automatic} onChange={(event) => setForm((current) => ({ ...current, automatic: event.target.checked }))} /> Automatic offer</label>{!form.automatic && <label>Coupon code<input value={form.couponCode} onChange={(event) => setForm((current) => ({ ...current, couponCode: event.target.value.toUpperCase() }))} placeholder="FANZZYBOGO" /></label>}</div></div>
+        <div className="promotion-form-section"><h4>Variant and size rule</h4><p className="promotion-form-intro">Only this product can qualify. Customers may mix its variants or sizes for the free items, and the same option can be used more than once when stock allows.</p></div>
+        <div className="promotion-form-section"><div className="promotion-selector-header"><div><h4>Choose one product</h4><p>Variants and sizes stay inside this product. Customers choose the paid option and their free options on the product page.</p></div><strong>{selectedProductId ? "1 product selected" : "Select 1 product"}</strong></div><input className="promotion-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search product or SKU…" /><div className="promotion-selector-list">{visibleCatalog.length ? visibleCatalog.map((product) => { const isSelected = product.id === selectedProductId; const options = productOptions(product); return <div className={`promotion-selector-product${isSelected ? " is-selected" : ""}`} key={product.id}><div className="promotion-product-heading"><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.sku} · {product.stock} in stock · ₹{product.price.toLocaleString("en-IN")}</small></span><button className={isSelected ? "module-secondary" : "module-secondary"} type="button" onClick={() => selectProduct(product)}>{isSelected ? "Deselect" : "Use this product"}</button></div>{isSelected && <><div className="promotion-selection-row"><span className="field-help">Buy 1: customer chooses any available variant or size.</span><span className="field-help">{form.eligibleFree.length ? `${form.eligibleFree.length} free option limit` : "All variants / sizes available free"}</span></div>{options.length ? <div className="promotion-variant-grid">{options.map((selection, index) => { const active = form.eligibleFree.some((item) => JSON.stringify(item) === JSON.stringify(selection)); const optionLabel = selection.size ? `Size ${selection.size}` : selection.variantName || `Option ${index + 1}`; return <div className="promotion-variant-option" key={JSON.stringify(selection)}><span><strong>{optionLabel}</strong><small>{selection.stock ?? product.stock} in stock · ₹{(selection.price || product.price).toLocaleString("en-IN")}</small></span><label title="Limit free item to this option"><input type="checkbox" checked={active} onChange={() => toggleFreeOption(selection)} /> Free option</label></div>; })}</div> : <p className="variant-empty">This product has no variants or sizes. The same product can be added for each free item.</p>}</>}</div>; }) : <p className="variant-empty">No products found. Add products in Products first, then return here.</p>}</div></div>
         <div className="promotion-form-actions"><button className="module-primary" onClick={() => void saveOffer()}>Save offer</button><button className="module-secondary" onClick={() => setFormOpen(false)}>Cancel</button></div>
       </div></div>}
     </section>
@@ -3809,6 +4122,7 @@ function OrdersWorkspace({
   const [fromDate, setFromDate] = useState(() => `${new Date().toISOString().slice(0, 8)}01`);
   const [toDate, setToDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [selectedOrder, setSelectedOrder] = useState<OrderRecord | null>(null);
+  const [printingBillId, setPrintingBillId] = useState<string | null>(null);
   const [enlargedOrderImage, setEnlargedOrderImage] = useState<{ src: string; alt: string } | null>(null);
   const [phone, setPhone] = useState("");
   const [lastOrdersSync, setLastOrdersSync] = useState<Date | null>(null);
@@ -3825,18 +4139,19 @@ function OrdersWorkspace({
       if (recoverCapturedPayments) {
         await fetch("/api/razorpay/sync-payments", { method: "POST" }).catch(() => undefined);
       }
-      const remote = await fetchStoreOrders<OrderRecord>();
       const merged = new Map<string, OrderRecord>();
-      remote.data?.forEach((order) => { if (order?.id && !isDemoOrder(order)) merged.set(order.id, order); });
       try {
         const stored = window.localStorage.getItem("fanzzy-orders");
         const parsed = stored ? JSON.parse(stored) as OrderRecord[] : [];
         if (Array.isArray(parsed)) parsed.forEach((order) => {
-          if (order?.id && !isDemoOrder(order) && !merged.has(order.id)) merged.set(order.id, order);
+          if (order?.id && !isDemoOrder(order)) merged.set(order.id, order);
         });
       } catch {
         window.localStorage.removeItem("fanzzy-orders");
       }
+      if (merged.size) setOrders(Array.from(merged.values()).filter(hasConfirmedPayment));
+      const remote = await fetchStoreOrders<OrderRecord>();
+      remote.data?.forEach((order) => { if (order?.id && !isDemoOrder(order)) merged.set(order.id, order); });
       setOrders(Array.from(merged.values()).filter(hasConfirmedPayment));
       const [catalog, variantsRemote] = await Promise.all([fetchCatalogProducts(), fetchStoreSetting("productVariants")]);
       let variantsMap: Record<string, ProductVariant[]> = {};
@@ -3867,7 +4182,12 @@ function OrdersWorkspace({
       }
     };
     const syncLiveOrders = () => { void syncOrders(false); };
-    void syncOrders(true);
+    // Render the current orders immediately. Payment recovery is useful, but
+    // it should not block the order workspace from opening.
+    void syncOrders(false);
+    void fetch("/api/razorpay/sync-payments", { method: "POST" })
+      .then(() => syncOrders(false))
+      .catch(() => undefined);
     const liveOrderTimer = window.setInterval(syncLiveOrders, 5000);
     const unsubscribeFromLiveOrders = subscribeToStoreSetting("orders", syncLiveOrders);
     window.addEventListener("storage", syncLiveOrders);
@@ -3970,8 +4290,18 @@ function OrdersWorkspace({
       onNotify(error instanceof Error ? error.message : "Could not restore the payment details");
     }
   };
-  const downloadBill = (order: OrderRecord) => {
-    if (!printOrderBill(order)) onNotify("Allow pop-ups to download the bill");
+  const downloadBill = async (order: OrderRecord) => {
+    if (printingBillId) return;
+    setPrintingBillId(order.id);
+    onNotify(`Sending ${order.id} to Essae PR-55…`);
+    try {
+      const printed = await printOrderBill(order);
+      onNotify(printed ? `Bill ${order.id} sent to Essae PR-55` : "Printing failed: Essae printer is unavailable");
+    } catch {
+      onNotify("Printing failed: Essae printer is unavailable");
+    } finally {
+      setPrintingBillId(null);
+    }
   };
   const saveOrder = () => {
     if (!selectedOrder) return;
@@ -4192,8 +4522,14 @@ function OrdersWorkspace({
                 manually.
               </p>
               <div className="product-detail-actions">
-                <button className="module-secondary order-detail-bill" onClick={() => downloadBill(selectedOrder)}>
-                  Download bill ↗
+                <button
+                  className="module-secondary order-detail-bill"
+                  type="button"
+                  disabled={printingBillId !== null}
+                  aria-busy={printingBillId === selectedOrder.id}
+                  onClick={() => void downloadBill(selectedOrder)}
+                >
+                  {printingBillId === selectedOrder.id ? "Printing…" : "Print bill ↗"}
                 </button>
                 <button className="module-primary" onClick={saveOrder}>
                   Save order
@@ -5126,14 +5462,21 @@ function ProductLibraryWorkspace({
 }) {
   const [products, setProducts] = useState(adminProducts);
   const [promotionOffers, setPromotionOffers] = useState<PromotionOffer[]>([]);
+  const [productDamages, setProductDamages] = useState<ProductDamageMap>({});
   const [selectedProduct, setSelectedProduct] = useState<AdminProduct | null>(
     null,
   );
   const [isAdding, setIsAdding] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
+  const [damageFormOpen, setDamageFormOpen] = useState(false);
+  const [damageSaving, setDamageSaving] = useState(false);
+  const [damageQuantity, setDamageQuantity] = useState("1");
+  const [damageReason, setDamageReason] = useState("");
+  const [damageVariantKey, setDamageVariantKey] = useState("");
   const [productSearch, setProductSearch] = useState("");
   const [productCategoryFilter, setProductCategoryFilter] = useState("all");
   const [productVariantFilter, setProductVariantFilter] = useState("all");
+  const [catalogCategories, setCatalogCategories] = useState<Array<{ name: string; pieces: number; image?: string }>>([]);
   const [scannerOpen, setScannerOpen] = useState(false);
   const [editValues, setEditValues] = useState({
     name: "",
@@ -5207,18 +5550,114 @@ function ProductLibraryWorkspace({
   }, [productScannerRequest]);
   useEffect(() => {
     let active = true;
+    const readLocalCategories = () => {
+      const stored = window.localStorage.getItem("fanzzy-categories");
+      if (!stored) return;
+      try {
+        const parsed = JSON.parse(stored) as Array<{ name?: string; pieces?: number; image?: string }>;
+        if (active && Array.isArray(parsed)) {
+          setCatalogCategories(
+            parsed
+              .filter((category) => typeof category.name === "string" && category.name.trim())
+              .map((category) => ({
+                name: category.name!.trim(),
+                pieces: Number(category.pieces) || 0,
+                image: category.image || "",
+              })),
+          );
+        }
+      } catch {
+        window.localStorage.removeItem("fanzzy-categories");
+      }
+    };
+    const loadCategories = async () => {
+      const remote = await fetchCatalogCategories();
+      if (!active) return;
+      if (!remote.error && remote.data) {
+        const mapped = remote.data.map((category) => ({
+          name: category.name,
+          pieces: category.pieces,
+          image: category.image || "",
+        }));
+        setCatalogCategories(mapped);
+        persistCategories(mapped);
+        return;
+      }
+      readLocalCategories();
+    };
+    const syncCategories = () => readLocalCategories();
+    void loadCategories();
+    window.addEventListener("fanzzy-categories-updated", syncCategories);
+    window.addEventListener("storage", syncCategories);
+    return () => {
+      active = false;
+      window.removeEventListener("fanzzy-categories-updated", syncCategories);
+      window.removeEventListener("storage", syncCategories);
+    };
+  }, []);
+  useEffect(() => {
+    let active = true;
+    const loadDamages = async () => {
+      const remote = await fetchStoreSetting("productDamages");
+      const stored = remote.value || window.localStorage.getItem(localProductDamagesKey);
+      if (!stored) return;
+      try {
+        const parsed = JSON.parse(stored) as ProductDamageMap;
+        if (active && parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          setProductDamages(parsed);
+          persistProductDamages(parsed);
+        }
+      } catch {
+        if (active) setProductDamages({});
+      }
+    };
+    void loadDamages();
+    const syncDamages = () => {
+      const stored = window.localStorage.getItem(localProductDamagesKey);
+      if (!stored) return;
+      try {
+        const parsed = JSON.parse(stored) as ProductDamageMap;
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) setProductDamages(parsed);
+      } catch {
+        // Ignore malformed local damage history.
+      }
+    };
+    window.addEventListener("fanzzy-product-damages-updated", syncDamages);
+    window.addEventListener("storage", syncDamages);
+    return () => {
+      active = false;
+      window.removeEventListener("fanzzy-product-damages-updated", syncDamages);
+      window.removeEventListener("storage", syncDamages);
+    };
+  }, []);
+  useEffect(() => {
+    let active = true;
     const loadProducts = async () => {
-      const remote = await fetchCatalogProducts();
-      const barcodeRemote = await fetchStoreSetting("productBarcodes");
-      const hsnCodeRemote = await fetchStoreSetting("productHsnCodes");
-      const billNameRemote = await fetchStoreSetting("productBillNames");
-      const pricingRemote = await fetchStoreSetting("productPricing");
-      const variantsRemote = await fetchStoreSetting("productVariants");
-      const variantTypeRemote = await fetchStoreSetting("productVariantType");
-      const sizesRemote = await fetchStoreSetting("productSizes");
-      const sizeStockRemote = await fetchStoreSetting("productSizeStock");
-      const imageAdjustmentsRemote = await fetchStoreSetting("productImageAdjustments");
-      const promotionalOffersRemote = await fetchStoreSetting("promotionalOffers");
+      const [
+        remote,
+        barcodeRemote,
+        hsnCodeRemote,
+        billNameRemote,
+        pricingRemote,
+        variantsRemote,
+        variantTypeRemote,
+        sizesRemote,
+        sizeStockRemote,
+        imageAdjustmentsRemote,
+        promotionalOffersRemote,
+      ] = await Promise.all([
+        fetchCatalogProducts(),
+        fetchStoreSetting("productBarcodes"),
+        fetchStoreSetting("productHsnCodes"),
+        fetchStoreSetting("productBillNames"),
+        fetchStoreSetting("productPricing"),
+        fetchStoreSetting("productVariants"),
+        fetchStoreSetting("productVariantType"),
+        fetchStoreSetting("productSizes"),
+        fetchStoreSetting("productSizeStock"),
+        fetchStoreSetting("productImageAdjustments"),
+        fetchStoreSetting("promotionalOffers"),
+      ]);
       const storedPromotionalOffers = promotionalOffersRemote.value || window.localStorage.getItem(promotionStorageKey);
       if (storedPromotionalOffers) {
         try {
@@ -5479,6 +5918,13 @@ function ProductLibraryWorkspace({
     () => Array.from(new Set(products.map((product) => product.category.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
     [products],
   );
+  const categoryOptions = useMemo(
+    () => Array.from(new Set([
+      ...catalogCategories.map((category) => category.name.trim()),
+      ...productCategories,
+    ].filter(Boolean))).sort((a, b) => a.localeCompare(b)),
+    [catalogCategories, productCategories],
+  );
   const productVariants = useMemo(
     () => Array.from(new Set(products.flatMap((product) => product.variants?.map((variant) => variant.name.trim()).filter(Boolean) || []))).sort((a, b) => a.localeCompare(b)),
     [products],
@@ -5501,6 +5947,35 @@ function ProductLibraryWorkspace({
       return matchesSearch && matchesCategory && matchesVariant;
     });
   }, [productCategoryFilter, productSearch, productVariantFilter, products]);
+  const damageOptions = useMemo(() => {
+    if (!selectedProduct) return [];
+    const variants = selectedProduct.variants || [];
+    if (variants.length) {
+      return variants.map((variant, index) => {
+        const label = selectedProduct.variantType === "size"
+          ? (variant.size || variant.name || `Size ${index + 1}`)
+          : (variant.name || `Option ${index + 1}`);
+        const stock = selectedProduct.variantType === "size"
+          ? Number(variant.stock ?? selectedProduct.sizeStock?.[label] ?? 0)
+          : Number(variant.stock || 0);
+        return { key: `variant:${index}`, label, stock, index };
+      });
+    }
+    if (selectedProduct.variantType === "size" && selectedProduct.sizes?.length) {
+      return selectedProduct.sizes.map((size) => ({
+        key: `size:${size}`,
+        label: `Size ${size}`,
+        stock: Number(selectedProduct.sizeStock?.[size] || 0),
+        size,
+      }));
+    }
+    return [];
+  }, [selectedProduct]);
+  const selectedLiveStock = useMemo(() => {
+    if (!selectedProduct) return 0;
+    if (damageOptions.length) return damageOptions.reduce((total, option) => total + Math.max(0, option.stock), 0);
+    return Math.max(0, Number(selectedProduct.stock) || 0);
+  }, [damageOptions, selectedProduct]);
   const updateField = (field: keyof typeof newProduct, value: string) =>
     setNewProduct((current) => {
       const next = {
@@ -5518,6 +5993,109 @@ function ProductLibraryWorkspace({
       if (field === "price") next.markup = calculateMarkupFromSellingPrice(next.cost, next.gstRate, next.price);
       return next;
     });
+  const openDamageForm = (product: AdminProduct) => {
+    setSelectedProduct(product);
+    setIsAdding(false);
+    setIsEditing(false);
+    setDamageQuantity("1");
+    setDamageReason("");
+    setDamageVariantKey("");
+    setDamageFormOpen(true);
+  };
+  const saveDamage = async () => {
+    if (!selectedProduct || damageSaving) return;
+    setDamageSaving(true);
+    const quantity = Math.floor(Number(damageQuantity));
+    if (!Number.isFinite(quantity) || quantity < 1) {
+      setDamageSaving(false);
+      return onNotify("Enter a valid damaged quantity");
+    }
+    if (!damageReason.trim()) {
+      setDamageSaving(false);
+      return onNotify("Add a reason for the damaged stock");
+    }
+
+    try {
+      const variants = (selectedProduct.variants || []).map((variant) => ({ ...variant }));
+      const sizeStock = { ...(selectedProduct.sizeStock || {}) };
+      let availableStock = Number(selectedProduct.stock) || 0;
+      let stockScope = "Product stock";
+      if (damageVariantKey.startsWith("variant:")) {
+        const index = Number(damageVariantKey.split(":")[1]);
+        const variant = variants[index];
+        if (!variant) return onNotify("Select a valid variant or size");
+        const label = selectedProduct.variantType === "size"
+          ? (variant.size || variant.name || `Size ${index + 1}`)
+          : (variant.name || `Option ${index + 1}`);
+        availableStock = selectedProduct.variantType === "size"
+          ? Number(variant.stock ?? sizeStock[label] ?? 0)
+          : Number(variant.stock || 0);
+        stockScope = label;
+        if (quantity > availableStock) return onNotify(`Only ${availableStock} units available for ${label}`);
+        variant.stock = availableStock - quantity;
+        if (selectedProduct.variantType === "size") sizeStock[label] = availableStock - quantity;
+      } else if (damageVariantKey.startsWith("size:")) {
+        const size = damageVariantKey.slice(5);
+        availableStock = Number(sizeStock[size] || 0);
+        stockScope = `Size ${size}`;
+        if (quantity > availableStock) return onNotify(`Only ${availableStock} units available for Size ${size}`);
+        sizeStock[size] = availableStock - quantity;
+      } else {
+        if (damageOptions.length) return onNotify("Select the variant or size that was damaged");
+        if (quantity > availableStock) return onNotify(`Only ${availableStock} units available`);
+      }
+      const liveStock = variants.length
+        ? variants.reduce((total, variant) => total + Math.max(0, Number(variant.stock) || 0), 0)
+        : selectedProduct.variantType === "size" && selectedProduct.sizes?.length
+          ? selectedProduct.sizes.reduce((total, size) => total + Math.max(0, Number(sizeStock[size]) || 0), 0)
+          : Math.max(0, availableStock - quantity);
+      const updated: AdminProduct = {
+        ...selectedProduct,
+        stock: liveStock,
+        sizeStock,
+        variants,
+        status: liveStock > 0 ? "Published" : "Draft",
+      };
+      const nextProducts = products.map((product) => product.sku === selectedProduct.sku ? updated : product);
+      const nextRecord: ProductDamageRecord = {
+        id: `damage-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        sku: selectedProduct.sku,
+        productName: selectedProduct.name,
+        quantity,
+        reason: damageReason.trim(),
+        stockScope,
+        createdAt: new Date().toISOString(),
+      };
+      const nextDamages: ProductDamageMap = {
+        ...productDamages,
+        [selectedProduct.sku]: [...(productDamages[selectedProduct.sku] || []), nextRecord],
+      };
+      let remoteProductError: Error | null = null;
+      let settingErrors: Array<Error | null> = [];
+      try {
+        remoteProductError = await saveCatalogProduct(toCatalogProduct(updated));
+        settingErrors = await Promise.all([
+          saveProductSizes(nextProducts),
+          saveProductSizeStock(nextProducts),
+          saveProductVariants(nextProducts),
+          saveProductVariantTypes(nextProducts),
+          saveStoreSetting("productDamages", JSON.stringify(nextDamages)),
+        ]);
+      } catch (error) {
+        settingErrors = [error instanceof Error ? error : new Error(String(error))];
+      }
+      setProducts(nextProducts);
+      setSelectedProduct(updated);
+      setProductDamages(nextDamages);
+      persistCatalog(nextProducts);
+      persistProductDamages(nextDamages);
+      setDamageFormOpen(false);
+      const remoteError = remoteProductError || settingErrors.find(Boolean);
+      onNotify(remoteError ? "Damage recorded locally; Supabase needs its tables" : `${quantity} damaged unit${quantity === 1 ? "" : "s"} recorded`);
+    } finally {
+      setDamageSaving(false);
+    }
+  };
   const updateNewSizes = (value: string) => setNewProduct((current) => {
     const sizes = parseProductSizes(value);
     const sizeStock = Object.fromEntries(sizes.map((size) => [size, current.sizeStock[size] ?? ""]));
@@ -5554,6 +6132,13 @@ function ProductLibraryWorkspace({
     setSelectedProduct(null);
     setIsEditing(false);
     setIsAdding(true);
+  };
+  const closeProductDetails = () => {
+    setSelectedProduct(null);
+    setIsEditing(false);
+    setProductSearch("");
+    setProductCategoryFilter("all");
+    setProductVariantFilter("all");
   };
   const saveProduct = async () => {
     if (!newProduct.name.trim()) return onNotify("Add a product name");
@@ -6342,10 +6927,9 @@ function ProductLibraryWorkspace({
                     updateField("category", event.target.value)
                   }
                 >
-                  <option>Earrings</option>
-                  <option>Necklaces</option>
-                  <option>Bracelets</option>
-                  <option>Rings</option>
+                  {Array.from(new Set([newProduct.category, ...categoryOptions].filter(Boolean))).map((category) => (
+                    <option key={category}>{category}</option>
+                  ))}
                 </select>
               </label>
               <label style={{ display: newProduct.variantType === "size" && !newProduct.variants.length ? undefined : "none" }}>
@@ -6769,10 +7353,9 @@ function ProductLibraryWorkspace({
                   }))
                 }
               >
-                <option>Earrings</option>
-                <option>Necklaces</option>
-                <option>Bracelets</option>
-                <option>Rings</option>
+                {Array.from(new Set([editValues.category, ...categoryOptions].filter(Boolean))).map((category) => (
+                  <option key={category}>{category}</option>
+                ))}
               </select>
             </label>
             <label style={{ display: editValues.variantType === "size" && !editValues.variants.length ? undefined : "none" }}>
@@ -6865,7 +7448,7 @@ function ProductLibraryWorkspace({
           </div>
         </div>
       )}
-      {selectedProduct && !isEditing && (
+      {selectedProduct && !isEditing && !damageFormOpen && (
         <div className="product-detail-card">
           <div className="product-detail-image">
             <img src={selectedProduct.image} alt="" />
@@ -6888,10 +7471,12 @@ function ProductLibraryWorkspace({
               <span>
                 <small>Inventory</small>
                 <strong>
-                  {selectedProduct.stock === 0
-                    ? "Draft"
-                    : `${selectedProduct.stock} units`}
+                  {selectedLiveStock} units
                 </strong>
+              </span>
+              <span>
+                <small>Damaged stock</small>
+                <strong>{(productDamages[selectedProduct.sku] || []).reduce((total, record) => total + record.quantity, 0)} units</strong>
               </span>
               <span>
                 <small>Status</small>
@@ -6914,19 +7499,79 @@ function ProductLibraryWorkspace({
                 <strong>{selectedProduct.sizes?.length ? selectedProduct.sizes.join(", ") : "Not added"}</strong>
               </span>
             </div>
+            {(productDamages[selectedProduct.sku] || []).length > 0 && (
+              <div className="damage-history">
+                <p className="eyebrow">DAMAGE HISTORY</p>
+                {(productDamages[selectedProduct.sku] || []).slice(-3).reverse().map((record) => (
+                  <div className="damage-history-row" key={record.id}>
+                    <strong>{record.quantity} unit{record.quantity === 1 ? "" : "s"} · {record.stockScope}</strong>
+                    <span>{record.reason} · {new Date(record.createdAt).toLocaleDateString("en-IN")}</span>
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="product-detail-actions">
               <button
                 className="module-primary"
+                onClick={() => openDamageForm(selectedProduct)}
+              >
+                Add damaged stock
+              </button>
+              <button
+                className="module-secondary"
                 onClick={() => startEditing(selectedProduct)}
               >
                 Edit product
               </button>
               <button
                 className="module-secondary"
-                onClick={() => setSelectedProduct(null)}
+                onClick={closeProductDetails}
               >
                 Close
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {damageFormOpen && selectedProduct && (
+        <div className="product-modal-backdrop damage-modal-backdrop" onClick={() => setDamageFormOpen(false)}>
+          <div className="product-detail-card damage-detail-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="product-detail-copy">
+              <p className="eyebrow">INVENTORY ADJUSTMENT</p>
+              <h3>Record damaged stock</h3>
+              <p className="product-detail-meta">{selectedProduct.name} · {selectedProduct.sku}</p>
+              <p className="field-help">Damaged stock is removed from the live storefront inventory immediately.</p>
+              <div className="product-form-grid damage-form-grid">
+                {damageOptions.length > 0 && (
+                  <label>
+                    Damaged variant / size
+                    <select value={damageVariantKey} onChange={(event) => setDamageVariantKey(event.target.value)}>
+                      <option value="">Select an option</option>
+                      {damageOptions.map((option) => (
+                        <option key={option.key} value={option.key} disabled={option.stock < 1}>
+                          {option.label} · {option.stock} available
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                <label>
+                  Damaged quantity
+                  <input type="number" min="1" step="1" value={damageQuantity} onChange={(event) => setDamageQuantity(event.target.value)} onWheel={(event) => event.currentTarget.blur()} />
+                </label>
+                <label className="form-wide">
+                  Reason
+                  <input value={damageReason} onChange={(event) => setDamageReason(event.target.value)} placeholder="e.g. Broken, scratched, or missing stone" />
+                </label>
+              </div>
+              <div className="damage-available-note">
+                <span>Live stock now</span>
+                <strong>{selectedLiveStock} units</strong>
+              </div>
+              <div className="product-detail-actions">
+                <button className="module-primary" disabled={damageSaving} onClick={() => void saveDamage()}>{damageSaving ? "Saving damage…" : "Save damage"}</button>
+                <button className="module-secondary" onClick={() => setDamageFormOpen(false)}>Cancel</button>
+              </div>
             </div>
           </div>
         </div>

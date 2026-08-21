@@ -50,7 +50,10 @@ const settingKeys = {
   productSizes: "product_sizes",
   productSizeStock: "product_size_stock",
   productImageAdjustments: "product_image_adjustments",
+  productDamages: "product_damages",
   promotionalOffers: "promotional_offers",
+  printerName: "printer_name",
+  billDesign: "bill_design",
 } as const;
 
 const asError = (value: unknown) => value instanceof Error ? value : new Error(String(value || "Supabase request failed"));

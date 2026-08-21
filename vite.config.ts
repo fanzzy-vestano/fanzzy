@@ -66,9 +66,14 @@ export default defineConfig(async ({ command }) => {
         usesExternalPaymentApi ? process.env.RAZORPAY_API_URL?.trim() || defaultRazorpayApiUrl : "",
       ),
     },
-    server: isCodexSeatbeltSandbox
-      ? { watch: { useFsEvents: false, usePolling: true } }
-      : undefined,
+    // The local preview can serve HTTP through a browser proxy that does not
+    // keep Vite's HMR WebSocket open. Forwarding browser errors over that
+    // socket then masks the actual storefront with a secondary `send` error.
+    // HMR itself remains available where the socket is supported.
+    server: {
+      forwardConsole: false,
+      ...(isCodexSeatbeltSandbox ? { watch: { useFsEvents: false, usePolling: true } } : {}),
+    },
     plugins: [
       vinext(),
       sites(),

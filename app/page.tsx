@@ -134,6 +134,43 @@ const readOverlayProduct = (): Product | null => {
 
 const defaultProducts: Product[] = [];
 const defaultCategories: Array<{ name: string; count: string; image: string }> = [];
+const categoryImageFallbacks: Record<string, string> = {
+  anklet: "https://images.unsplash.com/photo-1611652022419-a9419f74343d?auto=format&fit=crop&w=900&q=85",
+  anklets: "https://images.unsplash.com/photo-1611652022419-a9419f74343d?auto=format&fit=crop&w=900&q=85",
+  bracelet: "https://images.unsplash.com/photo-1611652022419-a9419f74343d?auto=format&fit=crop&w=900&q=85",
+  bracelets: "https://images.unsplash.com/photo-1611652022419-a9419f74343d?auto=format&fit=crop&w=900&q=85",
+  earring: "https://images.unsplash.com/photo-1635767798638-3e25273a8236?auto=format&fit=crop&w=900&q=85",
+  earrings: "https://images.unsplash.com/photo-1635767798638-3e25273a8236?auto=format&fit=crop&w=900&q=85",
+  necklace: "https://images.unsplash.com/photo-1617038220319-276d3cfab638?auto=format&fit=crop&w=900&q=85",
+  necklaces: "https://images.unsplash.com/photo-1617038220319-276d3cfab638?auto=format&fit=crop&w=900&q=85",
+  ring: "https://images.unsplash.com/photo-1605100804763-247f67b3557e?auto=format&fit=crop&w=900&q=85",
+  rings: "https://images.unsplash.com/photo-1605100804763-247f67b3557e?auto=format&fit=crop&w=900&q=85",
+};
+const categoryImageFallback = (name: string, index: number) =>
+  categoryImageFallbacks[name.trim().toLowerCase()] || Object.values(categoryImageFallbacks)[index % 4];
+const persistStorefrontProductCache = (catalog: Product[]) => {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem("fanzzy-products", JSON.stringify(catalog));
+    return;
+  } catch {
+    // Large data-URL images can exceed localStorage in a test browser. Keep
+    // the complete product list cached while dropping only those heavy blobs.
+  }
+  try {
+    window.localStorage.setItem("fanzzy-products", JSON.stringify(catalog.map((product) => ({
+      ...product,
+      image: product.image.startsWith("data:") ? "" : product.image,
+      hoverImage: product.hoverImage?.startsWith("data:") ? "" : product.hoverImage,
+      variants: product.variants?.map((variant) => ({
+        ...variant,
+        image: variant.image?.startsWith("data:") ? "" : variant.image,
+      })),
+    }))));
+  } catch {
+    // Supabase remains the source of truth when browser storage is full.
+  }
+};
 const demoProductNames = new Set([
   "aurora drop earrings",
   "solstice tennis necklace",
@@ -420,7 +457,7 @@ const isProductOutOfStock = (product: Product) => getProductVariantType(product)
     ? getProductSizes(product).every((size) => getSizeStock(product, size) <= 0)
     : product.stock <= 0;
 
-function ProductCard({ product, wished, promotions, onWishlist, onAdd, onQuickView, onImageZoom }: { product: Product; wished: boolean; promotions: PromotionOffer[]; onWishlist: () => void; onAdd: () => void; onQuickView: () => void; onImageZoom: () => void }) {
+function ProductCard({ product, wished, promotions, cartQuantity, onWishlist, onAdd, onDecrease, onIncrease, onQuickView, onImageZoom }: { product: Product; wished: boolean; promotions: PromotionOffer[]; cartQuantity: number; onWishlist: () => void; onAdd: () => void; onDecrease: () => void; onIncrease: () => void; onQuickView: () => void; onImageZoom: () => void }) {
   const isOutOfStock = isProductOutOfStock(product);
   const discountPercent = getProductDiscountPercent(product);
   return (
@@ -441,7 +478,7 @@ function ProductCard({ product, wished, promotions, onWishlist, onAdd, onQuickVi
           <p className="eyebrow">{product.category}</p>
           <h3>{product.name}</h3>
         </div>
-        <button className="add-to-cart-button" type="button" onClick={onAdd} disabled={isOutOfStock} aria-label={isOutOfStock ? `${product.name} is sold out` : `Add ${product.name} to cart`}>Add to cart</button>
+        {cartQuantity > 0 ? <div className="product-cart-control is-added"><button type="button" onClick={onDecrease} aria-label={`Decrease ${product.name} quantity`}>−</button><span>{cartQuantity}</span><button type="button" onClick={onIncrease} aria-label={`Increase ${product.name} quantity`}>+</button></div> : <button className="add-to-cart-button" type="button" onClick={onAdd} disabled={isOutOfStock} aria-label={isOutOfStock ? `${product.name} is sold out` : `Add ${product.name} to cart`}>Add to cart</button>}
       </div>
       {getProductVariantType(product) === "normal" && product.variants?.length ? <button className="product-variants-preview" onClick={onQuickView} aria-label={`View ${product.name} variants`}><span>{product.variants.length} colour / model option{product.variants.length === 1 ? "" : "s"}</span><span className="product-variant-thumbs">{product.variants.slice(0, 4).map((variant) => <img key={`${product.id}-${variant.name}`} src={variant.image || product.image} alt={variant.name} style={imageAdjustmentStyle(variant.adjustments)} />)}</span><b>View ↗</b></button> : null}
       <div className="price-row"><span>{formatINR(getCustomerPrice(product))}</span><del>{formatINR(getComparePrice(product))}</del></div>
@@ -451,6 +488,7 @@ function ProductCard({ product, wished, promotions, onWishlist, onAdd, onQuickVi
 
 export default function Home() {
   const [products, setProducts] = useState<Product[]>(defaultProducts);
+  const [catalogLoading, setCatalogLoading] = useState(true);
   const [categories, setCategories] = useState(defaultCategories);
   const [activeCategory, setActiveCategory] = useState("All pieces");
   const [searchOpen, setSearchOpen] = useState(false);
@@ -465,9 +503,11 @@ export default function Home() {
   const cartOwnerId = useRef<string | null>(null);
   const [cartReadyOwner, setCartReadyOwner] = useState<string | null>(null);
   const [cartOpen, setCartOpen] = useState(false);
+  const [cartPreviewOpen, setCartPreviewOpen] = useState(true);
   const [ordersOpen, setOrdersOpen] = useState(false);
   const [orders, setOrders] = useState<CustomerOrder[]>([]);
   const [orderConfirmation, setOrderConfirmation] = useState<CustomerOrder | null>(null);
+  const [printingBillId, setPrintingBillId] = useState<string | null>(null);
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [assistantInput, setAssistantInput] = useState("");
   const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([
@@ -609,9 +649,9 @@ export default function Home() {
     };
     const refreshDeliveryCharge = () => {
       setDeliveryCharge(parseDeliveryCharge(window.localStorage.getItem("fanzzy-delivery-charge")));
-      void loadDeliveryCharge();
+      void loadDeliveryCharge().catch(() => undefined);
     };
-    void loadDeliveryCharge();
+    void loadDeliveryCharge().catch(() => undefined);
     window.addEventListener("fanzzy-delivery-charge-updated", refreshDeliveryCharge);
     window.addEventListener("storage", refreshDeliveryCharge);
     return () => {
@@ -653,9 +693,9 @@ export default function Home() {
     };
     const refreshPickupHubs = () => {
       setPickupHubs(parsePickupHubs(window.localStorage.getItem("fanzzy-pickup-hubs")));
-      void loadPickupHubs();
+      void loadPickupHubs().catch(() => undefined);
     };
-    void loadPickupHubs();
+    void loadPickupHubs().catch(() => undefined);
     window.addEventListener("fanzzy-pickup-hubs-updated", refreshPickupHubs);
     window.addEventListener("storage", refreshPickupHubs);
     return () => {
@@ -666,7 +706,9 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    let active = true;
     const syncProducts = async () => {
+      setCatalogLoading(true);
       // Load the shared catalog and its product settings together. Previously
       // these requests ran one by one, leaving an old cached list on screen
       // while the storefront waited for every product setting to finish.
@@ -824,18 +866,30 @@ export default function Home() {
         // Supabase is the shared catalog. Local storage is only a fallback for
         // devices that are offline or when Supabase has not been configured.
         setProducts(remoteWithLocalVariants);
+        persistStorefrontProductCache(remoteWithLocalVariants);
+        setCatalogLoading(false);
         return;
       }
       if (localProducts.length) setProducts(localProducts);
+      else setProducts(defaultProducts);
+      setCatalogLoading(false);
     };
-    void syncProducts();
-    const onProductsStorage = () => { void syncProducts(); };
-    const onProductsUpdated = () => { void syncProducts(); };
+    const runSyncProducts = () => {
+      void syncProducts().catch(() => {
+        if (!active) return;
+        setProducts(defaultProducts);
+        setCatalogLoading(false);
+      });
+    };
+    runSyncProducts();
+    const onProductsStorage = () => { runSyncProducts(); };
+    const onProductsUpdated = () => { runSyncProducts(); };
     const unsubscribeFromProductSettings = (['productVariants', 'productVariantType', 'productSizes', 'productSizeStock'] as const)
-      .map((key) => subscribeToStoreSetting(key, () => { void syncProducts(); }));
+      .map((key) => subscribeToStoreSetting(key, () => { void syncProducts().catch(() => undefined); }));
     window.addEventListener("storage", onProductsStorage);
     window.addEventListener("fanzzy-products-updated", onProductsUpdated);
     return () => {
+      active = false;
       unsubscribeFromProductSettings.forEach((unsubscribe) => unsubscribe());
       window.removeEventListener("storage", onProductsStorage);
       window.removeEventListener("fanzzy-products-updated", onProductsUpdated);
@@ -864,7 +918,7 @@ export default function Home() {
         setCategories(remote.data.map((category, index) => ({
           name: category.name,
           count: `${category.pieces} pieces`,
-          image: category.image || "",
+          image: category.image || categoryImageFallback(category.name, index),
         })));
         return;
       }
@@ -875,21 +929,32 @@ export default function Home() {
         setCategories(parsed.filter((category) => category.name).map((category, index) => ({
           name: category.name!,
           count: `${category.pieces ?? 0} pieces`,
-          image: category.image || "",
+          image: category.image || categoryImageFallback(category.name!, index),
         })));
       } catch {
         window.localStorage.removeItem("fanzzy-categories");
       }
     };
-    void syncCategories();
-    window.addEventListener("storage", syncCategories);
-    window.addEventListener("fanzzy-categories-updated", syncCategories);
+    const runSyncCategories = () => { void syncCategories().catch(() => undefined); };
+    runSyncCategories();
+    window.addEventListener("storage", runSyncCategories);
+    window.addEventListener("fanzzy-categories-updated", runSyncCategories);
     return () => {
       active = false;
-      window.removeEventListener("storage", syncCategories);
-      window.removeEventListener("fanzzy-categories-updated", syncCategories);
+      window.removeEventListener("storage", runSyncCategories);
+      window.removeEventListener("fanzzy-categories-updated", runSyncCategories);
     };
   }, []);
+
+  useEffect(() => {
+    const requestedCategory = new URLSearchParams(window.location.search).get("category")?.trim().toLowerCase();
+    if (!requestedCategory || !categories.length) return;
+    const matchingCategory = categories.find((category) => category.name.trim().toLowerCase() === requestedCategory);
+    if (!matchingCategory) return;
+    setActiveCategory(matchingCategory.name);
+    overlayPageState.current = { ...overlayPageState.current, activeCategory: matchingCategory.name };
+    window.requestAnimationFrame(() => document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }));
+  }, [categories]);
 
   useEffect(() => {
     let syncInFlight = false;
@@ -939,11 +1004,12 @@ export default function Home() {
         syncInFlight = false;
       }
     };
-    void syncOrders(true);
-    const liveOrderTimer = window.setInterval(() => { void syncOrders(false); }, 3000);
-    const unsubscribeFromLiveOrders = subscribeToStoreSetting("orders", () => { void syncOrders(false); });
-    const onStorageOrdersUpdated = () => { void syncOrders(false); };
-    const onLocalOrdersUpdated = () => { void syncOrders(false); };
+    const runSyncOrders = (recoverCapturedPayments = false) => { void syncOrders(recoverCapturedPayments).catch(() => undefined); };
+    runSyncOrders(true);
+    const liveOrderTimer = window.setInterval(() => { runSyncOrders(false); }, 3000);
+    const unsubscribeFromLiveOrders = subscribeToStoreSetting("orders", () => { runSyncOrders(false); });
+    const onStorageOrdersUpdated = () => { runSyncOrders(false); };
+    const onLocalOrdersUpdated = () => { runSyncOrders(false); };
     window.addEventListener("storage", onStorageOrdersUpdated);
     window.addEventListener("fanzzy-orders-updated", onLocalOrdersUpdated);
     return () => {
@@ -982,6 +1048,16 @@ export default function Home() {
     const product = products.find((item) => matchesProductKey(item, productId));
     return product ? [{ ...product, cartKey, quantity, variant: cartVariants[cartKey] ?? null, size: cartSizes[cartKey] ?? null, promotion: cartPromotionLines[cartKey] ?? null }] : [];
   });
+  const getProductCartLines = (product: Product) => cartItems.filter((item) => item.id === product.id && !item.promotion);
+  const getProductCartQuantity = (product: Product) => getProductCartLines(product).reduce((sum, item) => sum + item.quantity, 0);
+  const increaseProductCart = (product: Product) => {
+    const line = getProductCartLines(product)[0];
+    if (line) updateQuantity(line.cartKey, 1);
+  };
+  const decreaseProductCart = (product: Product) => {
+    const line = getProductCartLines(product)[0];
+    if (line) updateQuantity(line.cartKey, -1);
+  };
   const cartStockIssues = cartItems.filter((product) => {
     const availableStock = getSelectionStock(product, product.variant, product.size);
     return availableStock <= 0 || product.quantity > availableStock;
@@ -1144,12 +1220,13 @@ export default function Home() {
       const stored = window.localStorage.getItem("fanzzy-announcement");
       if (stored !== null) setAnnouncementText(stored);
     };
-    void syncAnnouncement();
-    window.addEventListener("storage", syncAnnouncement);
-    window.addEventListener("fanzzy-announcement-updated", syncAnnouncement);
+    const runSyncAnnouncement = () => { void syncAnnouncement().catch(() => undefined); };
+    runSyncAnnouncement();
+    window.addEventListener("storage", runSyncAnnouncement);
+    window.addEventListener("fanzzy-announcement-updated", runSyncAnnouncement);
     return () => {
-      window.removeEventListener("storage", syncAnnouncement);
-      window.removeEventListener("fanzzy-announcement-updated", syncAnnouncement);
+      window.removeEventListener("storage", runSyncAnnouncement);
+      window.removeEventListener("fanzzy-announcement-updated", runSyncAnnouncement);
     };
   }, []);
 
@@ -1173,12 +1250,13 @@ export default function Home() {
         setActiveCampaign(null);
       }
     };
-    void syncMarketing();
-    window.addEventListener("storage", syncMarketing);
-    window.addEventListener("fanzzy-marketing-updated", syncMarketing);
+    const runSyncMarketing = () => { void syncMarketing().catch(() => undefined); };
+    runSyncMarketing();
+    window.addEventListener("storage", runSyncMarketing);
+    window.addEventListener("fanzzy-marketing-updated", runSyncMarketing);
     return () => {
-      window.removeEventListener("storage", syncMarketing);
-      window.removeEventListener("fanzzy-marketing-updated", syncMarketing);
+      window.removeEventListener("storage", runSyncMarketing);
+      window.removeEventListener("fanzzy-marketing-updated", runSyncMarketing);
     };
   }, []);
 
@@ -1192,12 +1270,13 @@ export default function Home() {
         setPromotionalOffers(parsed.map(normalizePromotionOffer).filter((offer): offer is PromotionOffer => Boolean(offer && isPromotionLive(offer))));
       } catch { setPromotionalOffers([]); }
     };
-    void syncPromotions();
-    window.addEventListener("storage", syncPromotions);
-    window.addEventListener("fanzzy-promotions-updated", syncPromotions);
+    const runSyncPromotions = () => { void syncPromotions().catch(() => undefined); };
+    runSyncPromotions();
+    window.addEventListener("storage", runSyncPromotions);
+    window.addEventListener("fanzzy-promotions-updated", runSyncPromotions);
     return () => {
-      window.removeEventListener("storage", syncPromotions);
-      window.removeEventListener("fanzzy-promotions-updated", syncPromotions);
+      window.removeEventListener("storage", runSyncPromotions);
+      window.removeEventListener("fanzzy-promotions-updated", runSyncPromotions);
     };
   }, []);
 
@@ -1221,14 +1300,15 @@ export default function Home() {
       const storedLegacy = legacy.value || window.localStorage.getItem("fanzzy-hero-image");
       if (storedLegacy && !storedLegacy.includes(blockedHeroImage)) setHeroSlides([storedLegacy]);
     };
-    void syncHeroSlides();
-    window.addEventListener("storage", syncHeroSlides);
-    window.addEventListener("fanzzy-hero-updated", syncHeroSlides);
-    window.addEventListener("fanzzy-hero-slides-updated", syncHeroSlides);
+    const runSyncHeroSlides = () => { void syncHeroSlides().catch(() => undefined); };
+    runSyncHeroSlides();
+    window.addEventListener("storage", runSyncHeroSlides);
+    window.addEventListener("fanzzy-hero-updated", runSyncHeroSlides);
+    window.addEventListener("fanzzy-hero-slides-updated", runSyncHeroSlides);
     return () => {
-      window.removeEventListener("storage", syncHeroSlides);
-      window.removeEventListener("fanzzy-hero-updated", syncHeroSlides);
-      window.removeEventListener("fanzzy-hero-slides-updated", syncHeroSlides);
+      window.removeEventListener("storage", runSyncHeroSlides);
+      window.removeEventListener("fanzzy-hero-updated", runSyncHeroSlides);
+      window.removeEventListener("fanzzy-hero-slides-updated", runSyncHeroSlides);
     };
   }, []);
 
@@ -1248,12 +1328,13 @@ export default function Home() {
       const parsed = Number(stored);
       if (Number.isFinite(parsed)) setHeroSlideDuration(Math.min(30, Math.max(2, parsed)));
     };
-    void syncHeroSlideDuration();
-    window.addEventListener("storage", syncHeroSlideDuration);
-    window.addEventListener("fanzzy-hero-slides-updated", syncHeroSlideDuration);
+    const runSyncHeroSlideDuration = () => { void syncHeroSlideDuration().catch(() => undefined); };
+    runSyncHeroSlideDuration();
+    window.addEventListener("storage", runSyncHeroSlideDuration);
+    window.addEventListener("fanzzy-hero-slides-updated", runSyncHeroSlideDuration);
     return () => {
-      window.removeEventListener("storage", syncHeroSlideDuration);
-      window.removeEventListener("fanzzy-hero-slides-updated", syncHeroSlideDuration);
+      window.removeEventListener("storage", runSyncHeroSlideDuration);
+      window.removeEventListener("fanzzy-hero-slides-updated", runSyncHeroSlideDuration);
     };
   }, []);
 
@@ -1310,15 +1391,15 @@ export default function Home() {
     if (getSelectionStock(product, variant, size) <= 0) return announce(`${product.name}${size ? ` · Size ${size}` : ""}${variant?.name ? ` · ${variant.name}` : ""} is sold out`);
     const cartKey = [product.id, variant ? (variant.name || variant.image) : "", size || ""].filter(Boolean).join("::");
     setCart((current) => ({ ...current, [cartKey]: 1 }));
+    setCartPreviewOpen(true);
     if (variant) setCartVariants((current) => ({ ...current, [cartKey]: variant }));
     if (size) setCartSizes((current) => ({ ...current, [cartKey]: size }));
-    // Buy now is triggered from quick view. Close that layer after adding so
-    // the cart drawer is visible instead of remaining underneath the modal.
+    // Keep the customer on the collection after adding. The compact cart
+    // summary below provides the next actions without opening the full drawer.
     if (quickProduct) {
       quickProductCloseRequested.current = true;
       setQuickProduct(null);
     }
-    openCart();
     announce(`${product.name}${variant?.name ? ` · ${variant.name}` : ""} added to cart`);
   };
   const addPromotionToCart = (offer: PromotionOffer) => {
@@ -1331,24 +1412,50 @@ export default function Home() {
     if (error) return announce(error);
     const chosen = offer.type === "bundle" ? bundle : [...paid, ...free];
     if (chosen.some((selection) => (selection.stock || 0) <= 0)) return announce("One of the selected variants is out of stock");
+    const selectedQuantities = new Map<string, number>();
+    chosen.forEach((selection) => selectedQuantities.set(selectionKey(selection), (selectedQuantities.get(selectionKey(selection)) || 0) + 1));
+    if (Array.from(selectedQuantities.entries()).some(([key, quantity]) => {
+      const selection = chosen.find((item) => selectionKey(item) === key);
+      return Boolean(selection && quantity > (selection.stock || 0));
+    })) return announce("There is not enough stock for one of the selected variants or sizes");
     const groupId = `${offer.id}-${Date.now()}`;
     const prices = offer.type === "bundle" ? allocateBundlePrices(bundle, offer.fixedBundlePrice) : paid.map(() => 0).concat(free.map(() => 0));
+    const promotionLines: Array<{ cartKey: string; variant: ProductVariant | null; size: string | null; line: PromotionCartLine }> = [];
     const addLine = (selection: PromotionSelection, index: number, role: PromotionCartLine["role"], linePrice: number) => {
       const product = products.find((item) => item.id === selection.productId || item.sku === selection.sku) || quickProduct;
       const variant = product.variants?.find((item) => item.name === selection.variantName) || null;
       const size = selection.size || null;
       const cartKey = `${product.id}::${variant?.name || ""}::${size || ""}::offer-${groupId}-${index}`;
-      setCart((current) => ({ ...current, [cartKey]: 1 }));
-      if (variant) setCartVariants((current) => ({ ...current, [cartKey]: variant }));
-      if (size) setCartSizes((current) => ({ ...current, [cartKey]: size }));
-      setCartPromotionLines((current) => ({ ...current, [cartKey]: { groupId, offerId: offer.id, role, label: offerTypeLabel(offer), regularPrice: selection.price || product.price, linePrice } }));
+      promotionLines.push({ cartKey, variant, size, line: { groupId, offerId: offer.id, role, label: offerTypeLabel(offer), regularPrice: selection.price || product.price, linePrice } });
     };
     if (offer.type === "bundle") bundle.forEach((selection, index) => addLine(selection, index, "bundle", prices[index] || 0));
     else {
       paid.forEach((selection, index) => addLine(selection, index, "paid", selection.price || 0));
       free.forEach((selection, index) => addLine(selection, paid.length + index, "free", 0));
     }
-    openCart();
+    setCart((current) => {
+      const next = { ...current };
+      promotionLines.forEach(({ cartKey }) => { next[cartKey] = 1; });
+      return next;
+    });
+    setCartPreviewOpen(true);
+    setCartVariants((current) => {
+      const next = { ...current };
+      promotionLines.forEach(({ cartKey, variant }) => { if (variant) next[cartKey] = variant; });
+      return next;
+    });
+    setCartSizes((current) => {
+      const next = { ...current };
+      promotionLines.forEach(({ cartKey, size }) => { if (size) next[cartKey] = size; });
+      return next;
+    });
+    setCartPromotionLines((current) => {
+      const next = { ...current };
+      promotionLines.forEach(({ cartKey, line }) => { next[cartKey] = line; });
+      return next;
+    });
+    quickProductCloseRequested.current = true;
+    setQuickProduct(null);
     announce(`${offerTypeLabel(offer)} added to cart`);
   };
   const updateQuantity = (cartKey: string, delta: number) => {
@@ -1628,32 +1735,20 @@ export default function Home() {
       const topLayer = activeOverlayLayers.at(-1);
       if (!topLayer) return;
 
-      const savedScrollState = window.history.state?.fanzzyOverlayScrollY;
       const pageHistoryState = overlayPageState.current;
-      const savedScrollY = Number(overlayScrollY.current ?? savedScrollState ?? pageHistoryState?.scrollY);
       overlayClosedFromBack.current = true;
       overlayHistoryStack.current = activeOverlayLayers.slice(0, -1);
 
+      const savedScrollY = Number(pageHistoryState?.scrollY);
+      if (Number.isFinite(savedScrollY)) {
+        const restorePageScroll = () => window.scrollTo({ top: Math.max(0, savedScrollY), behavior: "auto" });
+        restorePageScroll();
+        window.requestAnimationFrame(restorePageScroll);
+        window.setTimeout(restorePageScroll, 80);
+      }
+
       if (pageHistoryState?.activeCategory) setActiveCategory(pageHistoryState.activeCategory);
       if (typeof pageHistoryState?.search === "string") setSearch(pageHistoryState.search);
-
-      if (Number.isFinite(savedScrollY)) {
-        const restoreScroll = () => {
-          window.scrollTo({ top: savedScrollY, behavior: "auto" });
-          document.documentElement.scrollTop = savedScrollY;
-          document.body.scrollTop = savedScrollY;
-        };
-        restoreScroll();
-        [50, 200, 600].forEach((delay) => window.setTimeout(restoreScroll, delay));
-        window.requestAnimationFrame(() => {
-          window.requestAnimationFrame(() => {
-            window.scrollTo({ top: savedScrollY, behavior: "auto" });
-            if (activeOverlayLayers.length === 1) {
-              overlayScrollY.current = null;
-            }
-          });
-        });
-      }
 
       switch (topLayer) {
         case "zoomedImage": setZoomedImage(null); break;
@@ -1809,12 +1904,14 @@ export default function Home() {
     if (!authUser) {
       window.localStorage.setItem(checkoutAfterAuthKey, "1");
       setCartOpen(false);
+      setQuickProduct(null);
       setAuthMessage("");
       setAuthOpen(true);
       return;
     }
     setCheckoutErrors({});
     setCartOpen(false);
+    setQuickProduct(null);
     setCheckoutOpen(true);
   };
   const clearCheckoutError = (field: keyof CheckoutErrors) => {
@@ -2129,8 +2226,18 @@ export default function Home() {
       announce(error instanceof Error ? error.message : "Online payment could not start");
     }
   };
-  const downloadBill = (order: CustomerOrder) => {
-    if (!printOrderBill(order)) announce("Allow pop-ups to download your bill");
+  const downloadBill = async (order: CustomerOrder) => {
+    if (printingBillId) return;
+    setPrintingBillId(order.id);
+    announce(`Sending ${order.id} to Essae PR-55…`);
+    try {
+      const printed = await printOrderBill(order);
+      announce(printed ? `Bill ${order.id} sent to Essae PR-55` : "Printing failed: Essae printer is unavailable");
+    } catch {
+      announce("Printing failed: Essae printer is unavailable");
+    } finally {
+      setPrintingBillId(null);
+    }
   };
   const getOrderedProduct = (item: NonNullable<CustomerOrder["items"]>[number]) => {
     const orderedName = item.name.split(" · ")[0].trim().toLowerCase();
@@ -2217,12 +2324,20 @@ export default function Home() {
   };
   const quickOffers = quickProduct ? offersForProduct(quickProduct) : [];
   const activeQuickOffer = selectedPromotion && quickOffers.some((offer) => offer.id === selectedPromotion.id) ? selectedPromotion : quickOffers[0] || null;
-  const quickFreeChoices = activeQuickOffer && quickProduct ? (getProductVariantType(quickProduct) === "normal" && quickProduct.variants?.length ? quickProduct.variants.map((variant) => makePromotionSelection(quickProduct, variant, null)) : [makePromotionSelection(quickProduct, null, selectedSize)]) : [];
+  const quickFreeChoices = activeQuickOffer && quickProduct
+    ? getProductVariantType(quickProduct) === "normal" && quickProduct.variants?.length
+      ? quickProduct.variants.map((variant) => makePromotionSelection(quickProduct, variant, null))
+      : getProductVariantType(quickProduct) === "size" && getProductSizes(quickProduct).length
+        ? getProductSizes(quickProduct).map((size) => makePromotionSelection(quickProduct, null, size))
+        : [makePromotionSelection(quickProduct, null, null)]
+    : [];
   const quickBundleChoices = activeQuickOffer?.type === "bundle" ? products.flatMap((product) => getProductVariantType(product) === "normal" && product.variants?.length ? product.variants.map((variant) => makePromotionSelection(product, variant, null)) : [makePromotionSelection(product)]) : [];
   const isSelectionEligible = (offer: PromotionOffer, selection: PromotionSelection, bucket: "paid" | "free") => {
     const scope = bucket === "paid" ? offer.eligiblePaid : offer.eligibleFree;
     if (!scope.length) return true;
-    return scope.some((item) => selectionKey(item) === selectionKey(selection) || item.productId === selection.productId);
+    return scope.some((item) => item.productId === selection.productId && (
+      selectionKey(item) === selectionKey(selection) || (!item.variantName && !item.size)
+    ));
   };
 
   return (
@@ -2236,7 +2351,7 @@ export default function Home() {
           <label className="navbar-search"><span aria-hidden="true">⌕</span><input readOnly placeholder="Search jewellery" onFocus={openSearch} aria-label="Open search" /></label>
           <button className="header-action-with-icon saved-header-action" onClick={() => setSavedOpen(true)} aria-label="View saved pieces"><svg className="header-action-icon" viewBox="0 0 16 16" aria-hidden="true" fill="none"><path d="M8 13.25S2.75 10.15 2.75 6.55A2.55 2.55 0 0 1 8 5.8a2.55 2.55 0 0 1 5.25.75C13.25 10.15 8 13.25 8 13.25Z" /></svg><span className="action-label">Saved</span>{wishlist.length > 0 && <b>{wishlist.length}</b>}</button>
           <button className="header-action-with-icon" onClick={openOrders} aria-label="View my orders"><svg className="header-action-icon" viewBox="0 0 16 16" aria-hidden="true" fill="none"><path d="M5 2.5h6v11L8 11.7 5 13.5v-11Z" /><path d="M6.6 5.4h2.8M6.6 7.7h2.1" /></svg><span className="action-label">My orders</span>{orders.length > 0 && <b>{orders.length}</b>}</button>
-          <button className="header-action-with-icon" onClick={openCart} aria-label={cartCount > 0 ? `Open shopping cart, ${cartCount} item${cartCount === 1 ? "" : "s"}` : "Open shopping cart"}><svg className="header-action-icon" viewBox="0 0 16 16" aria-hidden="true" fill="none"><path d="M4 5.5h8l-.65 8H4.65L4 5.5Z" /><path d="M6.25 5.5V4.25a1.75 1.75 0 0 1 3.5 0V5.5" /></svg><span className="action-label">Cart</span>{cartCount > 0 && <span className="bag-count">({cartCount})</span>}</button>
+          <button className="header-action-with-icon" onClick={openCart} aria-label={cartCount > 0 ? `Open shopping cart, ${cartCount} item${cartCount === 1 ? "" : "s"}` : "Open shopping cart"}><svg className="header-action-icon cart-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none"><path d="M3 4h2l2.2 11h10.9l3-8H6" /><circle cx="9" cy="19" r="1.5" /><circle cx="18" cy="19" r="1.5" /></svg><span className="action-label">Cart</span>{cartCount > 0 && <span className="bag-count">({cartCount})</span>}</button>
           <button className="profile-button" onClick={() => setProfileOpen(true)} aria-label="View account profile"><span className="profile-logo" data-signed-in={authUser ? "true" : "false"} aria-hidden="true"><span /></span><span className="action-label">Profile</span></button>
         </div>
         <button className="mobile-menu" onClick={() => setMobileNavOpen((current) => !current)} aria-label={mobileNavOpen ? "Close menu" : "Open menu"} aria-expanded={mobileNavOpen}>{mobileNavOpen ? "×" : "☰"}</button>
@@ -2260,11 +2375,11 @@ export default function Home() {
 
       {heroSlides.length > 0 && <section className="hero hero-background" id="top"><div className="hero-slide-layer" key={heroSlides[heroSlideIndex]}><img src={heroSlides[heroSlideIndex]} alt="Fanzzy collection highlight" /></div></section>}
 
-      <section className="section-block" id="categories"><div className="category-showcase"><div className="category-intro"><h2>Find your <em>signature.</em></h2><a className="text-link" href={`${siteBasePath}/collections`}>View all categories <span>↗</span></a></div><div className="category-grid">{categories.slice(0, 4).map((category, index) => <button className={`category-card category-${index + 1}`} key={category.name} onClick={() => { selectCategory(category.name); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}><img src={category.image} alt="" /><span className="category-overlay" /><span className="category-info"><strong>{category.name}</strong></span></button>)}</div></div></section>
+      <section className="section-block" id="categories"><div className="category-showcase"><div className="category-intro"><h2>Find your <em>signature.</em></h2><a className="text-link" href={`${siteBasePath}/collections`}>View all categories <span>↗</span></a></div><div className="category-grid">{categories.slice(0, 4).map((category, index) => <button className={`category-card category-${index + 1}`} key={category.name} onClick={() => { selectCategory(category.name); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}><img src={category.image || categoryImageFallback(category.name, index)} alt={category.name} /><span className="category-overlay" /><span className="category-info"><strong>{category.name}</strong></span></button>)}</div></div></section>
 
       <section className="manifesto"><p className="eyebrow">THE FANZZY STANDARD</p><h2>Jewellery with a point of view.<br /><em>Made for your everyday extraordinary.</em></h2><p className="manifesto-copy">Fanzzy is a study in contrast — soft and sculptural, familiar and unexpected. Every piece is made in small batches with considered materials and a little bit of magic.</p></section>
 
-      <section className="section-block product-section" id="shop"><div className="section-heading"><div><p className="eyebrow">CURATED FOR YOU</p><h2>Pieces worth <em>keeping.</em></h2></div><a className="text-link" href="#footer">Shop all <span>↗</span></a></div>{promotionalOffers.length > 0 && <div className="storefront-offer-rail"><span className="eyebrow">LIVE OFFERS</span>{promotionalOffers.slice(0, 3).map((offer) => <button key={offer.id} onClick={() => { const first = products.find((product) => offersForProduct(product).some((item) => item.id === offer.id)); if (first) openQuickProduct(first); }}>{offerTypeLabel(offer)} <b>↗</b></button>)}</div>}<div className="filter-row"><div className="filter-pills"><button className={activeCategory === "All pieces" ? "active" : ""} onClick={() => selectCategory("All pieces")}>All pieces</button>{categories.map((category) => <button className={activeCategory === category.name ? "active" : ""} key={category.name} onClick={() => selectCategory(category.name)}>{category.name}</button>)}</div><span className="result-count">{filteredProducts.length} pieces</span></div><div className="product-grid">{filteredProducts.map((product) => <ProductCard key={product.id} product={product} promotions={offersForProduct(product)} wished={wishlist.includes(product.id)} onWishlist={() => toggleWishlist(product.id)} onAdd={() => (getProductVariantType(product) === "normal" && product.variants?.length) || (getProductVariantType(product) === "size" && product.sizes?.length) || offersForProduct(product).length ? openQuickProduct(product) : addToCart(product)} onQuickView={() => openQuickProduct(product)} onImageZoom={() => setZoomedImage({ src: product.image, alt: product.name, adjustments: product.imageAdjustments })} />)}</div></section>
+      <section className="section-block product-section" id="shop"><div className="section-heading"><div><p className="eyebrow">CURATED FOR YOU</p><h2>Pieces worth <em>keeping.</em></h2></div><a className="text-link" href="#footer">Shop all <span>↗</span></a></div>{promotionalOffers.length > 0 && <div className="storefront-offer-rail"><span className="eyebrow">LIVE OFFERS</span><div className="storefront-offer-list">{promotionalOffers.map((offer) => <button key={offer.id} onClick={() => { const first = products.find((product) => offersForProduct(product).some((item) => item.id === offer.id)); if (first) openQuickProduct(first); }}>{offerTypeLabel(offer)} {offer.freeQuantity > 0 && <span className="offer-free-label">FREE</span>} <b>↗</b></button>)}</div></div>}<div className="filter-row"><div className="filter-pills"><button className={activeCategory === "All pieces" ? "active" : ""} onClick={() => selectCategory("All pieces")}>All pieces</button>{categories.map((category) => <button className={activeCategory === category.name ? "active" : ""} key={category.name} onClick={() => selectCategory(category.name)}>{category.name}</button>)}</div><span className="result-count">{catalogLoading ? "Loading pieces…" : `${filteredProducts.length} pieces`}</span></div><div className="product-grid">{catalogLoading ? <p className="muted">Loading all pieces…</p> : filteredProducts.map((product) => <ProductCard key={product.id} product={product} promotions={offersForProduct(product)} cartQuantity={getProductCartQuantity(product)} wished={wishlist.includes(product.id)} onWishlist={() => toggleWishlist(product.id)} onAdd={() => (getProductVariantType(product) === "normal" && product.variants?.length) || (getProductVariantType(product) === "size" && product.sizes?.length) || offersForProduct(product).length ? openQuickProduct(product) : addToCart(product)} onDecrease={() => decreaseProductCart(product)} onIncrease={() => increaseProductCart(product)} onQuickView={() => openQuickProduct(product)} onImageZoom={() => setZoomedImage({ src: product.image, alt: product.name, adjustments: product.imageAdjustments })} />)}</div></section>
 
       <section className="editorial" id="story"><div className="editorial-image"><img src="https://images.unsplash.com/photo-1515562141207-7a88fb7ce338?auto=format&fit=crop&w=1100&q=85" alt="Close-up of sculptural gold jewelry" /><span>THE ART OF<br /><em>ADORNMENT</em></span></div><div className="editorial-copy"><p className="eyebrow">A NOTE FROM THE STUDIO</p><h2>Less noise.<br /><em>More meaning.</em></h2><p>There is beauty in the in-between. The way a quiet chain layers with your favourite shirt. A ring that becomes part of your hand. Fanzzy is made for these small rituals — the ones that make a day feel like yours.</p><a className="button button-dark" href="#footer">Read our story <span>↗</span></a><div className="editorial-sign">F / 19<br /></div></div></section>
 
@@ -2274,7 +2389,22 @@ export default function Home() {
 
       <footer className="site-footer" id="footer"><div className="footer-brand"><a href="#top" className="wordmark wordmark-light"><img src={siteAsset("fanzzy-mark.png")} alt="Fanzzy" className="brand-logo" /></a><p>Quietly remarkable jewellery<br />for all your becoming.</p></div><div><p className="eyebrow light">Explore</p><a href="#shop">New arrivals</a><a href="#shop">Bestsellers</a><a href="#categories">Collections</a><a href="#shop">Gift cards</a></div><div><p className="eyebrow light">Need a hand?</p><a href="#footer">Contact us</a><a href="#footer">Shipping & returns</a><a href="#footer">Care guide</a><a href="#footer">FAQs</a></div><div><p className="eyebrow light">Follow along</p><a href="https://www.instagram.com/fanzzy.in/?hl=en" target="_blank" rel="noreferrer">Instagram ↗</a><a href="https://www.facebook.com/profile.php?id=61593401750910" target="_blank" rel="noreferrer">Facebook ↗</a><a href="https://www.pinterest.com/fanzzyv/" target="_blank" rel="noreferrer">Pinterest ↗</a><a href="#footer">WhatsApp ↗</a><p className="footer-small">Made with intention in India.<br />© Fanzzy 2024</p></div><div className="footer-bottom"><button type="button" onClick={() => setPrivacyOpen(true)}>Privacy</button><button type="button" onClick={() => setTermsOpen(true)}>Terms</button><button type="button" onClick={() => setReturnPolicyOpen(true)}>Return Policy</button><span>Accessibility</span><span>India / INR ₹</span></div></footer>
 
-      <button className="whatsapp-float" onClick={() => setAssistantOpen(true)} aria-label="Open Fanzzy AI Assistant">✦ <span>Chat with AI</span></button>
+      <button className={`whatsapp-float ${cartItems.length > 0 && !cartOpen && cartPreviewOpen ? "cart-preview-visible" : ""}`} onClick={() => setAssistantOpen(true)} aria-label="Open Fanzzy AI Assistant">✦ <span>Chat with AI</span></button>
+
+      {cartItems.length > 0 && !cartOpen && cartPreviewOpen && <aside className="cart-preview-bar" aria-label="Cart summary">
+        <div className="cart-preview-heading">
+          <div><p className="eyebrow">YOUR CART</p><strong>{cartCount} piece{cartCount === 1 ? "" : "s"}</strong></div>
+          <div className="cart-preview-heading-total"><b>{formatINR(orderTotal)}</b><button type="button" onClick={() => setCartPreviewOpen(false)} aria-label="Close cart preview">×</button></div>
+        </div>
+        <div className="cart-preview-items">
+          {cartItems.slice(0, 2).map((item) => <span key={item.cartKey}>{item.name}{item.variant?.name ? ` · ${item.variant.name}` : ""}{item.size ? ` · Size ${item.size}` : ""} × {item.quantity}</span>)}
+          {cartItems.length > 2 && <span>+ {cartItems.length - 2} more item{cartItems.length - 2 === 1 ? "" : "s"}</span>}
+        </div>
+        <div className="cart-preview-actions">
+          <button type="button" className="cart-preview-view" onClick={openCart}>View cart</button>
+          <button type="button" className="button button-dark" onClick={() => void openCheckout()} disabled={cartStockIssues.length > 0}>Proceed to buy <span>↗</span></button>
+        </div>
+      </aside>}
 
       {termsOpen && <div className="drawer-backdrop terms-backdrop" onClick={() => setTermsOpen(false)}><section className="terms-modal" role="dialog" aria-modal="true" aria-labelledby="terms-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">FANZZY</p><h2 id="terms-title">Terms &amp; Conditions</h2></div><button aria-label="Close terms" onClick={() => setTermsOpen(false)}>×</button></div><div className="terms-content"><p>By using <strong>Fanzzy</strong> and placing an order, you agree to the following terms:</p><ul><li>Product colours and appearance may slightly vary from images shown.</li><li>Where a product video is available, customers can view it by opening the product details.</li><li>Prices, offers and product availability may change without prior notice.</li><li>Orders are confirmed only after successful payment/confirmation.</li><li>Delivery time may vary depending on location and courier service.</li><li>Returns, exchanges and refunds are subject to our <strong>Return &amp; Refund Policy</strong>.</li><li>Fanzzy reserves the right to cancel orders due to stock, payment, pricing or technical issues.</li><li>Customer information will be handled according to our <strong>Privacy Policy</strong>.</li><li>All website content, images and the Fanzzy brand are protected and may not be copied without permission.</li><li>These terms are governed by applicable laws of <strong>India</strong>.</li></ul><p>For any assistance, please contact <strong>Fanzzy Customer Support</strong>.</p><p><strong>© 2026 Fanzzy. All Rights Reserved.</strong></p></div></section></div>}
 
@@ -2285,15 +2415,15 @@ export default function Home() {
 
       {searchOpen && <div className="overlay search-overlay" role="dialog" aria-modal="true" aria-label="Search"><div className="overlay-top"><span className="wordmark"><img src={siteAsset("fanzzy-mark.png")} alt="Fanzzy" className="brand-logo" /></span><button onClick={closeSearch}>Close&nbsp; ×</button></div><div className="search-content"><p className="eyebrow">SEARCH THE COLLECTION</p><div className="large-search"><input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Try “gold hoops”" /><span>⌕</span></div>{search && <div className="search-results">{filteredProducts.length ? filteredProducts.map((product) => <button key={product.id} onClick={() => { openQuickProduct(product) }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(getCustomerPrice(product))}</small></span><b>↗</b></button>) : <p className="muted">No pieces found. Try another search.</p>}</div>}{!search && <div className="search-suggestions"><span>Trending now</span><button onClick={() => setSearch("hoops")}>Hoops</button><button onClick={() => setSearch("pearl")}>Pearls</button><button onClick={() => setSearch("chain")}>Chains</button></div>}</div></div>}
 
-      {orderConfirmation && <div className="drawer-backdrop" onClick={() => setOrderConfirmation(null)}><section className="order-confirmation" role="dialog" aria-modal="true" aria-labelledby="order-confirmation-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close payment confirmation" onClick={() => setOrderConfirmation(null)}>×</button><p className="eyebrow">PAYMENT SUCCESSFUL</p><h2 id="order-confirmation-title">Your payment is complete.</h2><p>We received <strong>{orderConfirmation.total}</strong> for order <strong>{orderConfirmation.id}</strong>. Your order has been confirmed.</p>{orderConfirmation.fulfillmentMethod === "pickup" && <p className="pickup-confirmation"><strong>Pickup from {orderConfirmation.pickupHubName || "hub"}</strong><br />{orderConfirmation.pickupHubPlace || "Pickup place saved with your order."}<br /><small>No delivery charges.</small></p>}{orderConfirmation.razorpayPaymentId && <p className="payment-reference">Payment ID: {orderConfirmation.razorpayPaymentId}</p>}<div className="confirmation-actions"><button className="button button-dark" onClick={() => downloadBill(orderConfirmation)}>Download bill <span>↗</span></button><button className="save-text" onClick={() => { setOrderConfirmation(null); setOrdersOpen(true); }}>View my orders</button></div></section></div>}
+      {orderConfirmation && <div className="drawer-backdrop" onClick={() => setOrderConfirmation(null)}><section className="order-confirmation" role="dialog" aria-modal="true" aria-labelledby="order-confirmation-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close payment confirmation" onClick={() => setOrderConfirmation(null)}>×</button><p className="eyebrow">PAYMENT SUCCESSFUL</p><h2 id="order-confirmation-title">Your payment is complete.</h2><p>We received <strong>{orderConfirmation.total}</strong> for order <strong>{orderConfirmation.id}</strong>. Your order has been confirmed.</p>{orderConfirmation.fulfillmentMethod === "pickup" && <p className="pickup-confirmation"><strong>Pickup from {orderConfirmation.pickupHubName || "hub"}</strong><br />{orderConfirmation.pickupHubPlace || "Pickup place saved with your order."}<br /><small>No delivery charges.</small></p>}{orderConfirmation.razorpayPaymentId && <p className="payment-reference">Payment ID: {orderConfirmation.razorpayPaymentId}</p>}<div className="confirmation-actions"><button className="button button-dark" type="button" disabled={printingBillId !== null} aria-busy={printingBillId === orderConfirmation.id} onClick={() => void downloadBill(orderConfirmation)}>{printingBillId === orderConfirmation.id ? "Printing…" : "Print bill"} <span>↗</span></button><button className="save-text" onClick={() => { setOrderConfirmation(null); setOrdersOpen(true); }}>View my orders</button></div></section></div>}
 
       {savedOpen && <div className="drawer-backdrop" onClick={() => setSavedOpen(false)}><aside className="orders-drawer saved-drawer" role="dialog" aria-modal="true" aria-labelledby="saved-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR EDIT</p><h2 id="saved-title">Saved pieces</h2></div><button aria-label="Close saved pieces" onClick={() => setSavedOpen(false)}>×</button></div>{wishlist.length ? <div className="saved-list">{wishlist.map((productId) => { const product = products.find((item) => item.id === productId); return product ? <article className="saved-card" key={product.id}><button className="saved-product" onClick={() => { openQuickProduct(product); setSavedOpen(false); }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(getCustomerPrice(product))}</small></span><b>↗</b></button><div className="saved-card-actions"><button className="module-secondary" onClick={() => { addToCart(product); setSavedOpen(false); }}>Add to cart</button><button className="saved-remove" onClick={() => toggleWishlist(product.id)}>Remove</button></div></article> : null; })}</div> : <div className="orders-empty saved-empty"><div>♡</div><h3>Your edit is waiting.</h3><p>Tap the heart on any piece to keep it close while you decide.</p><button className="button button-dark" onClick={() => { setSavedOpen(false); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}>Explore pieces <span>↗</span></button></div>}</aside></div>}
 
       {profileOpen && <div className="drawer-backdrop" onClick={() => setProfileOpen(false)}><aside className="orders-drawer profile-drawer" role="dialog" aria-modal="true" aria-labelledby="profile-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR FANZZY ACCOUNT</p><h2 id="profile-title">Profile</h2></div><button aria-label="Close profile" onClick={() => setProfileOpen(false)}>×</button></div>{authUser ? <div className="profile-content"><div className="profile-avatar" aria-hidden="true">{profileName.slice(0, 1).toUpperCase()}</div><p className="eyebrow">SIGNED IN</p><h3>{profileName}</h3><p className="profile-welcome">Your saved pieces, cart and order history stay together here.</p><dl className="profile-details"><div><dt>Login mobile number</dt><dd>{authUser.phone}</dd></div><div><dt>Account ID</dt><dd>{authUser.id}</dd></div></dl><div className="profile-shortcuts"><button onClick={() => { setProfileOpen(false); setOrdersOpen(true); }}><span>Orders</span><b>{orders.length.toString().padStart(2, "0")} ↗</b></button><button onClick={() => { setProfileOpen(false); setSavedOpen(true); }}><span>Saved</span><b>{wishlist.length.toString().padStart(2, "0")} ♡</b></button></div><button className="button button-dark full-width" onClick={() => { setProfileOpen(false); openCart(); }}>Open my cart <span>↗</span></button><button className="profile-sign-out" onClick={signOut}>Sign out</button></div> : <div className="profile-content profile-signed-out"><div className="profile-avatar" aria-hidden="true">○</div><p className="eyebrow">NOT SIGNED IN</p><h3>Welcome to Fanzzy.</h3><p>Sign in with a one-time SMS or voice code to keep your cart and orders connected to your mobile number.</p><button className="button button-dark full-width" onClick={() => { setProfileOpen(false); setAuthMessage(""); setAuthOpen(true); }}>Sign in with mobile OTP <span>↗</span></button></div>}</aside></div>}
 
-      {ordersOpen && <div className="drawer-backdrop" onClick={() => setOrdersOpen(false)}><aside className="orders-drawer" role="dialog" aria-modal="true" aria-labelledby="orders-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR FANZZY ACCOUNT</p><h2 id="orders-title">My orders</h2></div><button aria-label="Close orders" onClick={() => setOrdersOpen(false)}>×</button></div><div className="orders-intro"><p>These are the orders placed using your signed-in account. Only you can see this account’s orders.</p></div>{visibleOrders.length ? <div className="customer-order-list">{visibleOrders.map((order) => <article className="customer-order-card" key={order.id}><div className="customer-order-head"><div><strong>{order.id}</strong><small>{formatOrderDate(order.date)} · {order.customerName}</small></div><span className={`customer-order-status ${order.status.toLowerCase()}`}>{order.status}</span></div>{order.items?.length ? <div className="customer-order-items">{order.items.map((item) => { const product = getOrderedProduct(item); return <button className="customer-order-product" key={`${order.id}-${item.name}`} onClick={() => openOrderedProduct(item)} aria-label={`View ${item.name} details`}>{product ? <img src={product.image} alt="" style={imageAdjustmentStyle(product.imageAdjustments)} /> : <span className="order-product-placeholder" aria-hidden="true">✦</span>}<span className="order-product-copy"><strong>{item.name}</strong><b>× {item.quantity}</b>{product ? <em>{product.category} · View details ↗</em> : <em>Product no longer in the collection</em>}</span><small>{item.price}</small></button>; })}</div> : <p className="customer-order-items legacy-order">Order details are available in your confirmation.</p>}<div className="customer-order-total"><span>Total paid</span><strong>{order.total}</strong></div><button className="module-secondary customer-bill-button" onClick={() => downloadBill(order)}>Download bill ↗</button></article>)}</div> : <div className="orders-empty"><div>✦</div><h3>No orders found for this account.</h3><p>Orders appear here after you complete payment while signed in to this account.</p><button className="button button-dark" onClick={() => { setOrdersOpen(false); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}>Shop the collection <span>↗</span></button></div>}</aside></div>}
+      {ordersOpen && <div className="drawer-backdrop" onClick={() => setOrdersOpen(false)}><aside className="orders-drawer" role="dialog" aria-modal="true" aria-labelledby="orders-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR FANZZY ACCOUNT</p><h2 id="orders-title">My orders</h2></div><button aria-label="Close orders" onClick={() => setOrdersOpen(false)}>×</button></div><div className="orders-intro"><p>These are the orders placed using your signed-in account. Only you can see this account’s orders.</p></div>{visibleOrders.length ? <div className="customer-order-list">{visibleOrders.map((order) => <article className="customer-order-card" key={order.id}><div className="customer-order-head"><div><strong>{order.id}</strong><small>{formatOrderDate(order.date)} · {order.customerName}</small></div><span className={`customer-order-status ${order.status.toLowerCase()}`}>{order.status}</span></div>{order.items?.length ? <div className="customer-order-items">{order.items.map((item) => { const product = getOrderedProduct(item); return <button className="customer-order-product" key={`${order.id}-${item.name}`} onClick={() => openOrderedProduct(item)} aria-label={`View ${item.name} details`}>{product ? <img src={product.image} alt="" style={imageAdjustmentStyle(product.imageAdjustments)} /> : <span className="order-product-placeholder" aria-hidden="true">✦</span>}<span className="order-product-copy"><strong>{item.name}</strong><b>× {item.quantity}</b>{product ? <em>{product.category} · View details ↗</em> : <em>Product no longer in the collection</em>}</span><small>{item.price}</small></button>; })}</div> : <p className="customer-order-items legacy-order">Order details are available in your confirmation.</p>}<div className="customer-order-total"><span>Total paid</span><strong>{order.total}</strong></div><button className="module-secondary customer-bill-button" type="button" disabled={printingBillId !== null} aria-busy={printingBillId === order.id} onClick={() => void downloadBill(order)}>{printingBillId === order.id ? "Printing…" : "Print bill ↗"}</button></article>)}</div> : <div className="orders-empty"><div>✦</div><h3>No orders found for this account.</h3><p>Orders appear here after you complete payment while signed in to this account.</p><button className="button button-dark" onClick={() => { setOrdersOpen(false); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}>Shop the collection <span>↗</span></button></div>}</aside></div>}
 
-      {cartOpen && <div className="drawer-backdrop cart-backdrop" onClick={() => setCartOpen(false)}><aside className="cart-drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR CART</p><h2>{cartCount ? `${cartCount} piece${cartCount > 1 ? "s" : ""}` : "A little empty"}</h2></div><button onClick={() => setCartOpen(false)}>×</button></div>{cartItems.length ? <><div className="drawer-items">{cartItems.map((product) => <div className={`drawer-item${getVariantStock(product, product.variant) <= 0 ? " drawer-item-sold-out" : ""}`} key={product.cartKey}><img src={product.variant?.image || product.image} alt="" style={imageAdjustmentStyle(product.variant?.adjustments || product.imageAdjustments)} /><div><strong>{product.name}</strong>{product.variant?.name && <small className="cart-variant-name">{product.variant.name}</small>}{product.size && <small className="cart-variant-name">Size {product.size}</small>}{product.promotion && <small className={`cart-promotion-label ${product.promotion.role === "free" ? "is-free" : ""}`}>{product.promotion.role === "free" ? `FREE · ${product.promotion.label}` : product.promotion.role === "bundle" ? `${product.promotion.label} · allocated price` : product.promotion.label}</small>}{getVariantStock(product, product.variant) <= 0 && <small className="cart-stock-label">Sold out</small>}<small>{formatINR(getCartLinePrice(product))}{product.promotion && product.promotion.role === "bundle" && product.promotion.linePrice !== product.promotion.regularPrice ? <del className="cart-regular-price">{formatINR(product.promotion.regularPrice)}</del> : null}</small><div className="quantity"><button onClick={() => updateQuantity(product.cartKey, -1)} aria-label={`Decrease ${product.name} quantity`}>−</button><span>{product.quantity}</span><button onClick={() => updateQuantity(product.cartKey, 1)} aria-label={`Increase ${product.name} quantity`}>+</button></div></div><div className="cart-item-actions"><b>{formatINR(getCartLinePrice(product) * product.quantity)}</b><button className="cart-remove" onClick={() => removeFromCart(product.cartKey)} aria-label={`Remove ${product.name} from cart`}>Remove</button></div></div>)}</div><div className="cart-fulfillment"><p className="field-label">Receive your order</p><div className="cart-fulfillment-options"><button type="button" className={fulfillmentMethod === "delivery" ? "active" : ""} onClick={() => setFulfillmentMethod("delivery")}>Home delivery<small>Delivery in 4–6 working days</small></button><button type="button" className={fulfillmentMethod === "pickup" ? "active" : ""} onClick={() => { setFulfillmentMethod("pickup"); if (!selectedPickupHubId && pickupHubs[0]) setSelectedPickupHubId(pickupHubs[0].id); }} disabled={!pickupHubs.length}>Hub pickup<small>{pickupHubs.length ? "Collect from a hub" : "No hubs available"}</small></button></div>{fulfillmentMethod === "pickup" && pickupHubs.length > 0 && <select aria-label="Pickup hub" value={selectedPickupHubId} onChange={(event) => setSelectedPickupHubId(event.target.value)}><option value="">Select pickup hub</option>{pickupHubs.map((hub) => <option key={hub.id} value={hub.id}>{hub.name} · {hub.place}</option>)}</select>}{fulfillmentMethod === "pickup" && !pickupHubs.length && <small className="cart-fulfillment-help">Add a pickup hub in Admin before choosing hub pickup.</small>}</div><div className="drawer-footer">{cartStockIssues.length > 0 && <div className="cart-stock-warning" role="alert"><strong>Remove sold out items before checkout</strong><span>{cartHasSoldOutItems ? "This cart contains an unavailable item." : "One or more quantities are above the available stock."}</span></div>}<div><span>Subtotal</span><strong>{formatINR(subtotal)}</strong></div>{cartItems.some((item) => item.promotion?.role === "bundle") && <div className="offer-total"><span>Bundle regular total</span><strong>{formatINR(cartItems.reduce((sum, item) => sum + (item.promotion?.regularPrice || 0) * item.quantity, 0))}</strong></div>}{cartItems.some((item) => item.promotion?.role === "free") && <div className="offer-total"><span>Free-item discount</span><strong>Applied</strong></div>}{bogoDiscount > 0 && <div className="offer-total"><span>{bogoOfferLabel} discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="offer-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div><span>Delivery</span><strong>{deliveryTotal > 0 ? formatINR(deliveryTotal) : "Free"}</strong></div><div className="drawer-total"><span>Total</span><strong>{formatINR(orderTotal)}</strong></div><p>{cartItems.some((item) => item.promotion) ? "Promotion items are linked by offer group ID for inventory, returns, and refunds." : deliveryTotal > 0 ? "Delivery charge applied to this order." : deliveryCharge.freeAboveEnabled ? `Free delivery on orders above ${formatINR(deliveryCharge.freeAbove)}.` : "Complimentary shipping."}</p><button className="button button-dark full-width" onClick={openCheckout}>Proceed to buy <span>↗</span></button></div></> : <div className="empty-bag"><div>✦</div><p>Your future favourites<br />belong here.</p><button className="text-link" onClick={() => setCartOpen(false)}>Continue shopping <span>↗</span></button></div>}</aside></div>}
+      {cartOpen && <div className="drawer-backdrop cart-backdrop" onClick={() => setCartOpen(false)}><aside className="cart-drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR CART</p><h2>{cartCount ? `${cartCount} piece${cartCount > 1 ? "s" : ""}` : "A little empty"}</h2></div><button onClick={() => setCartOpen(false)}>×</button></div>{cartItems.length ? <><div className="drawer-items">{cartItems.map((product) => <div className={`drawer-item${getVariantStock(product, product.variant) <= 0 ? " drawer-item-sold-out" : ""}`} key={product.cartKey}><img src={product.variant?.image || product.image} alt="" style={imageAdjustmentStyle(product.variant?.adjustments || product.imageAdjustments)} /><div><strong>{product.name}</strong>{product.variant?.name && <small className="cart-variant-name">{product.variant.name}</small>}{product.size && <small className="cart-variant-name">Size {product.size}</small>}{product.promotion && <small className={`cart-promotion-label ${product.promotion.role === "free" ? "is-free" : ""}`}>{product.promotion.role === "free" ? `FREE · ${product.promotion.label}` : product.promotion.role === "bundle" ? `${product.promotion.label} · allocated price` : product.promotion.label}</small>}{getVariantStock(product, product.variant) <= 0 && <small className="cart-stock-label">Sold out</small>}<small>{formatINR(getCartLinePrice(product))}{product.promotion && product.promotion.role === "bundle" && product.promotion.linePrice !== product.promotion.regularPrice ? <del className="cart-regular-price">{formatINR(product.promotion.regularPrice)}</del> : null}</small><div className="quantity"><button onClick={() => updateQuantity(product.cartKey, -1)} aria-label={`Decrease ${product.name} quantity`}>−</button><span>{product.quantity}</span><button onClick={() => updateQuantity(product.cartKey, 1)} aria-label={`Increase ${product.name} quantity`}>+</button></div></div><div className="cart-item-actions"><b>{formatINR(getCartLinePrice(product) * product.quantity)}</b><button className="cart-remove" onClick={() => removeFromCart(product.cartKey)} aria-label={`Remove ${product.name} from cart`}>Remove</button></div></div>)}</div><div className="cart-fulfillment"><p className="field-label">Receive your order</p><div className="cart-fulfillment-options"><button type="button" className={fulfillmentMethod === "delivery" ? "active" : ""} onClick={() => setFulfillmentMethod("delivery")}>Home delivery<small>Delivery in 4–6 working days</small></button><button type="button" className={fulfillmentMethod === "pickup" ? "active" : ""} onClick={() => { setFulfillmentMethod("pickup"); if (!selectedPickupHubId && pickupHubs[0]) setSelectedPickupHubId(pickupHubs[0].id); }} disabled={!pickupHubs.length}>Hub pickup<small>{pickupHubs.length ? "Collect from a hub" : "No hubs available"}</small></button></div>{fulfillmentMethod === "pickup" && pickupHubs.length > 0 && <select aria-label="Pickup hub" value={selectedPickupHubId} onChange={(event) => setSelectedPickupHubId(event.target.value)}><option value="">Select pickup hub</option>{pickupHubs.map((hub) => <option key={hub.id} value={hub.id}>{hub.name} · {hub.place}</option>)}</select>}{fulfillmentMethod === "pickup" && !pickupHubs.length && <small className="cart-fulfillment-help">Add a pickup hub in Admin before choosing hub pickup.</small>}</div><div className="drawer-footer">{cartStockIssues.length > 0 && <div className="cart-stock-warning" role="alert"><strong>Remove sold out items before checkout</strong><span>{cartHasSoldOutItems ? "This cart contains an unavailable item." : "One or more quantities are above the available stock."}</span><button type="button" className="cart-remove-unavailable" onClick={() => { cartStockIssues.forEach((item) => removeFromCart(item.cartKey)); announce("Unavailable items removed from cart"); }}>Remove unavailable items</button></div>}<div><span>Subtotal</span><strong>{formatINR(subtotal)}</strong></div>{cartItems.some((item) => item.promotion?.role === "bundle") && <div className="offer-total"><span>Bundle regular total</span><strong>{formatINR(cartItems.reduce((sum, item) => sum + (item.promotion?.regularPrice || 0) * item.quantity, 0))}</strong></div>}{cartItems.some((item) => item.promotion?.role === "free") && <div className="offer-total"><span>Free-item discount</span><strong>Applied</strong></div>}{bogoDiscount > 0 && <div className="offer-total"><span>{bogoOfferLabel} discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="offer-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div><span>Delivery</span><strong>{deliveryTotal > 0 ? formatINR(deliveryTotal) : "Free"}</strong></div><div className="drawer-total"><span>Total</span><strong>{formatINR(orderTotal)}</strong></div><p>{cartItems.some((item) => item.promotion) ? "Promotion items are linked by offer group ID for inventory, returns, and refunds." : deliveryTotal > 0 ? "Delivery charge applied to this order." : deliveryCharge.freeAboveEnabled ? `Free delivery on orders above ${formatINR(deliveryCharge.freeAbove)}.` : "Complimentary shipping."}</p><button className="button button-dark full-width" onClick={openCheckout} disabled={cartStockIssues.length > 0} title={cartStockIssues.length > 0 ? "Remove unavailable items before checkout" : undefined}>Proceed to buy <span>↗</span></button></div></> : <div className="empty-bag"><div>✦</div><p>Your future favourites<br />belong here.</p><button className="text-link" onClick={() => setCartOpen(false)}>Continue shopping <span>↗</span></button></div>}</aside></div>}
 
       {authOpen && <div className="drawer-backdrop auth-backdrop" onClick={closeAuth}><section className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close sign in" onClick={closeAuth}>×</button><p className="eyebrow">SECURE MOBILE LOGIN</p><h2 id="auth-title">Continue with your mobile number.</h2><p className="auth-intro">Enter your mobile number and receive a one-time code by SMS or voice call. No password is required.</p><div className="otp-auth-form"><label>Mobile number<input type="tel" value={authPhone} onChange={(event) => { setAuthPhone(event.target.value); setAuthOtp(""); setOtpSent(false); setOtpCooldown(0); }} placeholder="+91 98765 43210" inputMode="tel" autoComplete="tel" disabled={authLoading} /></label>{otpSent && <label>6-digit verification code<input value={authOtp} onChange={(event) => setAuthOtp(event.target.value.replace(/\D/g, "").slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" maxLength={6} placeholder="Enter 6-digit code" disabled={authLoading} onKeyDown={(event) => { if (event.key === "Enter") void verifyOtp(); }} /></label>}{otpSent ? <><button className="google-sign-in" type="button" onClick={() => void verifyOtp()} disabled={authLoading}><span className="email-otp-mark" aria-hidden="true">✦</span>{authLoading ? "Please wait…" : "Verify code"}<span aria-hidden="true">↗</span></button><div className="otp-fallback-actions"><button className="auth-resend" type="button" onClick={() => void sendOtp()} disabled={authLoading || otpCooldown > 0}>{otpCooldown > 0 ? `Resend SMS in ${otpCooldown}s` : "Resend SMS OTP"}</button><button className="auth-resend" type="button" onClick={() => void sendVoiceOtp()} disabled={authLoading || otpCooldown > 0}>{otpCooldown > 0 ? `Call again in ${otpCooldown}s` : "Call again with OTP"}</button></div></> : <div className="otp-channel-actions"><button className="google-sign-in" type="button" onClick={() => void sendOtp()} disabled={authLoading}><span className="email-otp-mark" aria-hidden="true">✦</span>{authLoading ? "Please wait…" : "Send SMS code"}<span aria-hidden="true">↗</span></button><button className="google-sign-in auth-voice-button" type="button" onClick={() => void sendVoiceOtp()} disabled={authLoading}><span className="email-otp-mark" aria-hidden="true">☎</span>{authLoading ? "Please wait…" : "Call me with code"}<span aria-hidden="true">↗</span></button></div>}</div>{authMessage && <p className="auth-message" role="alert">{authMessage}</p>}<p className="auth-note">Your orders and cart are saved to this verified mobile number.</p></section></div>}
 
@@ -2413,7 +2543,7 @@ export default function Home() {
       )}
 
 
-      {quickProduct && <div className="drawer-backdrop" onClick={closeQuickProduct}><div className="quick-modal" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close quick view" onClick={closeQuickProduct}>×</button><div className="quick-image" onClick={() => setZoomedImage({ src: selectedVariant?.image || quickProduct.image, alt: selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name, adjustments: selectedVariant?.adjustments || quickProduct.imageAdjustments })} title="Click to zoom"><img src={selectedVariant?.image || quickProduct.image} alt={selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name} style={imageAdjustmentStyle(selectedVariant?.adjustments || quickProduct.imageAdjustments)} /></div><div className="quick-copy"><p className="eyebrow">{quickProduct.category}</p><h2>{quickProduct.name}</h2><div className="price-row"><span>{formatINR(getCustomerPrice(quickProduct))}</span><del>{formatINR(getComparePrice(quickProduct))}</del></div>{getProductVariantType(quickProduct) === "normal" && quickProduct.variants?.length ? <div className="variant-picker"><span>Choose colour / series / model</span><div>{quickProduct.variants.map((variant, index) => { const variantStock = getVariantStock(quickProduct, variant); return <button key={`${quickProduct.id}-${variant.name || index}`} disabled={variantStock <= 0} className={`${selectedVariant?.name === variant.name && selectedVariant?.image === variant.image ? "active" : ""} ${variantStock <= 0 ? "sold-out" : ""}`} onClick={() => setSelectedVariant(variant)}><img src={variant.image || quickProduct.image} alt="" style={imageAdjustmentStyle(variant.adjustments)} /><span>{variant.name || `Option ${index + 1}`} · {variantStock > 0 ? `${variantStock} available` : "Sold out"}</span></button>; })}</div></div> : null}{getProductVariantType(quickProduct) === "size" && getProductSizes(quickProduct).length ? <div className="size-picker"><span>Choose size</span><div>{getProductSizes(quickProduct).map((size) => { const sizeVariant = getSizeVariant(quickProduct, size); const stock = getSelectionStock(quickProduct, selectedVariant, size); return <button type="button" key={size} disabled={stock <= 0} className={`${selectedSize === size ? "active" : ""} ${stock <= 0 ? "sold-out" : ""}`} onClick={() => setSelectedSize(size)}>{sizeVariant?.image ? <img src={sizeVariant.image} alt="" /> : null}Size {size} · {stock > 0 ? `${stock} available` : "Sold out"}</button>; })}</div></div> : null}{quickOffers.length > 0 && <div className="storefront-promotion-picker"><span className="promotion-picker-label">Special offer available</span><div className="storefront-promotion-tabs">{quickOffers.map((offer) => <button key={offer.id} className={activeQuickOffer?.id === offer.id ? "active" : ""} onClick={() => { setSelectedPromotion(offer); setSelectedFreeSelections([]); setSelectedBundleSelections([]); }}>{offerTypeLabel(offer)}</button>)}</div>{activeQuickOffer?.type === "bundle" ? <div className="promotion-selection-panel"><strong>Select Any {activeQuickOffer.bundleQuantity} Items for ₹{activeQuickOffer.fixedBundlePrice.toLocaleString("en-IN")}</strong><small>{selectedBundleSelections.length} of {activeQuickOffer.bundleQuantity} selected · regular prices are allocated proportionally</small><div className="promotion-choice-grid">{quickBundleChoices.filter((selection) => isSelectionEligible(activeQuickOffer, selection, "paid")).map((selection, index) => { const product = products.find((item) => item.id === selection.productId); const active = selectedBundleSelections.some((item) => selectionKey(item) === selectionKey(selection)); const stock = selection.stock || 0; return <button key={`${selectionKey(selection)}-${index}`} disabled={stock <= 0 || (!active && selectedBundleSelections.length >= activeQuickOffer.bundleQuantity)} className={active ? "active" : ""} onClick={() => setSelectedBundleSelections((current) => active ? current.filter((item) => selectionKey(item) !== selectionKey(selection)) : [...current, selection])}><img src={product?.variants?.find((variant) => variant.name === selection.variantName)?.image || product?.image || quickProduct.image} alt="" /><span>{product?.name || quickProduct.name}{selection.variantName ? ` · ${selection.variantName}` : ""}<small>{stock > 0 ? `${stock} available · ₹${(selection.price || 0).toLocaleString("en-IN")}` : "Out of stock"}</small></span></button>; })}</div><button className="button button-dark full-width" disabled={selectedBundleSelections.length !== activeQuickOffer.bundleQuantity} onClick={() => addPromotionToCart(activeQuickOffer)}>Add Bundle to Cart</button></div> : <div className="promotion-selection-panel"><strong>Select Your {activeQuickOffer?.freeQuantity || 1} Free Variant{(activeQuickOffer?.freeQuantity || 1) > 1 ? "s" : ""}</strong><small>{selectedFreeSelections.length} of {activeQuickOffer?.freeQuantity || 1} selected · paid item: {selectedVariant?.name || quickProduct.name}</small><div className="promotion-choice-grid">{quickFreeChoices.filter((selection) => activeQuickOffer ? isSelectionEligible(activeQuickOffer, selection, "free") : true).map((selection, index) => { const active = selectedFreeSelections.some((item) => selectionKey(item) === selectionKey(selection)); const stock = selection.stock || 0; return <button key={`${selectionKey(selection)}-${index}`} disabled={stock <= 0 || (!active && selectedFreeSelections.length >= (activeQuickOffer?.freeQuantity || 1))} className={active ? "active" : ""} onClick={() => setSelectedFreeSelections((current) => active ? current.filter((item) => selectionKey(item) !== selectionKey(selection)) : [...current, selection])}><img src={quickProduct.variants?.find((variant) => variant.name === selection.variantName)?.image || quickProduct.image} alt="" /><span>{selection.variantName || quickProduct.name}<small>{stock > 0 ? `${stock} available` : "Out of stock"} · FREE</small></span></button>; })}</div><button className="button button-dark full-width" disabled={selectedFreeSelections.length !== (activeQuickOffer?.freeQuantity || 1) || selectedVariantStock <= 0} onClick={() => activeQuickOffer && addPromotionToCart(activeQuickOffer)}>Add {offerTypeLabel(activeQuickOffer || quickOffers[0])} to Cart</button></div>} </div>}{<div className="quick-actions"><button className="button button-dark full-width" type="button" disabled={selectedVariantStock <= 0} onClick={() => { addToCart(quickProduct, getProductVariantType(quickProduct) === "normal" ? selectedVariant : null, getProductVariantType(quickProduct) === "size" ? selectedSize : null); }}>{selectedVariantStock > 0 ? "Buy now" : "Sold out"} <span>↗</span></button></div>}<p>Designed to become part of your everyday ritual. Hand-finished in small batches with a soft, lasting glow.</p></div></div></div>}
+      {quickProduct && <div className="drawer-backdrop" onClick={closeQuickProduct}><div className="quick-modal" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close quick view" onClick={closeQuickProduct}>×</button><div className="quick-image" onClick={() => setZoomedImage({ src: selectedVariant?.image || quickProduct.image, alt: selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name, adjustments: selectedVariant?.adjustments || quickProduct.imageAdjustments })} title="Click to zoom"><img src={selectedVariant?.image || quickProduct.image} alt={selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name} style={imageAdjustmentStyle(selectedVariant?.adjustments || quickProduct.imageAdjustments)} /></div><div className="quick-copy"><p className="eyebrow">{quickProduct.category}</p><h2>{quickProduct.name}</h2><div className="price-row"><span>{formatINR(getCustomerPrice(quickProduct))}</span><del>{formatINR(getComparePrice(quickProduct))}</del></div>{getProductVariantType(quickProduct) === "normal" && quickProduct.variants?.length ? <div className="variant-picker"><span>Choose colour / series / model</span><div>{quickProduct.variants.map((variant, index) => { const variantStock = getVariantStock(quickProduct, variant); return <button key={`${quickProduct.id}-${variant.name || index}`} disabled={variantStock <= 0} className={`${selectedVariant?.name === variant.name && selectedVariant?.image === variant.image ? "active" : ""} ${variantStock <= 0 ? "sold-out" : ""}`} onClick={() => setSelectedVariant(variant)}><img src={variant.image || quickProduct.image} alt="" style={imageAdjustmentStyle(variant.adjustments)} /><span>{variant.name || `Option ${index + 1}`} · {variantStock > 0 ? `${variantStock} available` : "Sold out"}</span></button>; })}</div></div> : null}{getProductVariantType(quickProduct) === "size" && getProductSizes(quickProduct).length ? <div className="size-picker"><span>Choose size</span><div>{getProductSizes(quickProduct).map((size) => { const sizeVariant = getSizeVariant(quickProduct, size); const stock = getSelectionStock(quickProduct, selectedVariant, size); return <button type="button" key={size} disabled={stock <= 0} className={`${selectedSize === size ? "active" : ""} ${stock <= 0 ? "sold-out" : ""}`} onClick={() => setSelectedSize(size)}>{sizeVariant?.image ? <img src={sizeVariant.image} alt="" /> : null}Size {size} · {stock > 0 ? `${stock} available` : "Sold out"}</button>; })}</div></div> : null}{quickOffers.length > 0 && <div className="storefront-promotion-picker"><span className="promotion-picker-label">Special offer available</span><div className="storefront-promotion-tabs">{quickOffers.map((offer) => <button key={offer.id} className={activeQuickOffer?.id === offer.id ? "active" : ""} onClick={() => { setSelectedPromotion(offer); setSelectedFreeSelections([]); setSelectedBundleSelections([]); }}>{offerTypeLabel(offer)}</button>)}</div>{activeQuickOffer?.type === "bundle" ? <div className="promotion-selection-panel"><strong>Select Any {activeQuickOffer.bundleQuantity} Items for ₹{activeQuickOffer.fixedBundlePrice.toLocaleString("en-IN")}</strong><small>{selectedBundleSelections.length} of {activeQuickOffer.bundleQuantity} selected · regular prices are allocated proportionally</small><div className="promotion-choice-grid">{quickBundleChoices.filter((selection) => isSelectionEligible(activeQuickOffer, selection, "paid")).map((selection, index) => { const product = products.find((item) => item.id === selection.productId); const active = selectedBundleSelections.some((item) => selectionKey(item) === selectionKey(selection)); const stock = selection.stock || 0; return <button key={`${selectionKey(selection)}-${index}`} disabled={stock <= 0 || (!active && selectedBundleSelections.length >= activeQuickOffer.bundleQuantity)} className={active ? "active" : ""} onClick={() => setSelectedBundleSelections((current) => active ? current.filter((item) => selectionKey(item) !== selectionKey(selection)) : [...current, selection])}><img src={product?.variants?.find((variant) => variant.name === selection.variantName)?.image || product?.image || quickProduct.image} alt="" /><span>{product?.name || quickProduct.name}{selection.variantName ? ` · ${selection.variantName}` : ""}<small>{stock > 0 ? `${stock} available · ₹${(selection.price || 0).toLocaleString("en-IN")}` : "Out of stock"}</small></span></button>; })}</div><button className="button button-dark full-width" disabled={selectedBundleSelections.length !== activeQuickOffer.bundleQuantity} onClick={() => addPromotionToCart(activeQuickOffer)}>Add Bundle to Cart</button></div> : <div className="promotion-selection-panel"><strong>Select Your {activeQuickOffer?.freeQuantity || 1} Free Variant{(activeQuickOffer?.freeQuantity || 1) > 1 ? "s" : ""}</strong><small>{selectedFreeSelections.length} of {activeQuickOffer?.freeQuantity || 1} selected · paid item: {selectedVariant?.name || quickProduct.name}</small><div className="promotion-choice-grid">{quickFreeChoices.filter((selection) => activeQuickOffer ? isSelectionEligible(activeQuickOffer, selection, "free") : true).map((selection, index) => { const active = selectedFreeSelections.some((item) => selectionKey(item) === selectionKey(selection)); const stock = selection.stock || 0; return <button key={`${selectionKey(selection)}-${index}`} disabled={stock <= 0 || (!active && selectedFreeSelections.length >= (activeQuickOffer?.freeQuantity || 1))} className={active ? "active" : ""} onClick={() => setSelectedFreeSelections((current) => current.length >= (activeQuickOffer?.freeQuantity || 1) ? current.filter((item, itemIndex) => itemIndex !== current.findLastIndex((item) => selectionKey(item) === selectionKey(selection))) : [...current, selection])}><img src={quickProduct.variants?.find((variant) => variant.name === selection.variantName)?.image || quickProduct.image} alt="" /><span>{selection.variantName || (selection.size ? `Size ${selection.size}` : quickProduct.name)}<small>{stock > 0 ? `${stock} available` : "Out of stock"} · FREE</small></span></button>; })}</div><button className="button button-dark full-width" disabled={selectedFreeSelections.length !== (activeQuickOffer?.freeQuantity || 1) || selectedVariantStock <= 0} onClick={() => activeQuickOffer && addPromotionToCart(activeQuickOffer)}>Add {offerTypeLabel(activeQuickOffer || quickOffers[0])} to Cart</button></div>} </div>}{<div className="quick-actions"><button className="button button-dark full-width" type="button" disabled={selectedVariantStock <= 0} onClick={() => { addToCart(quickProduct, getProductVariantType(quickProduct) === "normal" ? selectedVariant : null, getProductVariantType(quickProduct) === "size" ? selectedSize : null); }}>{selectedVariantStock > 0 ? "Buy now" : "Sold out"} <span>↗</span></button></div>}<p>Designed to become part of your everyday ritual. Hand-finished in small batches with a soft, lasting glow.</p></div></div></div>}
       {zoomedImage && <div className="drawer-backdrop image-zoom-backdrop" onClick={() => setZoomedImage(null)}><section className="image-zoom-modal" role="dialog" aria-modal="true" aria-label={`Zoomed view of ${zoomedImage.alt}`} onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setZoomedImage(null)} aria-label="Close image zoom">×</button><img src={zoomedImage.src} alt={zoomedImage.alt} style={imageAdjustmentStyle(zoomedImage.adjustments)} /></section></div>}
 
       {toast && <div className="toast">{toast}<span>✦</span></div>}

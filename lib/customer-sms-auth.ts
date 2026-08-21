@@ -16,6 +16,9 @@ const secret = () => process.env.CUSTOMER_AUTH_SECRET || getTwoFactorApiKey();
 
 export const OTP_RESEND_COOLDOWN_SECONDS = 60;
 export const OTP_EXPIRES_MS = 5 * 60 * 1000;
+// Keep customers signed in across browser restarts until they explicitly sign out.
+// This is intentionally long-lived rather than a browser-session cookie.
+export const CUSTOMER_SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 3650;
 const OTP_WINDOW_MS = 15 * 60 * 1000;
 const OTP_MAX_REQUESTS_PER_WINDOW = 5;
 const OTP_VERIFY_WINDOW_MS = 10 * 60 * 1000;
@@ -156,7 +159,7 @@ export const getPendingOtp = (request: Request) => {
 };
 
 export const createCustomerSessionCookie = (phone: string) =>
-  cookie(sessionCookie, encode({ id: `phone:${phone}`, phone: displayMobileNumber(phone) }), 60 * 60 * 24 * 30);
+  cookie(sessionCookie, encode({ id: `phone:${phone}`, phone: displayMobileNumber(phone) }), CUSTOMER_SESSION_MAX_AGE_SECONDS);
 
 export const clearPendingOtpCookie = () => cookie(pendingCookie, "", 0);
 

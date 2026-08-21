@@ -13,6 +13,9 @@ const defaultCollections = [
   { name: "Bracelets", count: "18 pieces", image: "https://images.unsplash.com/photo-1611652022419-a9419f74343d?auto=format&fit=crop&w=900&q=85" },
   { name: "Rings", count: "24 pieces", image: "https://images.unsplash.com/photo-1605100804763-247f67b3557e?auto=format&fit=crop&w=900&q=85" },
 ];
+const collectionImageFallbacks: Record<string, string> = Object.fromEntries(defaultCollections.map((collection) => [collection.name.toLowerCase(), collection.image]));
+const collectionImageFallback = (name: string, index: number) =>
+  collectionImageFallbacks[name.trim().toLowerCase()] || defaultCollections[index % defaultCollections.length].image;
 
 export default function CollectionsPage() {
   const [collections, setCollections] = useState(defaultCollections);
@@ -24,7 +27,7 @@ export default function CollectionsPage() {
         setCollections(remote.data.map((category, index) => ({
           name: category.name,
           count: `${category.pieces} pieces`,
-          image: category.image || defaultCollections[index % defaultCollections.length].image,
+          image: category.image || collectionImageFallback(category.name, index),
         })));
         return;
       }
@@ -36,7 +39,7 @@ export default function CollectionsPage() {
           setCollections(parsed.filter((category) => category.name).map((category, index) => ({
             name: category.name!,
             count: `${category.pieces ?? 0} pieces`,
-            image: category.image || defaultCollections[index % defaultCollections.length].image,
+            image: category.image || collectionImageFallback(category.name!, index),
           })));
         }
       } catch {
@@ -60,7 +63,7 @@ export default function CollectionsPage() {
       <div className="header-actions"><a className="admin-link" href={`${siteBasePath}/admin/`}>Admin</a><a href={`${siteBasePath}/#shop`}>Bag <span className="bag-count">(00)</span></a></div>
     </header>
     <section className="collections-intro"><p className="eyebrow">THE FANZZY COLLECTIONS</p><h1>Find your <em>signature.</em></h1><p>Explore every category and find the pieces that meet your mood.</p><a className="button button-dark" href={`${siteBasePath}/#shop`}>Shop the full edit <span>↗</span></a></section>
-    <section className="collections-grid" aria-label="Fanzzy collections">{collections.map((collection, index) => <a className={`category-card collection-card category-${index + 1}`} key={collection.name} href={`${siteBasePath}/#shop`}><img src={collection.image} alt={collection.name} /><span className="category-overlay" /><span className="category-info"><strong>{collection.name}</strong><small>{collection.count}</small></span></a>)}</section>
+    <section className="collections-grid" aria-label="Fanzzy collections">{collections.map((collection, index) => <a className={`category-card collection-card category-${index + 1}`} key={collection.name} href={`${siteBasePath}/?category=${encodeURIComponent(collection.name)}#shop`}><img src={collection.image || collectionImageFallback(collection.name, index)} alt={collection.name} /><span className="category-overlay" /><span className="category-info"><strong>{collection.name}</strong><small>{collection.count}</small></span></a>)}</section>
     <footer className="collections-footer"><a href={`${siteBasePath}/`} className="text-link">← Back to Fanzzy</a><span>Made with intention in India.</span></footer>
   </main>;
 }
