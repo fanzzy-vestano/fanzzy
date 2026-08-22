@@ -384,16 +384,16 @@ img { display: block; width: 100%; }
 }
 
 .add-to-cart-button {
-  font-size: 9px;
-  min-width: 92px;
-  padding: 12px 14px;
+  font-size: 8px;
+  min-width: 74px;
+  padding: 10px 11px;
 }
 
 @media (max-width: 760px) {
   .add-to-cart-button {
-    font-size: 8px;
-    min-width: 88px;
-    padding: 11px 10px;
+    font-size: 7px;
+    min-width: 70px;
+    padding: 9px 8px;
   }
 }
 
@@ -413,6 +413,45 @@ img { display: block; width: 100%; }
   .product-card:hover .stock-out-image {
     opacity: .2 !important;
   }
+}
+
+/* The image swap belongs to the image surface only. Hovering the product
+   details or Add to cart controls must not activate the image overlay. */
+@media (hover: hover) and (pointer: fine) {
+  .product-card:hover .primary-image { opacity: 1; }
+  .product-card:hover .hover-image { opacity: 0; }
+  .product-card:hover .stock-out-image { opacity: .2; }
+  .product-card:hover .quick-view { bottom: -34px; }
+  .product-media:hover .primary-image { opacity: 0; }
+  .product-media:hover .hover-image { opacity: 1; }
+  .product-media:hover .stock-out-image { opacity: .2; }
+  .product-media:hover .quick-view { bottom: 13px; }
+}
+
+/* Only the actual image surface may activate the alternate image. Other
+   media controls remain clickable without changing the image state. */
+.product-image-surface { inset: 0; position: absolute; }
+@media (hover: hover) and (pointer: fine) {
+  .product-media:hover .primary-image { opacity: 1; }
+  .product-media:hover .hover-image { opacity: 0; }
+  .product-image-surface:hover .primary-image { opacity: 0; }
+  .product-image-surface:hover .hover-image { opacity: 1; }
+}
+
+/* Make the auth card's existing close action clear on mobile: it behaves as
+   a Back button and returns the customer to the storefront. */
+.auth-modal .modal-close {
+  font-size: 0;
+  left: 20px;
+  min-height: 44px;
+  min-width: 44px;
+  padding: 9px 0;
+  right: auto;
+  top: 18px;
+}
+.auth-modal .modal-close::after {
+  content: "← Back";
+  font-size: 10px;
 }
 .storefront-offer-rail { align-items: center; background: linear-gradient(110deg, #4b1c2b 0%, #6b293b 62%, #8b4a50 100%); border: 0; border-radius: 14px; box-shadow: 0 12px 28px rgba(75, 28, 43, .16); color: #fff9f0; gap: 14px; padding: 15px 18px; }
 .storefront-offer-list { align-items: center; display: flex; flex: 1 1 auto; gap: 14px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
@@ -479,7 +518,7 @@ img { display: block; width: 100%; }
 
   .add-to-cart-button {
     min-height: 44px;
-    padding: 11px 10px;
+    padding: 9px 8px;
   }
 
   .quick-view {

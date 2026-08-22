@@ -45,7 +45,8 @@ export default function PwaInstall({ basePath = "" }: { basePath?: string }) {
       if (document.readyState === "complete") registerWorker();
     }
 
-    if (window.location.pathname.startsWith(`${basePath}/admin`)) return;
+    const currentPath = window.location.pathname;
+    if (currentPath.startsWith(`${basePath}/admin`) || currentPath === `${basePath}/vendor` || currentPath.startsWith(`${basePath}/vendor/`)) return;
     if (isStandaloneApp()) {
       rememberCompletedInstall();
       return;

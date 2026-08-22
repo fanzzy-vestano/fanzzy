@@ -20,6 +20,11 @@ export type CatalogProduct = {
   variants?: Array<{ name: string; size?: string; image: string; stock?: number; price?: number }>;
   sizes?: string[];
   variantType?: ProductVariantType;
+  vendorId?: string;
+  vendorName?: string;
+  vendorSlug?: string;
+  vendorStatus?: string;
+  publicVendorVisible?: boolean;
 };
 
 export type CatalogCategory = {
@@ -74,6 +79,11 @@ const asProduct = (row: Record<string, unknown>): CatalogProduct => ({
   tag: typeof row.tag === "string" ? row.tag : undefined,
   tone: typeof row.tone === "string" ? row.tone : undefined,
   barcode: typeof row.barcode === "string" ? row.barcode : undefined,
+  vendorId: typeof row.vendor_id === "string" ? row.vendor_id : undefined,
+  vendorStatus: typeof row.vendor_status === "string" ? row.vendor_status : undefined,
+  publicVendorVisible: row.public_vendor_visible === false ? false : row.public_vendor_visible === true ? true : undefined,
+  vendorName: row.vendors && typeof row.vendors === "object" && !Array.isArray(row.vendors) && typeof (row.vendors as Record<string, unknown>).business_name === "string" ? String((row.vendors as Record<string, unknown>).business_name) : undefined,
+  vendorSlug: row.vendors && typeof row.vendors === "object" && !Array.isArray(row.vendors) && typeof (row.vendors as Record<string, unknown>).slug === "string" ? String((row.vendors as Record<string, unknown>).slug) : undefined,
 });
 
 const asCategory = (row: Record<string, unknown>): CatalogCategory => ({

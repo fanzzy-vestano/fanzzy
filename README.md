@@ -28,6 +28,25 @@ The current implementation is a polished, interactive vertical slice with a cent
 
 The UI is ready to connect to Prisma/Drizzle models for products, variants, inventory, carts, orders, coupons, shipping rules, reviews, banners, homepage sections, and audit logs. Keep secrets in environment variables and perform authoritative pricing, coupon, inventory, and payment verification on the server.
 
+## Vendor marketplace
+
+The additive vendor module is defined in `supabase/migrations/20260822_vendor_marketplace.sql`. Apply it to the existing Supabase project after the current schema. It adds nullable vendor ownership to products and normalized vendor operational tables; existing platform products remain `vendor_id = NULL` and existing `store_settings.orders` records are preserved.
+
+Server deployment requirements:
+
+- `SUPABASE_SERVICE_ROLE_KEY` for vendor/admin mutations and vendor order projections.
+- `VENDOR_AUTH_SECRET` (or the existing `ADMIN_AUTH_SECRET`/`AUTH_SECRET`) for HTTP-only vendor sessions.
+- `VENDOR_DATA_ENCRYPTION_KEY` for encrypted bank account numbers.
+
+Vendor routes:
+
+- Public: `/vendors`, `/vendors/{vendor-slug}`
+- Vendor: `/vendor/login`, `/vendor`
+- Admin: `/admin` → `Vendors` workspace
+- Server APIs: `/api/vendors`, `/api/vendor-auth/*`, `/api/vendor/*`, `/api/admin/vendors/*`, `/api/admin/vendor-payouts`
+
+Vendor product visibility requires an active vendor, `store_visibility = Visible`, `vendor_status = Approved`, and `public_vendor_visible = true`. Commission resolution is product → category → vendor → global; the resolved rule and resulting monetary values are snapshotted on each vendor order. Payout creation accepts only delivered vendor orders and uses the unique `vendor_payout_items.vendor_order_id` constraint to prevent duplicate payouts.
+
 ## GitHub Pages customer OTP
 
 GitHub Pages serves the storefront statically and cannot execute the app's `/api/customer-auth` routes. The static build therefore uses `CUSTOMER_AUTH_API_URL` when it is set, normally:

@@ -36,6 +36,7 @@ import "../globals.css";
 import "../brand-polish.css";
 import "./admin.css";
 import "./admin-polish.css";
+import AdminVendorsWorkspace from "./vendors-workspace";
 
 type AdminProduct = {
   name: string;
@@ -117,7 +118,8 @@ type AdminPermission =
   | "Hub"
   | "Reports"
   | "Announcement"
-  | "Settings";
+  | "Settings"
+  | "Vendors";
 type AdminRole = {
   id: string;
   name: string;
@@ -140,6 +142,7 @@ const allAdminPermissions: AdminPermission[] = [
   "Reports",
   "Announcement",
   "Settings",
+  "Vendors",
 ];
 const defaultAdminRoles: AdminRole[] = [
   { id: "vestano", name: "Vestano", title: "Super admin", permissions: allAdminPermissions },
@@ -614,6 +617,7 @@ const menu = [
   { label: "Hub", icon: "⌖" },
   { label: "Reports", icon: "▥" },
   { label: "Announcement", icon: "▤" },
+  { label: "Vendors", icon: "♢" },
 ];
 
 type AdminAuthResponse = { authenticated?: boolean; error?: string; message?: string; resetReady?: boolean };
@@ -1661,6 +1665,7 @@ function ModuleWorkspace({
     return <CollectionsWorkspace onNotify={onNotify} />;
   if (module === "Customers") return <CustomersWorkspace onNotify={onNotify} />;
   if (module === "Settings") return <SettingsWorkspace onNotify={onNotify} />;
+  if (module === "Vendors") return <AdminVendorsWorkspace onNotify={onNotify} />;
   const content = moduleContent[module] ?? {
     eyebrow: "WORKSPACE",
     title: module,

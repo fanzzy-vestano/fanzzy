@@ -59,6 +59,9 @@ type Product = {
   billName?: string;
   imageAdjustments?: ImageAdjustments;
   hoverImageAdjustments?: ImageAdjustments;
+  vendorId?: string;
+  vendorName?: string;
+  vendorSlug?: string;
 };
 type ImageAdjustments = { zoom: number; x: number; y: number; rotate: number };
 type ProductVariant = { name: string; size?: string; image: string; stock?: number; adjustments?: ImageAdjustments };
@@ -95,11 +98,14 @@ type CustomerOrder = {
   pickupHubName?: string;
   pickupHubPlace?: string;
   coupon?: string;
+  couponDiscount?: number;
+  promotionDiscount?: number;
+  shippingTotal?: number;
   paymentStatus?: "pending" | "paid";
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
   inventoryAdjusted?: boolean;
-  items?: Array<{ name: string; quantity: number; price: string; productId?: string; image?: string; variantName?: string; variantImage?: string; size?: string; promotion?: PromotionCartLine }>;
+  items?: Array<{ name: string; quantity: number; price: string; regularPrice?: number; productId?: string; image?: string; variantName?: string; variantImage?: string; size?: string; vendorId?: string | null; vendorName?: string; vendorSlug?: string; promotion?: PromotionCartLine }>;
 };
 type AssistantMessage = { role: "user" | "assistant"; text: string; productIds?: string[] };
 type RazorpayCheckoutResponse = {
@@ -448,6 +454,9 @@ function normalizeStoredProduct(value: unknown, index: number): Product | null {
     billName: typeof raw.billName === "string" ? raw.billName.trim() : "",
     imageAdjustments: normalizeImageAdjustments(raw.imageAdjustments),
     hoverImageAdjustments: normalizeImageAdjustments(raw.hoverImageAdjustments),
+    vendorId: typeof raw.vendorId === "string" ? raw.vendorId : undefined,
+    vendorName: typeof raw.vendorName === "string" ? raw.vendorName : undefined,
+    vendorSlug: typeof raw.vendorSlug === "string" ? raw.vendorSlug : undefined,
   };
 }
 
@@ -463,8 +472,10 @@ const ProductCard = memo(function ProductCard({ product, wished, promotions, car
   return (
     <article className="product-card">
       <div className="product-media" style={{ backgroundColor: product.tone }}>
-        <img className={`product-image product-image-zoom primary-image ${isOutOfStock ? "stock-out-image" : ""}`} src={product.image} alt={product.name} style={imageAdjustmentStyle(product.imageAdjustments)} onClick={onImageZoom} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onImageZoom(); }} role="button" tabIndex={0} title="Click to zoom" />
-        <img className={`product-image product-image-zoom hover-image ${isOutOfStock ? "stock-out-image" : ""}`} src={product.hoverImage} alt="" aria-hidden="true" style={imageAdjustmentStyle(product.hoverImageAdjustments)} onClick={onImageZoom} />
+        <div className="product-image-surface">
+          <img className={`product-image product-image-zoom primary-image ${isOutOfStock ? "stock-out-image" : ""}`} src={product.image} alt={product.name} style={imageAdjustmentStyle(product.imageAdjustments)} onClick={onImageZoom} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onImageZoom(); }} role="button" tabIndex={0} title="Click to zoom" />
+          <img className={`product-image product-image-zoom hover-image ${isOutOfStock ? "stock-out-image" : ""}`} src={product.hoverImage} alt="" aria-hidden="true" style={imageAdjustmentStyle(product.hoverImageAdjustments)} onClick={onImageZoom} />
+        </div>
         <span className="product-discount-badge">{discountPercent}% off</span>
         {product.tag && <span className="product-tag with-discount">{product.tag}</span>}
         {promotions.slice(0, 1).map((offer) => <span className="promotion-badge" key={offer.id}>{offerTypeLabel(offer)}</span>)}
@@ -477,6 +488,7 @@ const ProductCard = memo(function ProductCard({ product, wished, promotions, car
         <div>
           <p className="eyebrow">{product.category}</p>
           <h3>{product.name}</h3>
+          <a className="product-sold-by" href={product.vendorSlug ? `/vendors/${product.vendorSlug}` : "/vendors"}>Sold by: {product.vendorName || "Vestano"}</a>
         </div>
         {cartQuantity > 0 ? <div className="product-cart-control is-added"><button type="button" onClick={onDecrease} aria-label={`Decrease ${product.name} quantity`}>−</button><span>{cartQuantity}</span><button type="button" onClick={onIncrease} aria-label={`Increase ${product.name} quantity`}>+</button></div> : <button className="add-to-cart-button" type="button" onClick={onAdd} disabled={isOutOfStock} aria-label={isOutOfStock ? `${product.name} is sold out` : `Add ${product.name} to cart`}>Add to cart</button>}
       </div>
@@ -860,6 +872,9 @@ export default function Home() {
           imageAdjustments: savedAdjustments?.image,
           hoverImageAdjustments: savedAdjustments?.hoverImage,
           billName: getProductSetting(billNameMap, product.sku) || "",
+          vendorId: product.vendorId,
+          vendorName: product.vendorName,
+          vendorSlug: product.vendorSlug,
         }, index);
         }).filter((product): product is Product => product !== null);
         const remoteWithLocalVariants = remoteProducts.map((product) => ({
@@ -2175,7 +2190,10 @@ export default function Home() {
       } : {}),
       paymentStatus: "pending",
       ...(appliedCoupon ? { coupon: appliedCoupon.code } : {}),
-      items: cartItems.map((product) => ({ productId: product.id, name: `${product.billName || product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}${product.size ? ` · Size ${product.size}` : ""}`, quantity: product.quantity, price: formatINR(getCartLinePrice(product)), image: product.image, variantName: product.variant?.name, variantImage: product.variant?.image, size: product.size || undefined, promotion: product.promotion || undefined })),
+      couponDiscount,
+      promotionDiscount: bogoDiscount,
+      shippingTotal: deliveryTotal,
+      items: cartItems.map((product) => ({ productId: product.id, name: `${product.billName || product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}${product.size ? ` · Size ${product.size}` : ""}`, quantity: product.quantity, price: formatINR(getCartLinePrice(product)), regularPrice: getCustomerPrice(product), image: product.image, variantName: product.variant?.name, variantImage: product.variant?.image, size: product.size || undefined, vendorId: product.vendorId || null, vendorName: product.vendorName || "Vestano", vendorSlug: product.vendorSlug, promotion: product.promotion || undefined })),
     };
 
     setIsPaying(true);
@@ -2381,7 +2399,7 @@ export default function Home() {
 
       {heroSlides.length > 0 && <section className="hero hero-background" id="top"><div className="hero-slide-layer" key={heroSlides[heroSlideIndex]}><img src={heroSlides[heroSlideIndex]} alt="Fanzzy collection highlight" /></div></section>}
 
-      <section className="section-block" id="categories"><div className="category-showcase"><div className="category-intro"><h2>Find your <em>signature.</em></h2><a className="text-link" href={`${siteBasePath}/collections`}>View all categories <span>↗</span></a></div><div className="category-grid">{categories.slice(0, 4).map((category, index) => <button className={`category-card category-${index + 1}`} key={category.name} onClick={() => { selectCategory(category.name); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}><img src={category.image || categoryImageFallback(category.name, index)} alt={category.name} /><span className="category-overlay" /><span className="category-info"><strong>{category.name}</strong></span></button>)}</div></div></section>
+      <section className="section-block" id="categories"><div className="category-showcase"><div className="category-intro"><h2>Find your <em>signature.</em></h2><div><a className="text-link" href={`${siteBasePath}/collections`}>View all categories <span>↗</span></a><a className="text-link" href={`${siteBasePath}/vendors`}>Shop by vendor <span>↗</span></a></div></div><div className="category-grid">{categories.slice(0, 4).map((category, index) => <button className={`category-card category-${index + 1}`} key={category.name} onClick={() => { selectCategory(category.name); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}><img src={category.image || categoryImageFallback(category.name, index)} alt={category.name} /><span className="category-overlay" /><span className="category-info"><strong>{category.name}</strong></span></button>)}</div></div></section>
 
       <section className="manifesto"><p className="eyebrow">THE FANZZY STANDARD</p><h2>Jewellery with a point of view.<br /><em>Made for your everyday extraordinary.</em></h2><p className="manifesto-copy">Fanzzy is a study in contrast — soft and sculptural, familiar and unexpected. Every piece is made in small batches with considered materials and a little bit of magic.</p></section>
 

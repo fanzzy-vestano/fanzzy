@@ -14,8 +14,13 @@ type StoredOrder = {
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
   inventoryAdjusted?: boolean;
-  items?: Array<{ name: string; quantity: number; price: string; productId?: string; variantName?: string; size?: string }>;
+  couponDiscount?: number;
+  promotionDiscount?: number;
+  shippingTotal?: number;
+  items?: Array<{ name: string; quantity: number; price: string; regularPrice?: number; productId?: string; variantName?: string; size?: string; vendorId?: string | null; vendorName?: string; vendorSlug?: string }>;
 };
+
+import { syncVendorOrderForPaidOrder } from "./vendor-server";
 
 type StoredVariant = { name?: string; size?: string; stock?: number; [key: string]: unknown };
 
@@ -286,6 +291,7 @@ export async function finalizeRazorpayPayment(payment: RazorpayPayment, receipt?
   if (order?.paymentStatus === "paid" && order.inventoryAdjusted === true) {
     restorePaymentContactDetails(order, payment);
     await writeOrders(orders);
+    await syncVendorOrderForPaidOrder(order).catch(() => undefined);
     return order;
   }
 
@@ -328,5 +334,6 @@ export async function finalizeRazorpayPayment(payment: RazorpayPayment, receipt?
     order.inventoryAdjusted = false;
   }
   await writeOrders(orders);
+  await syncVendorOrderForPaidOrder(order).catch(() => undefined);
   return order;
 }
