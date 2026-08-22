@@ -397,11 +397,11 @@ img { display: block; width: 100%; }
   }
 }
 
-/* Touch devices do not have a real hover state. Keep the product image stable
-   after the first tap so Add to cart remains the only action being triggered. */
+/* Touch devices do not have a real hover state. Reveal the alternate image
+   only after the first touch lands on the image surface itself. */
 @media (max-width: 760px), (hover: none), (pointer: coarse) {
   .product-card .hover-image {
-    display: none;
+    display: block;
     pointer-events: none;
   }
 
@@ -412,6 +412,14 @@ img { display: block; width: 100%; }
 
   .product-card:hover .stock-out-image {
     opacity: .2 !important;
+  }
+
+  .product-image-surface.is-touch-revealed .primary-image {
+    opacity: 0 !important;
+  }
+
+  .product-image-surface.is-touch-revealed .hover-image {
+    opacity: 1 !important;
   }
 }
 

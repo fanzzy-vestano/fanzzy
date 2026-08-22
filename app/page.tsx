@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { memo, type FormEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, type FormEvent, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   fetchCatalogCategories,
   fetchCatalogProducts,
@@ -469,12 +469,26 @@ const isProductOutOfStock = (product: Product) => getProductVariantType(product)
 const ProductCard = memo(function ProductCard({ product, wished, promotions, cartQuantity, onWishlist, onAdd, onDecrease, onIncrease, onQuickView, onImageZoom }: { product: Product; wished: boolean; promotions: PromotionOffer[]; cartQuantity: number; onWishlist: () => void; onAdd: () => void; onDecrease: () => void; onIncrease: () => void; onQuickView: () => void; onImageZoom: () => void }) {
   const isOutOfStock = isProductOutOfStock(product);
   const discountPercent = getProductDiscountPercent(product);
+  const [touchImageRevealed, setTouchImageRevealed] = useState(false);
+  const suppressNextImageClick = useRef(false);
+  const handleImageSurfacePointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== "touch") return;
+    suppressNextImageClick.current = true;
+    setTouchImageRevealed(true);
+  }, []);
+  const handleImageSurfaceClick = useCallback(() => {
+    if (suppressNextImageClick.current) {
+      suppressNextImageClick.current = false;
+      return;
+    }
+    onImageZoom();
+  }, [onImageZoom]);
   return (
     <article className="product-card">
       <div className="product-media" style={{ backgroundColor: product.tone }}>
-        <div className="product-image-surface">
-          <img className={`product-image product-image-zoom primary-image ${isOutOfStock ? "stock-out-image" : ""}`} src={product.image} alt={product.name} style={imageAdjustmentStyle(product.imageAdjustments)} onClick={onImageZoom} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onImageZoom(); }} role="button" tabIndex={0} title="Click to zoom" />
-          <img className={`product-image product-image-zoom hover-image ${isOutOfStock ? "stock-out-image" : ""}`} src={product.hoverImage} alt="" aria-hidden="true" style={imageAdjustmentStyle(product.hoverImageAdjustments)} onClick={onImageZoom} />
+        <div className={`product-image-surface ${touchImageRevealed ? "is-touch-revealed" : ""}`} onPointerDown={handleImageSurfacePointerDown} onClick={handleImageSurfaceClick}>
+          <img className={`product-image product-image-zoom primary-image ${isOutOfStock ? "stock-out-image" : ""}`} src={product.image} alt={product.name} style={imageAdjustmentStyle(product.imageAdjustments)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onImageZoom(); }} role="button" tabIndex={0} title="Click to zoom" />
+          <img className={`product-image product-image-zoom hover-image ${isOutOfStock ? "stock-out-image" : ""}`} src={product.hoverImage} alt="" aria-hidden="true" />
         </div>
         <span className="product-discount-badge">{discountPercent}% off</span>
         {product.tag && <span className="product-tag with-discount">{product.tag}</span>}
