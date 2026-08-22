@@ -308,6 +308,7 @@ type PromotionCartLine = { groupId: string; offerId: string; role: "paid" | "fre
 type OrderRecord = {
   id: string;
   date: string;
+  createdAt?: string;
   status: OrderStatus;
   total: string;
   customerName: string;
@@ -330,8 +331,8 @@ type OrderRecord = {
 };
 const adminOrders: OrderRecord[] = [];
 const isDemoOrder = (order: { id?: string }) => /^#FZ-104[4-8]$/.test(String(order.id ?? ""));
-// Orders are operational only after the Razorpay signature has been verified.
-// Pending checkout records are deliberately kept out of every Admin view.
+// Only verified payments belong in the operational Orders and Reports views.
+// Pending checkout records remain stored for payment recovery but stay hidden.
 const hasConfirmedPayment = (order: Pick<OrderRecord, "paymentStatus" | "razorpayPaymentId">) => order.paymentStatus === "paid" || Boolean(order.razorpayPaymentId);
 const siteBasePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 const siteAsset = (name: string) => `${siteBasePath}/${name}`;
@@ -4126,8 +4127,8 @@ function OrdersWorkspace({
 }) {
   const [orders, setOrders] = useState<OrderRecord[]>(adminOrders);
   const [filter, setFilter] = useState<OrderDateFilter>("this-month");
-  const [fromDate, setFromDate] = useState(() => `${new Date().toISOString().slice(0, 8)}01`);
-  const [toDate, setToDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [fromDate, setFromDate] = useState(() => `${reportDateKey(new Date()).slice(0, 8)}01`);
+  const [toDate, setToDate] = useState(() => reportDateKey(new Date()));
   const [selectedOrder, setSelectedOrder] = useState<OrderRecord | null>(null);
   const [printingBillId, setPrintingBillId] = useState<string | null>(null);
   const [enlargedOrderImage, setEnlargedOrderImage] = useState<{ src: string; alt: string } | null>(null);
@@ -4146,20 +4147,24 @@ function OrdersWorkspace({
       if (recoverCapturedPayments) {
         await fetch("/api/razorpay/sync-payments", { method: "POST" }).catch(() => undefined);
       }
-      const merged = new Map<string, OrderRecord>();
+      const localOrders: OrderRecord[] = [];
       try {
         const stored = window.localStorage.getItem("fanzzy-orders");
         const parsed = stored ? JSON.parse(stored) as OrderRecord[] : [];
         if (Array.isArray(parsed)) parsed.forEach((order) => {
-          if (order?.id && !isDemoOrder(order)) merged.set(order.id, order);
+          if (order?.id && !isDemoOrder(order) && hasConfirmedPayment(order)) localOrders.push(order);
         });
       } catch {
         window.localStorage.removeItem("fanzzy-orders");
       }
-      if (merged.size) setOrders(Array.from(merged.values()).filter(hasConfirmedPayment));
+      if (localOrders.length) setOrders(localOrders);
       const remote = await fetchStoreOrders<OrderRecord>();
-      remote.data?.forEach((order) => { if (order?.id && !isDemoOrder(order)) merged.set(order.id, order); });
-      setOrders(Array.from(merged.values()).filter(hasConfirmedPayment));
+      // The shared record is written newest-first. Keep that order as the
+      // primary ordering and append only local records not yet synced.
+      const merged = new Map<string, OrderRecord>();
+      remote.data?.forEach((order) => { if (order?.id && !isDemoOrder(order) && hasConfirmedPayment(order)) merged.set(order.id, order); });
+      localOrders.forEach((order) => { if (!merged.has(order.id)) merged.set(order.id, order); });
+      setOrders(Array.from(merged.values()));
       const [catalog, variantsRemote] = await Promise.all([fetchCatalogProducts(), fetchStoreSetting("productVariants")]);
       let variantsMap: Record<string, ProductVariant[]> = {};
       if (variantsRemote.value) {
@@ -4195,7 +4200,9 @@ function OrdersWorkspace({
     void fetch("/api/razorpay/sync-payments", { method: "POST" })
       .then(() => syncOrders(false))
       .catch(() => undefined);
-    const liveOrderTimer = window.setInterval(syncLiveOrders, 5000);
+    // Realtime is the fast path; poll every two seconds as a reliable fallback
+    // so a successful payment appears even if replication notifications lag.
+    const liveOrderTimer = window.setInterval(syncLiveOrders, 2000);
     const unsubscribeFromLiveOrders = subscribeToStoreSetting("orders", syncLiveOrders);
     window.addEventListener("storage", syncLiveOrders);
     window.addEventListener("fanzzy-orders-updated", syncLiveOrders);
@@ -4210,7 +4217,7 @@ function OrdersWorkspace({
   const persistOrders = async (next: OrderRecord[]) => {
     setOrders(next);
     window.localStorage.setItem("fanzzy-orders", JSON.stringify(next));
-    // Retain hidden pending payments while an admin updates a confirmed order.
+    // Retain pending payments while an admin updates an order.
     const remote = await fetchStoreOrders<OrderRecord>();
     const allOrders = new Map<string, OrderRecord>();
     remote.data?.forEach((order) => { if (order?.id) allOrders.set(order.id, order); });
@@ -4219,22 +4226,34 @@ function OrdersWorkspace({
   };
 
   const filteredOrders = useMemo(() => {
-    const latestDate = new Date().toISOString().slice(0, 10);
+    const current = new Date();
+    const latestDate = `${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, "0")}-${String(current.getDate()).padStart(2, "0")}`;
     const latest = new Date(`${latestDate}T00:00:00`);
     let from = "0000-01-01";
     let to = latestDate;
     if (filter === "today") from = latestDate;
     if (filter === "this-week") {
       const weekStart = new Date(latest);
-      weekStart.setDate(latest.getDate() - 6);
-      from = weekStart.toISOString().slice(0, 10);
+      const day = weekStart.getDay();
+      weekStart.setDate(weekStart.getDate() - (day === 0 ? 6 : day - 1));
+      from = `${weekStart.getFullYear()}-${String(weekStart.getMonth() + 1).padStart(2, "0")}-${String(weekStart.getDate()).padStart(2, "0")}`;
     }
     if (filter === "this-month") from = latestDate.slice(0, 8) + "01";
     if (filter === "custom") {
       from = fromDate || "0000-01-01";
       to = toDate || latestDate;
     }
-    return orders.filter((order) => order.date >= from && order.date <= to);
+    if (from > to) [from, to] = [to, from];
+    return orders
+      .filter((order) => {
+        const orderDate = String(order.date || "").slice(0, 10);
+        const matchesDate = orderDate >= from && orderDate <= to;
+        return matchesDate;
+      })
+      // Orders are stored newest-first. The stable sort keeps that insertion
+      // order for orders placed on the same day while always putting newer
+      // dates ahead of older dates.
+      .sort((left, right) => String(right.date || "").slice(0, 10).localeCompare(String(left.date || "").slice(0, 10)));
   }, [orders, filter, fromDate, toDate]);
 
   const formatOrderDate = (value: string) =>
@@ -4243,6 +4262,9 @@ function OrdersWorkspace({
       month: "short",
       year: "numeric",
     }).format(new Date(`${value}T00:00:00`));
+  const formatOrderTime = (value?: string) => value
+    ? new Intl.DateTimeFormat("en-IN", { hour: "2-digit", minute: "2-digit" }).format(new Date(value))
+    : "";
   const openOrder = (order: OrderRecord) => {
     setSelectedOrder(order);
     setPhone(order.phone);
@@ -4356,12 +4378,6 @@ function OrdersWorkspace({
         </div>
         <div className="module-actions">
           <button
-            className="module-secondary"
-            onClick={() => onNotify("Pending orders opened")}
-          >
-            View pending ↗
-          </button>
-          <button
             className="module-primary"
             onClick={() => onNotify("Orders export started")}
           >
@@ -4453,7 +4469,7 @@ function OrdersWorkspace({
           <button key={order.id} onClick={() => openOrder(order)}>
             <span>
               <strong>{order.id}</strong>
-              <small>{formatOrderDate(order.date)}</small>
+              <small>{formatOrderDate(order.date)}{formatOrderTime(order.createdAt) ? ` · ${formatOrderTime(order.createdAt)}` : ""}</small>
               <small className="order-list-products">Customer ID: {order.userId || "Legacy / guest"} · {order.customerName}</small>
               <small className="order-list-products">{order.items?.map((item) => item.name).join(", ") || "No saved item details"}</small>
               <small className="order-list-products">Payment: {order.paymentStatus === "paid" ? "Paid" : "Awaiting Razorpay confirmation"} · Inventory: {order.inventoryAdjusted === true ? "Updated" : "Pending"}</small>
@@ -4493,7 +4509,7 @@ function OrdersWorkspace({
               <h3 id="order-detail-title">{selectedOrder.id}</h3>
               <p className="product-detail-meta">
                 {selectedOrder.customerName} ·{" "}
-                {formatOrderDate(selectedOrder.date)} · {selectedOrder.total}
+                {formatOrderDate(selectedOrder.date)}{formatOrderTime(selectedOrder.createdAt) ? ` · ${formatOrderTime(selectedOrder.createdAt)}` : ""} · {selectedOrder.total}
               </p>
               <p className="product-detail-meta">Payment: {selectedOrder.paymentStatus === "paid" ? "Paid" : "Awaiting Razorpay confirmation"}{selectedOrder.razorpayPaymentId ? ` · Razorpay payment ${selectedOrder.razorpayPaymentId}` : selectedOrder.razorpayOrderId ? ` · Razorpay order ${selectedOrder.razorpayOrderId}` : ""}</p>
               <section className="admin-customer-details"><p className="eyebrow">CUSTOMER &amp; ORDER IDS</p><dl><div><dt>Order ID</dt><dd>{selectedOrder.id}</dd></div><div className="admin-customer-account"><dt>Customer Account ID</dt><dd>{selectedOrder.userId || "Legacy / guest order"}</dd></div><div><dt>Name</dt><dd>{selectedOrder.customerName || "Not provided"}</dd></div><div><dt>Login mobile</dt><dd>{selectedOrder.userPhone || selectedOrder.phone || "Not provided"}</dd></div><div><dt>Email</dt><dd>{selectedOrder.email || selectedOrder.userEmail || "Not provided"}</dd></div><div><dt>WhatsApp</dt><dd>{selectedOrder.phone || "Not provided"}</dd></div><div><dt>Fulfilment</dt><dd>{selectedOrder.fulfillmentMethod === "pickup" ? `Pickup from ${selectedOrder.pickupHubName || "hub"}` : "Delivery"}</dd></div><div className="admin-customer-address"><dt>{selectedOrder.fulfillmentMethod === "pickup" ? "Pickup hub / place" : "Delivery address"}</dt><dd>{selectedOrder.fulfillmentMethod === "pickup" ? `${selectedOrder.pickupHubName || "Hub"} · ${selectedOrder.pickupHubPlace || selectedOrder.address || "Place not saved"}` : selectedOrder.address || "Not provided"}</dd></div></dl>{selectedOrder.razorpayPaymentId && <button className="module-secondary admin-restore-payment-details" type="button" onClick={() => void restoreOrderDetailsFromRazorpay()}>Restore delivery details from Razorpay</button>}</section>

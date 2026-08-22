@@ -4,6 +4,7 @@ type StoredOrder = {
   userPhone?: string;
   userEmail?: string;
   date: string;
+  createdAt?: string;
   status: "Processing" | "Packed" | "Shipped" | "Delivered" | "Cancelled";
   total: string;
   customerName: string;
@@ -289,6 +290,7 @@ export async function finalizeRazorpayPayment(payment: RazorpayPayment, receipt?
   // true value as complete so the next payment sync can repair their missing
   // size/variant stock deduction and then mark them complete.
   if (order?.paymentStatus === "paid" && order.inventoryAdjusted === true) {
+    if (!order.createdAt && payment.created_at) order.createdAt = new Date(payment.created_at * 1000).toISOString();
     restorePaymentContactDetails(order, payment);
     await writeOrders(orders);
     await syncVendorOrderForPaidOrder(order).catch(() => undefined);
@@ -306,6 +308,7 @@ export async function finalizeRazorpayPayment(payment: RazorpayPayment, receipt?
     order = {
       id: asOrderId(payment, receipt),
       date: payment.created_at ? new Date(payment.created_at * 1000).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10),
+      createdAt: payment.created_at ? new Date(payment.created_at * 1000).toISOString() : new Date().toISOString(),
       status: "Processing",
       total: asMoney(Number(payment.amount) || 0),
       customerName: customerEmail(payment.email)?.split("@")[0] || "Razorpay customer",
@@ -318,6 +321,7 @@ export async function finalizeRazorpayPayment(payment: RazorpayPayment, receipt?
   }
 
   order.paymentStatus = "paid";
+  if (!order.createdAt && payment.created_at) order.createdAt = new Date(payment.created_at * 1000).toISOString();
   order.razorpayOrderId = payment.order_id || order.razorpayOrderId;
   order.razorpayPaymentId = payment.id;
   restorePaymentContactDetails(order, payment);
