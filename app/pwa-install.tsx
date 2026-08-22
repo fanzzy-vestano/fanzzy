@@ -7,24 +7,22 @@ type InstallPromptEvent = Event & {
   userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
 };
 
-const DISMISS_KEY = "fanzzy_pwa_install_dismissed_at";
-const DISMISS_FOR_MS = 14 * 24 * 60 * 60 * 1000;
+const INSTALL_COMPLETED_KEY = "fanzzy_pwa_install_completed";
 const AUTO_CLOSE_AFTER_MS = 6 * 1000;
 
-const rememberDismissal = () => {
+const hasCompletedInstall = () => {
   try {
-    window.localStorage.setItem(DISMISS_KEY, String(Date.now()));
+    return window.localStorage.getItem(INSTALL_COMPLETED_KEY) === "true";
   } catch {
-    // The prompt can still close when private storage is unavailable.
+    return false;
   }
 };
 
-const recentlyDismissed = () => {
+const rememberCompletedInstall = () => {
   try {
-    const dismissedAt = Number(window.localStorage.getItem(DISMISS_KEY));
-    return Number.isFinite(dismissedAt) && Date.now() - dismissedAt < DISMISS_FOR_MS;
+    window.localStorage.setItem(INSTALL_COMPLETED_KEY, "true");
   } catch {
-    return false;
+    // Standalone mode still prevents the prompt on the current visit.
   }
 };
 
@@ -47,7 +45,12 @@ export default function PwaInstall({ basePath = "" }: { basePath?: string }) {
       if (document.readyState === "complete") registerWorker();
     }
 
-    if (window.location.pathname.startsWith(`${basePath}/admin`) || isStandaloneApp()) return;
+    if (window.location.pathname.startsWith(`${basePath}/admin`)) return;
+    if (isStandaloneApp()) {
+      rememberCompletedInstall();
+      return;
+    }
+    if (hasCompletedInstall()) return;
 
     const iosDevice = /iphone|ipad|ipod/i.test(window.navigator.userAgent);
     setIsIos(iosDevice);
@@ -55,9 +58,10 @@ export default function PwaInstall({ basePath = "" }: { basePath?: string }) {
     const handleInstallPrompt = (event: Event) => {
       event.preventDefault();
       setInstallEvent(event as InstallPromptEvent);
-      if (!recentlyDismissed()) setVisible(true);
+      setVisible(true);
     };
     const handleInstalled = () => {
+      rememberCompletedInstall();
       setVisible(false);
       setShowInstructions(false);
       setInstallEvent(null);
@@ -67,7 +71,7 @@ export default function PwaInstall({ basePath = "" }: { basePath?: string }) {
     window.addEventListener("appinstalled", handleInstalled);
 
     const fallbackTimer = window.setTimeout(() => {
-      if (!recentlyDismissed()) setVisible(true);
+      setVisible(true);
     }, 1800);
 
     return () => {
@@ -80,7 +84,6 @@ export default function PwaInstall({ basePath = "" }: { basePath?: string }) {
   useEffect(() => {
     if (!visible) return;
     const autoCloseTimer = window.setTimeout(() => {
-      rememberDismissal();
       setVisible(false);
       setShowInstructions(false);
       setInstallEvent(null);
@@ -89,7 +92,6 @@ export default function PwaInstall({ basePath = "" }: { basePath?: string }) {
   }, [visible]);
 
   const dismiss = () => {
-    rememberDismissal();
     setVisible(false);
     setShowInstructions(false);
   };
@@ -102,6 +104,7 @@ export default function PwaInstall({ basePath = "" }: { basePath?: string }) {
     await installEvent.prompt();
     const choice = await installEvent.userChoice;
     if (choice.outcome === "accepted") {
+      rememberCompletedInstall();
       setVisible(false);
       setInstallEvent(null);
     }

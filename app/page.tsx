@@ -1408,7 +1408,6 @@ export default function Home() {
       quickProductCloseRequested.current = true;
       setQuickProduct(null);
     }
-    announce(`${product.name}${variant?.name ? ` · ${variant.name}` : ""} added to cart`);
   };
   const addPromotionToCart = (offer: PromotionOffer) => {
     if (!quickProduct) return;
@@ -1464,7 +1463,6 @@ export default function Home() {
     });
     quickProductCloseRequested.current = true;
     setQuickProduct(null);
-    announce(`${offerTypeLabel(offer)} added to cart`);
   };
   const updateQuantity = (cartKey: string, delta: number) => {
     const productId = cartKey.split("::", 1)[0];
