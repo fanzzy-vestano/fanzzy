@@ -275,6 +275,15 @@ img { display: block; width: 100%; }
 .quick-modal{height:min(766px,calc(100vh - 72px));max-height:calc(100vh - 72px)}.quick-image{height:100%;min-height:0}.quick-copy{justify-content:flex-start;min-height:0;overflow-y:auto}
 .product-image-zoom{cursor:zoom-in}.quick-image{cursor:zoom-in}.image-zoom-backdrop{align-items:center;display:flex;justify-content:center;padding:28px}.image-zoom-modal{background:var(--paper);height:min(88vh,900px);max-width:min(92vw,1000px);overflow:hidden;position:relative;width:min(92vw,1000px)}.image-zoom-modal img{display:block;height:100%;object-fit:contain;width:100%}.image-zoom-modal .modal-close{background:rgba(255,250,243,.88);padding:9px;right:14px;top:14px}
 @media (max-width:760px){.quick-modal{height:auto;max-height:calc(100vh - 70px)}.quick-image{height:300px}.quick-copy{overflow:visible}}
+
+/* Keep the complete product visible in Quick View instead of cropping it to
+   the card's portrait ratio. */
+.quick-image { align-items: center; display: flex; justify-content: center; padding: 16px; }
+.quick-image img { height: 100%; object-fit: contain; transform: none !important; width: 100%; }
+@media (max-width:760px) {
+  .quick-image { padding: 12px; }
+  .quick-image img { object-fit: contain; }
+}
 .price-row { font-size: 16px; }
 .price-row del { font-size: 10px; }
 @media (max-width:760px) {
@@ -398,7 +407,7 @@ img { display: block; width: 100%; }
 }
 
 /* Touch devices do not have a real hover state. Reveal the alternate image
-   only after the first touch lands on the image surface itself. */
+   only while a touch is held on the image surface itself. */
 @media (max-width: 760px), (hover: none), (pointer: coarse) {
   .product-card .hover-image {
     display: block;
@@ -617,5 +626,27 @@ img { display: block; width: 100%; }
 
   .footer-bottom button {
     padding: 8px 5px;
+  }
+}
+
+/* Final Quick View override: keep the complete image visible after the
+   mobile modal rules are applied. */
+.quick-image {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+  padding: 16px;
+}
+.quick-image img {
+  object-fit: contain !important;
+  transform: none !important;
+}
+@media (max-width: 760px) {
+  .quick-image {
+    display: flex;
+    padding: 12px;
+  }
+  .quick-image img {
+    object-fit: contain !important;
   }
 }

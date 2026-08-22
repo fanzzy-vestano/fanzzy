@@ -473,8 +473,14 @@ const ProductCard = memo(function ProductCard({ product, wished, promotions, car
   const suppressNextImageClick = useRef(false);
   const handleImageSurfacePointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.pointerType !== "touch") return;
+    event.currentTarget.setPointerCapture(event.pointerId);
     suppressNextImageClick.current = true;
     setTouchImageRevealed(true);
+  }, []);
+  const handleImageSurfacePointerEnd = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== "touch") return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    setTouchImageRevealed(false);
   }, []);
   const handleImageSurfaceClick = useCallback(() => {
     if (suppressNextImageClick.current) {
@@ -486,7 +492,7 @@ const ProductCard = memo(function ProductCard({ product, wished, promotions, car
   return (
     <article className="product-card">
       <div className="product-media" style={{ backgroundColor: product.tone }}>
-        <div className={`product-image-surface ${touchImageRevealed ? "is-touch-revealed" : ""}`} onPointerDown={handleImageSurfacePointerDown} onClick={handleImageSurfaceClick}>
+        <div className={`product-image-surface ${touchImageRevealed ? "is-touch-revealed" : ""}`} onPointerDown={handleImageSurfacePointerDown} onPointerUp={handleImageSurfacePointerEnd} onPointerCancel={handleImageSurfacePointerEnd} onClick={handleImageSurfaceClick}>
           <img className={`product-image product-image-zoom primary-image ${isOutOfStock ? "stock-out-image" : ""}`} src={product.image} alt={product.name} style={imageAdjustmentStyle(product.imageAdjustments)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onImageZoom(); }} role="button" tabIndex={0} title="Click to zoom" />
           <img className={`product-image product-image-zoom hover-image ${isOutOfStock ? "stock-out-image" : ""}`} src={product.hoverImage} alt="" aria-hidden="true" />
         </div>
