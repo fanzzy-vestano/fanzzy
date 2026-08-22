@@ -383,20 +383,35 @@ img { display: block; width: 100%; }
   .quick-copy { flex: 1 1 auto; min-height: auto; overflow: visible; }
 }
 
+.add-to-cart-button {
+  font-size: 9px;
+  min-width: 92px;
+  padding: 12px 14px;
+}
+
+@media (max-width: 760px) {
+  .add-to-cart-button {
+    font-size: 8px;
+    min-width: 88px;
+    padding: 11px 10px;
+  }
+}
+
 /* Touch devices do not have a real hover state. Keep the product image stable
    after the first tap so Add to cart remains the only action being triggered. */
-@media (hover: none), (pointer: coarse) {
+@media (max-width: 760px), (hover: none), (pointer: coarse) {
   .product-card .hover-image {
     display: none;
+    pointer-events: none;
   }
 
   .product-card:hover .primary-image,
   .product-card:hover .stock-out-image {
-    opacity: 1;
+    opacity: 1 !important;
   }
 
   .product-card:hover .stock-out-image {
-    opacity: .2;
+    opacity: .2 !important;
   }
 }
 .storefront-offer-rail { align-items: center; background: linear-gradient(110deg, #4b1c2b 0%, #6b293b 62%, #8b4a50 100%); border: 0; border-radius: 14px; box-shadow: 0 12px 28px rgba(75, 28, 43, .16); color: #fff9f0; gap: 14px; padding: 15px 18px; }

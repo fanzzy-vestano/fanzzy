@@ -85,8 +85,14 @@ const asCategory = (row: Record<string, unknown>): CatalogCategory => ({
 
 export async function fetchCatalogProducts() {
   if (!supabase) return { data: null, error: new Error("Supabase is not configured") };
-  const result = await supabase.from("products").select("*").order("created_at", { ascending: true });
-  return { data: result.data?.map((row) => asProduct(row as Record<string, unknown>)) ?? null, error: result.error };
+  const result = await supabase.from("products").select("*,vendors(business_name,slug)").order("created_at", { ascending: true });
+  if (!result.error) {
+    return { data: result.data?.map((row) => asProduct(row as Record<string, unknown>)) ?? null, error: null };
+  }
+  // Vendor relations may not exist yet in an older production schema. The
+  // catalog itself must remain available while vendor metadata is optional.
+  const fallback = await supabase.from("products").select("*").order("created_at", { ascending: true });
+  return { data: fallback.data?.map((row) => asProduct(row as Record<string, unknown>)) ?? null, error: fallback.error };
 }
 
 export async function saveCatalogProduct(product: CatalogProduct) {
