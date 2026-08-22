@@ -249,6 +249,9 @@ img { display: block; width: 100%; }
 .customer-order-items .customer-order-product { align-items: center; background: transparent; color: inherit; display: flex; font-size: 12px; gap: 12px; justify-content: space-between; padding: 2px 0; text-align: left; width: 100%; }
 .customer-order-product:hover .order-product-copy strong { color: var(--wine); }.customer-order-product img,.order-product-placeholder { background: #f0e8df; flex: 0 0 46px; height: 52px; object-fit: cover; width: 46px; }.order-product-placeholder { align-items: center; color: var(--gold); display: flex; font-size: 15px; justify-content: center; }.customer-order-product .order-product-copy { display: grid; flex: 1; gap: 4px; min-width: 0; }.order-product-copy strong { color: var(--ink); font-family: var(--serif); font-size: 15px; font-weight: 500; transition: color .2s ease; }.order-product-copy b { color: var(--muted); font-family: var(--mono); font-size: 9px; font-weight: 400; }.order-product-copy em { color: var(--muted); font-family: var(--mono); font-size: 8px; font-style: normal; letter-spacing: .05em; text-transform: uppercase; }
 .customer-order-items span { color: var(--ink); }.customer-order-items span b { color: var(--muted); font-family: var(--mono); font-size: 9px; font-weight: 400; }.customer-order-items small { color: var(--wine); font-family: var(--mono); font-size: 9px; }.legacy-order { border-bottom: 0; color: var(--muted); display: block; font-size: 10px; line-height: 1.5; }
+.order-product-selection { color: var(--wine); font-family: var(--mono); font-size: 8px; letter-spacing: .04em; text-transform: uppercase; }
+.order-product-promotion { color: var(--muted) !important; font-size: 8px !important; letter-spacing: .05em; text-transform: uppercase; }
+.order-product-promotion.is-free { color: #668963 !important; }
 .customer-order-total { align-items: center; display: flex; justify-content: space-between; padding-top: 14px; }.customer-order-total span { color: var(--muted); font-size: 10px; }.customer-order-total strong { color: var(--wine); font-family: var(--mono); font-size: 12px; font-weight: 400; }
 .orders-empty { align-items: center; display: flex; flex: 1; flex-direction: column; justify-content: center; padding: 45px 20px; text-align: center; }.orders-empty > div { color: var(--gold); font-size: 38px; }.orders-empty h3 { color: var(--wine); font-family: var(--serif); font-size: 28px; font-weight: 500; letter-spacing: -.05em; margin: 8px 0; }.orders-empty p { color: var(--muted); font-size: 11px; line-height: 1.7; margin: 0 0 24px; max-width: 300px; }
 .assistant-drawer { background: var(--paper); border-radius: 22px 0 0 22px; display: flex; flex-direction: column; height: 100%; margin-left: auto; max-width: 470px; padding: 36px; width: 100%; }
@@ -402,3 +405,138 @@ img { display: block; width: 100%; }
 .cart-preview-heading-total button:hover { color: var(--wine-deep); }
 @media (max-width:760px) { .cart-preview-heading-total { gap: 8px; }.cart-preview-heading-total b { font-size: 11px; }.cart-preview-heading-total button { font-size: 18px; } }
 .header-action-icon.cart-icon { height: 17px; width: 17px; }
+
+/* Mobile touch targets: keep the visual language compact while giving every
+   important action a reliable finger-sized hit area. */
+@media (max-width: 760px) {
+  :where(button, a) {
+    touch-action: manipulation;
+  }
+
+  :where(button) {
+    min-height: 44px;
+  }
+
+  .announcement {
+    min-height: 44px;
+  }
+
+  .header-actions {
+    gap: 4px;
+    margin-right: 10px;
+  }
+
+  .header-actions button,
+  .mobile-menu {
+    align-items: center;
+    display: inline-flex;
+    justify-content: center;
+    min-height: 44px;
+    min-width: 40px;
+  }
+
+  .wishlist-button {
+    align-items: center;
+    display: inline-flex;
+    justify-content: center;
+    min-height: 44px;
+    min-width: 44px;
+    right: 0;
+    top: 0;
+  }
+
+  .add-to-cart-button {
+    min-height: 44px;
+    padding: 11px 10px;
+  }
+
+  .quick-view {
+    min-height: 44px;
+    padding: 12px 13px;
+  }
+
+  .product-cart-control > button {
+    height: 44px;
+    min-height: 44px;
+    width: 44px;
+  }
+
+  .product-cart-control > span {
+    height: 44px;
+    min-width: 36px;
+  }
+
+  .quantity button {
+    min-height: 44px;
+    min-width: 44px;
+    padding: 0 12px;
+  }
+
+  .filter-pills button,
+  .search-suggestions button,
+  .variant-picker button,
+  .size-picker button,
+  .storefront-offer-rail button,
+  .storefront-promotion-tabs button,
+  .cart-fulfillment-options button,
+  .promotion-choice-grid button,
+  .product-variants-preview {
+    min-height: 44px;
+  }
+
+  .cart-fulfillment-options button {
+    padding: 10px;
+  }
+
+  .cart-fulfillment select {
+    min-height: 44px;
+  }
+
+  .text-link,
+  .save-text,
+  .email-line button,
+  .footer-bottom button,
+  .announcement button,
+  .modal-close,
+  .drawer-header button,
+  .cart-remove,
+  .cart-remove-unavailable,
+  .saved-remove,
+  .profile-sign-out,
+  .auth-resend {
+    align-items: center;
+    display: inline-flex;
+    min-height: 44px;
+  }
+
+  .site-footer > div:not(.footer-brand):not(.footer-bottom) a {
+    align-items: center;
+    display: flex;
+    min-height: 44px;
+  }
+
+  .cart-preview-actions .button,
+  .cart-preview-view {
+    min-height: 44px;
+  }
+
+  .cart-preview-heading-total button {
+    align-items: center;
+    display: inline-flex;
+    justify-content: center;
+    min-height: 44px;
+    min-width: 44px;
+    padding: 0;
+  }
+
+  .email-line button,
+  .modal-close,
+  .drawer-header button {
+    justify-content: center;
+    min-width: 44px;
+  }
+
+  .footer-bottom button {
+    padding: 8px 5px;
+  }
+}

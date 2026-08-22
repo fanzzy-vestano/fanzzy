@@ -9,6 +9,15 @@ type InstallPromptEvent = Event & {
 
 const DISMISS_KEY = "fanzzy_pwa_install_dismissed_at";
 const DISMISS_FOR_MS = 14 * 24 * 60 * 60 * 1000;
+const AUTO_CLOSE_AFTER_MS = 6 * 1000;
+
+const rememberDismissal = () => {
+  try {
+    window.localStorage.setItem(DISMISS_KEY, String(Date.now()));
+  } catch {
+    // The prompt can still close when private storage is unavailable.
+  }
+};
 
 const recentlyDismissed = () => {
   try {
@@ -68,12 +77,19 @@ export default function PwaInstall({ basePath = "" }: { basePath?: string }) {
     };
   }, [basePath]);
 
+  useEffect(() => {
+    if (!visible) return;
+    const autoCloseTimer = window.setTimeout(() => {
+      rememberDismissal();
+      setVisible(false);
+      setShowInstructions(false);
+      setInstallEvent(null);
+    }, AUTO_CLOSE_AFTER_MS);
+    return () => window.clearTimeout(autoCloseTimer);
+  }, [visible]);
+
   const dismiss = () => {
-    try {
-      window.localStorage.setItem(DISMISS_KEY, String(Date.now()));
-    } catch {
-      // The prompt can still be dismissed when private storage is unavailable.
-    }
+    rememberDismissal();
     setVisible(false);
     setShowInstructions(false);
   };
