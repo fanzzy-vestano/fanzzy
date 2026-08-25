@@ -52,7 +52,14 @@ export class VendorDataError extends Error {
 async function rest<T>(table: string, query = "", options: RestOptions = {}) {
   const url = supabaseUrl();
   const key = supabaseKey(options.privileged === true);
-  if (!url || !key) throw new VendorDataError(options.privileged ? "Vendor administration is not configured on the server." : "Vendor service is not configured.", 503);
+  if (!url || !key) {
+    const message = options.privileged
+      ? process.env.NODE_ENV === "development"
+        ? "Vendor administration is not configured locally. Add SUPABASE_SERVICE_ROLE_KEY to .env.local and restart the dev server."
+        : "Vendor administration is not configured on the server."
+      : "Vendor service is not configured.";
+    throw new VendorDataError(message, 503);
+  }
   const response = await fetch(`${url}/rest/v1/${table}${query ? `?${query}` : ""}`, {
     method: options.method || "GET",
     headers: { apikey: key, Authorization: `Bearer ${key}`, "content-type": "application/json", ...options.headers },

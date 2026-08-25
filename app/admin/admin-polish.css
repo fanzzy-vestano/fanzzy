@@ -630,6 +630,25 @@
   margin: 0;
 }
 
+.vendor-form-action-stack {
+  align-items: flex-end;
+  display: grid;
+  gap: 8px;
+  justify-items: end;
+}
+
+.vendor-form-error {
+  color: #a23d44;
+  font-size: 10px;
+  max-width: 420px;
+  text-align: right;
+}
+
+.admin-vendor-form button:disabled {
+  cursor: wait;
+  opacity: .65;
+}
+
 @media (max-width: 900px) {
   .admin-vendor-form .vendor-form-grid-three {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -663,6 +682,17 @@
 
   .vendor-form-actions .module-primary {
     width: 100%;
+  }
+
+  .vendor-form-action-stack {
+    align-items: stretch;
+    justify-items: stretch;
+    width: 100%;
+  }
+
+  .vendor-form-error {
+    max-width: none;
+    text-align: left;
   }
 }
 
