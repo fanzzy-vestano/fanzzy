@@ -2036,6 +2036,22 @@ type ProductReportRow = {
   product: AdminProduct;
   units: number;
   revenue: number;
+  stockDetails: string;
+};
+type SalesProductReportRow = {
+  invoiceNumber: string;
+  orderId: string;
+  customerName: string;
+  date: string;
+  productName: string;
+  sku: string;
+  units: number;
+  unitRate: number;
+  grossSales: number;
+  taxableSales: number;
+  cgst: number;
+  sgst: number;
+  grossProfit: number | null;
 };
 
 const parseReportMoney = (value: string | number) =>
@@ -2044,6 +2060,28 @@ const parseReportMoney = (value: string | number) =>
     : Number(String(value).replace(/[^0-9.]/g, "")) || 0;
 
 const getReportInvoiceNumber = (order: Pick<OrderRecord, "id"> & { invoiceNumber?: string }) => order.invoiceNumber || order.id;
+
+const getReportStockSummary = (product: Pick<AdminProduct, "stock" | "variantType" | "sizes" | "sizeStock" | "variants">) => {
+  const formatStock = (value: unknown) => Number.isFinite(Number(value)) ? String(Math.max(0, Number(value))) : "0";
+  const variants = product.variants || [];
+  const hasVariantStock = variants.some((variant) => variant.stock !== undefined && Number.isFinite(Number(variant.stock)));
+  if (variants.length && hasVariantStock) {
+    const details = variants.map((variant, index) => {
+      const label = product.variantType === "size"
+        ? variant.size || variant.name || `Size ${index + 1}`
+        : variant.name || `Option ${index + 1}`;
+      return `${product.variantType === "size" ? `Size ${label}` : label}: ${formatStock(variant.stock)}`;
+    });
+    return { stock: variants.reduce((total, variant) => total + Math.max(0, Number(variant.stock) || 0), 0), details: details.join(" · ") };
+  }
+  const sizes = product.sizes || [];
+  const sizeStock = product.sizeStock || {};
+  if (product.variantType === "size" && sizes.length && Object.keys(sizeStock).length) {
+    const details = sizes.map((size) => `Size ${size}: ${formatStock(sizeStock[size])}`);
+    return { stock: sizes.reduce((total, size) => total + Math.max(0, Number(sizeStock[size]) || 0), 0), details: details.join(" · ") };
+  }
+  return { stock: Math.max(0, Number(product.stock) || 0), details: "Product stock" };
+};
 
 const reportNameKey = (value: string) => value.trim().toLowerCase().replace(/[^a-z0-9]+/g, " ");
 const reportDateKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -2101,21 +2139,104 @@ function ReportsWorkspace({
       if (active) setOrders(Array.from(merged.values()).filter((order) => order?.date && order?.total && hasConfirmedPayment(order)));
     };
     const syncProducts = async () => {
-      const remote = await fetchCatalogProducts();
+      const [remote, pricingRemote, variantsRemote, variantTypeRemote, sizesRemote, sizeStockRemote] = await Promise.all([
+        fetchCatalogProducts(),
+        fetchStoreSetting("productPricing"),
+        fetchStoreSetting("productVariants"),
+        fetchStoreSetting("productVariantType"),
+        fetchStoreSetting("productSizes"),
+        fetchStoreSetting("productSizeStock"),
+      ]);
       if (!active) return;
+      let pricingMap: Record<string, { gstRate?: number; markup?: number }> = {};
+      if (pricingRemote.value) {
+        try {
+          const parsed = JSON.parse(pricingRemote.value) as Record<string, { gstRate?: number; markup?: number }>;
+          if (parsed && typeof parsed === "object") pricingMap = parsed;
+        } catch {
+          pricingMap = {};
+        }
+      }
+      let variantsMap: Record<string, ProductVariant[]> = {};
+      let variantTypeMap: Record<string, ProductVariantType> = {};
+      let sizesMap: Record<string, string[]> = {};
+      let sizeStockMap: Record<string, Record<string, number>> = {};
+      if (variantsRemote.value) {
+        try {
+          const parsed = JSON.parse(variantsRemote.value) as Record<string, ProductVariant[]>;
+          if (parsed && typeof parsed === "object") variantsMap = parsed;
+        } catch {
+          variantsMap = {};
+        }
+      }
+      if (variantTypeRemote.value) {
+        try {
+          const parsed = JSON.parse(variantTypeRemote.value) as Record<string, unknown>;
+          if (parsed && typeof parsed === "object") {
+            variantTypeMap = Object.fromEntries(
+              Object.entries(parsed).filter((entry): entry is [string, ProductVariantType] => entry[1] === "normal" || entry[1] === "size"),
+            );
+          }
+        } catch {
+          variantTypeMap = {};
+        }
+      }
+      if (sizesRemote.value) {
+        try {
+          const parsed = JSON.parse(sizesRemote.value) as Record<string, unknown>;
+          if (parsed && typeof parsed === "object") {
+            sizesMap = Object.fromEntries(
+              Object.entries(parsed).filter((entry): entry is [string, string[]] => Array.isArray(entry[1]) && entry[1].every((size) => typeof size === "string")),
+            );
+          }
+        } catch {
+          sizesMap = {};
+        }
+      }
+      if (sizeStockRemote.value) {
+        try {
+          const parsed = JSON.parse(sizeStockRemote.value) as Record<string, Record<string, number>>;
+          if (parsed && typeof parsed === "object") sizeStockMap = parsed;
+        } catch {
+          sizeStockMap = {};
+        }
+      }
       let next =
         !remote.error && remote.data !== null
-          ? remote.data.filter((product) => !isDemoProduct(product)).map((product) => ({
-              name: product.name,
-              sku: product.sku,
-              category: product.category,
-              stock: product.stock,
-              price: formatAdminCurrency(product.price),
-              cost: formatAdminCurrency(product.cost ?? 0),
-              status: product.status,
-              image: product.image || adminPlaceholderImage,
-              hoverImage: product.hoverImage || product.image || adminPlaceholderImage,
-            }))
+          ? remote.data.filter((product) => !isDemoProduct(product)).map((product) => {
+              const variants = variantsMap[product.sku]?.length ? variantsMap[product.sku] : product.variants || [];
+              const configuredSizeStock = sizeStockMap[product.sku] || {};
+              const sizes = sizesMap[product.sku]?.length
+                ? sizesMap[product.sku]
+                : product.sizes?.length
+                  ? product.sizes
+                  : Object.keys(configuredSizeStock).length
+                    ? Object.keys(configuredSizeStock)
+                  : Array.from(new Set(variants.map((variant) => variant.size).filter((size): size is string => Boolean(size))));
+              const sizeStock = Object.keys(configuredSizeStock).length
+                ? configuredSizeStock
+                : Object.fromEntries(variants.filter((variant) => variant.size && variant.stock !== undefined).map((variant) => [variant.size!, variant.stock!])) as Record<string, number>;
+              const variantType = variantTypeMap[product.sku] || product.variantType || (sizes.length ? "size" : "normal");
+              const stockSummary = getReportStockSummary({ stock: product.stock, variantType, sizes, sizeStock, variants });
+              return {
+                name: product.name,
+                sku: product.sku,
+                category: product.category,
+                stock: stockSummary.stock,
+                stockDetails: stockSummary.details,
+                price: formatAdminCurrency(product.price),
+                cost: formatAdminCurrency(product.cost ?? 0),
+                status: product.status,
+                image: product.image || adminPlaceholderImage,
+                hoverImage: product.hoverImage || product.image || adminPlaceholderImage,
+                gstRate: pricingMap[product.sku]?.gstRate || 0,
+                markup: pricingMap[product.sku]?.markup || 0,
+                sizes,
+                sizeStock,
+                variants,
+                variantType,
+              };
+            })
           : adminProducts;
       setProducts(next);
     };
@@ -2192,25 +2313,50 @@ function ReportsWorkspace({
       productsByKey.set(reportNameKey(product.name), product);
       productsByKey.set(reportNameKey(product.sku), product);
     });
+    const salesProductRows: SalesProductReportRow[] = [];
     const sales = new Map<string, ProductReportRow>();
-    products.forEach((product) => sales.set(product.sku, { product, units: 0, revenue: 0 }));
+    products.forEach((product) => sales.set(product.sku, { product, units: 0, revenue: 0, stockDetails: getReportStockSummary(product).details }));
     filteredOrders.forEach((order) => {
       order.items?.forEach((item) => {
         const match = (item.productId && productsByKey.get(reportNameKey(item.productId))) || productsByKey.get(reportNameKey(item.name));
+        const units = Math.max(0, Number(item.quantity) || 0);
+        if (units === 0) return;
+        const grossSales = parseReportMoney(item.price) * units;
+        const gstRate = Math.max(0, Number(match?.gstRate) || 0);
+        const totalGst = gstRate > 0 ? grossSales * gstRate / (100 + gstRate) : 0;
+        const taxableSales = grossSales - totalGst;
+        const unitCost = match ? parseReportMoney(match.cost) : 0;
+        salesProductRows.push({
+          invoiceNumber: getReportInvoiceNumber(order),
+          orderId: order.id,
+          customerName: order.customerName || "Not provided",
+          date: order.date,
+          productName: match?.name || item.name || item.productId || "Unknown product",
+          sku: match?.sku || item.productId || "",
+          units,
+          unitRate: grossSales / units,
+          grossSales,
+          taxableSales,
+          cgst: totalGst / 2,
+          sgst: totalGst / 2,
+          grossProfit: match ? taxableSales - unitCost * units : null,
+        });
         if (!match) return;
         const row = sales.get(match.sku);
         if (!row) return;
-        const units = Math.max(0, Number(item.quantity) || 0);
         row.units += units;
-        row.revenue += parseReportMoney(item.price) * units;
+        row.revenue += grossSales;
       });
     });
     const productRows = Array.from(sales.values()).map((row) => {
+      const stockSummary = getReportStockSummary(row.product);
       const cost = parseReportMoney(row.product.cost) * row.units;
-      const stockValue = parseReportMoney(row.product.price) * Math.max(0, row.product.stock);
-      const costValue = parseReportMoney(row.product.cost) * Math.max(0, row.product.stock);
+      const stockValue = parseReportMoney(row.product.price) * stockSummary.stock;
+      const costValue = parseReportMoney(row.product.cost) * stockSummary.stock;
       return {
         ...row,
+        stock: stockSummary.stock,
+        stockDetails: stockSummary.details,
         cost,
         profit: row.revenue - cost,
         stockValue,
@@ -2286,6 +2432,7 @@ function ReportsWorkspace({
       damagedUnits: damagedRows.reduce((sum, row) => sum + row.quantity, 0),
       damagedRetailValue: damagedRows.reduce((sum, row) => sum + row.retailValue, 0),
       damagedCostValue: damagedRows.reduce((sum, row) => sum + row.costValue, 0),
+      salesProductRows,
       dailyRows,
       payments,
       fulfilment,
@@ -2324,14 +2471,14 @@ function ReportsWorkspace({
     let headers: string[] = [];
     let rows: unknown[][] = [];
     if (view === "sales") {
-      headers = ["invoice_number", "order_id", "customer_name", "date", "units_sold", "revenue"];
-      rows = report.orderRows.map((order) => [getReportInvoiceNumber(order), order.id, order.customerName || "Not provided", order.date, order.items?.reduce((sum, item) => sum + Math.max(0, Number(item.quantity) || 0), 0) || 0, order.total]);
+      headers = ["invoice_number", "order_id", "customer_name", "date", "product", "sku", "units_sold", "item_rate", "gross_sales", "taxable_sales", "cgst", "sgst", "gross_profit"];
+      rows = report.salesProductRows.map((row) => [row.invoiceNumber, row.orderId, row.customerName, row.date, row.productName, row.sku, row.units, formatMoney(row.unitRate), formatMoney(row.grossSales), formatMoney(row.taxableSales), formatMoney(row.cgst), formatMoney(row.sgst), row.grossProfit === null ? "" : formatMoney(row.grossProfit)]);
     } else if (view === "category") {
       headers = ["category", "products", "units_sold", "revenue", "profit", "stock_units", "stock_value", "cost_value"];
       rows = report.categoryRows.map((category) => [category.name, category.products, category.units, formatAdminCurrency(category.revenue), formatAdminCurrency(category.profit), category.stockUnits, formatAdminCurrency(category.stockValue), formatAdminCurrency(category.costValue)]);
     } else if (view === "item") {
-      headers = ["product", "sku", "category", "units_sold", "revenue", "profit", "stock", "stock_value", "cost_value", "movement"];
-      rows = itemReportRows.map((row) => [row.product.name, row.product.sku, row.product.category, row.units, formatAdminCurrency(row.revenue), formatAdminCurrency(row.profit), row.product.stock, formatAdminCurrency(row.stockValue), formatAdminCurrency(row.costValue), row.movement]);
+      headers = ["product", "sku", "category", "units_sold", "revenue", "profit", "stock", "stock_details", "stock_value", "cost_value", "movement"];
+      rows = itemReportRows.map((row) => [row.product.name, row.product.sku, row.product.category, row.units, formatAdminCurrency(row.revenue), formatAdminCurrency(row.profit), row.stock, row.stockDetails, formatAdminCurrency(row.stockValue), formatAdminCurrency(row.costValue), row.movement]);
     } else if (view === "top-selling") {
       headers = ["rank", "product", "sku", "category", "units_sold", "revenue", "profit", "stock", "cost_value"];
       rows = report.topProducts.map((row, index) => [index + 1, row.product.name, row.product.sku, row.product.category, row.units, formatAdminCurrency(row.revenue), formatAdminCurrency(row.profit), row.product.stock, formatAdminCurrency(row.costValue)]);
@@ -2450,10 +2597,10 @@ function ReportsWorkspace({
           <div className="report-detail-block"><div className="report-detail-block-head"><strong>Daily sales detail</strong><span>{report.dailyRows.length} active dates</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Date</th><th>Orders</th><th>Units</th><th>Revenue</th></tr></thead><tbody>{report.dailyRows.length ? report.dailyRows.map((day) => <tr key={day.date}><td>{day.date}</td><td>{day.orders}</td><td>{day.units}</td><td>{formatAdminCurrency(day.revenue)}</td></tr>) : <tr><td colSpan={4}>No confirmed sales in this period.</td></tr>}</tbody></table></div></div>
           <div className="report-detail-block"><div className="report-detail-block-head"><strong>Payment &amp; fulfilment</strong><span>Order mix</span></div><div className="report-mini-list">{report.payments.map((payment) => <div key={payment.name}><span>{payment.name}<small>{formatAdminCurrency(payment.revenue)}</small></span><strong>{payment.count}</strong></div>)}{report.fulfilment.map((method) => <div key={method.name}><span>{method.name}<small>Fulfilment method</small></span><strong>{method.count}</strong></div>)}</div></div>
         </div>}
-        {view === "sales" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Sales by invoice</strong><span>{report.orderRows.length} invoices</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Invoice number</th><th>Customer name</th><th>Date</th><th>Units</th><th>Revenue</th></tr></thead><tbody>{report.orderRows.length ? report.orderRows.map((order) => <tr key={order.id}><td>{getReportInvoiceNumber(order)}</td><td>{order.customerName || "Not provided"}</td><td>{order.date}</td><td>{order.items?.reduce((sum, item) => sum + Math.max(0, Number(item.quantity) || 0), 0) || 0}</td><td>{order.total}</td></tr>) : <tr><td colSpan={5}>No confirmed sales in this period.</td></tr>}</tbody></table></div></div>}
+        {view === "sales" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Sales by product</strong><span>{report.salesProductRows.length} product lines</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Invoice number</th><th>Order ID</th><th>Customer name</th><th>Date</th><th>Product</th><th>SKU</th><th>Units</th><th>Item rate</th><th>Gross sales</th><th>Taxable sales</th><th>CGST</th><th>SGST</th><th>Gross profit</th></tr></thead><tbody>{report.salesProductRows.length ? report.salesProductRows.map((row, index) => <tr key={`${row.orderId}-${row.sku}-${index}`}><td>{row.invoiceNumber}</td><td>{row.orderId}</td><td>{row.customerName}</td><td>{row.date}</td><td>{row.productName}</td><td>{row.sku || "—"}</td><td>{row.units}</td><td>{formatMoney(row.unitRate)}</td><td>{formatMoney(row.grossSales)}</td><td>{formatMoney(row.taxableSales)}</td><td>{formatMoney(row.cgst)}</td><td>{formatMoney(row.sgst)}</td><td>{row.grossProfit === null ? "Unavailable" : formatMoney(row.grossProfit)}</td></tr>) : <tr><td colSpan={13}>No confirmed sales in this period.</td></tr>}</tbody></table></div><p className="report-help">Item rate is the gross selling rate for one unit. CGST and SGST are split equally from the GST included in each product sale. Gross profit is taxable sales less product cost. Decimal values are shown up to 2 places.</p></div>}
         {view === "overview" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Category summary</strong><span>{report.categoryRows.length} categories</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Category</th><th>Products</th><th>Units sold</th><th>Revenue</th><th>Profit</th><th>Stock value</th><th>Cost value</th></tr></thead><tbody>{report.categoryRows.map((category) => <tr key={category.name}><td>{category.name}</td><td>{category.products}</td><td>{category.units}</td><td>{formatAdminCurrency(category.revenue)}</td><td>{formatAdminCurrency(category.profit)}</td><td>{formatAdminCurrency(category.stockValue)}</td><td>{formatAdminCurrency(category.costValue)}</td></tr>)}</tbody></table></div></div>}
         {view === "category" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Every category</strong><span>{report.categoryRows.length} rows</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Category</th><th>Products</th><th>Units sold</th><th>Revenue</th><th>Profit</th><th>Stock units</th><th>Stock value</th><th>Cost value</th></tr></thead><tbody>{report.categoryRows.map((category) => <tr key={category.name}><td>{category.name}</td><td>{category.products}</td><td>{category.units}</td><td>{formatAdminCurrency(category.revenue)}</td><td>{formatAdminCurrency(category.profit)}</td><td>{category.stockUnits}</td><td>{formatAdminCurrency(category.stockValue)}</td><td>{formatAdminCurrency(category.costValue)}</td></tr>)}</tbody></table></div></div>}
-        {(view === "item" || view === "top-selling") && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><div><strong>{view === "top-selling" ? "Ranked best sellers" : "Every catalog item"}</strong><span>{view === "top-selling" ? report.topProducts.length : itemReportRows.length} rows</span></div>{view === "item" && <label className="report-table-filter">Filter items<select value={itemMovementFilter} onChange={(event) => setItemMovementFilter(event.target.value as ReportMovementFilter)}><option value="all">All items</option><option value="sales">Sales items</option><option value="slow">Slow moving</option><option value="no-sales">No sales</option><option value="out-of-stock">Out of stock</option></select></label>}</div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>{view === "top-selling" ? "Rank" : "Product"}</th><th>{view === "top-selling" ? "Product" : "SKU"}</th><th>Category</th><th>Units</th><th>Revenue</th><th>Profit</th><th>Stock</th><th>Stock value</th><th>Cost value</th><th>Movement</th></tr></thead><tbody>{(view === "top-selling" ? report.topProducts : itemReportRows).map((row, index) => <tr key={row.product.sku}><td>{view === "top-selling" ? String(index + 1).padStart(2, "0") : row.product.name}</td><td>{view === "top-selling" ? row.product.name : row.product.sku}</td><td>{row.product.category}</td><td>{row.units}</td><td>{formatAdminCurrency(row.revenue)}</td><td>{formatAdminCurrency(row.profit)}</td><td>{row.product.stock}</td><td>{formatAdminCurrency(row.stockValue)}</td><td>{formatAdminCurrency(row.costValue)}</td><td><span className={`report-movement ${row.movement.toLowerCase().replace(/\s+/g, "-")}`}>{row.movement}</span></td></tr>)}</tbody></table></div></div>}
+        {(view === "item" || view === "top-selling") && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><div><strong>{view === "top-selling" ? "Ranked best sellers" : "Every catalog item"}</strong><span>{view === "top-selling" ? report.topProducts.length : itemReportRows.length} rows</span></div>{view === "item" && <label className="report-table-filter">Filter items<select value={itemMovementFilter} onChange={(event) => setItemMovementFilter(event.target.value as ReportMovementFilter)}><option value="all">All items</option><option value="sales">Sales items</option><option value="slow">Slow moving</option><option value="no-sales">No sales</option><option value="out-of-stock">Out of stock</option></select></label>}</div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>{view === "top-selling" ? "Rank" : "Product"}</th><th>{view === "top-selling" ? "Product" : "SKU"}</th><th>Category</th><th>Units</th><th>Revenue</th><th>Profit</th><th>Stock</th>{view === "item" && <th>Stock details</th>}<th>Stock value</th><th>Cost value</th><th>Movement</th></tr></thead><tbody>{(view === "top-selling" ? report.topProducts : itemReportRows).map((row, index) => <tr key={row.product.sku}><td>{view === "top-selling" ? String(index + 1).padStart(2, "0") : row.product.name}</td><td>{view === "top-selling" ? row.product.name : row.product.sku}</td><td>{row.product.category}</td><td>{row.units}</td><td>{formatAdminCurrency(row.revenue)}</td><td>{formatAdminCurrency(row.profit)}</td><td>{row.stock}</td>{view === "item" && <td>{row.stockDetails}</td>}<td>{formatAdminCurrency(row.stockValue)}</td><td>{formatAdminCurrency(row.costValue)}</td><td><span className={`report-movement ${row.movement.toLowerCase().replace(/\s+/g, "-")}`}>{row.movement}</span></td></tr>)}</tbody></table></div>{view === "item" && <p className="report-help">Stock and cost value include variant or size stock when those quantities are configured. Stock details shows the quantity for each option.</p>}</div>}
         {view === "inventory" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Complete inventory movement</strong><span>{report.inventoryRows.length} products</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Product</th><th>SKU</th><th>Category</th><th>Status</th><th>Movement</th><th>Stock</th><th>Units sold</th><th>Unit price</th><th>Stock value</th><th>Cost value</th></tr></thead><tbody>{report.inventoryRows.map((row) => <tr key={row.product.sku}><td>{row.product.name}</td><td>{row.product.sku}</td><td>{row.product.category}</td><td>{row.product.status}</td><td><span className={`report-movement ${row.movement.toLowerCase().replace(/\s+/g, "-")}`}>{row.movement}</span></td><td>{row.product.stock}</td><td>{row.units}</td><td>{formatAdminCurrency(parseReportMoney(row.product.price))}</td><td>{formatAdminCurrency(row.stockValue)}</td><td>{formatAdminCurrency(row.costValue)}</td></tr>)}</tbody></table></div></div>}
          {view === "orders" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Every confirmed order</strong><span>{report.orderRows.length} orders</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Order</th><th>Date</th><th>Customer</th><th>Status</th><th>Payment</th><th>Fulfilment</th><th>Items</th><th>Total</th><th>Phone</th></tr></thead><tbody>{report.orderRows.length ? report.orderRows.map((order) => <tr key={order.id}><td>{order.id}</td><td>{order.date}</td><td>{order.customerName}</td><td><span className={`report-order-status ${order.status.toLowerCase()}`}>{order.status}</span></td><td>{order.razorpayPaymentId ? "Online" : "Cash / other"}</td><td>{order.fulfillmentMethod === "pickup" ? `Pickup · ${order.pickupHubName || "Hub"}` : "Delivery"}</td><td>{order.items?.reduce((sum, item) => sum + Math.max(0, Number(item.quantity) || 0), 0) || 0}</td><td>{order.total}</td><td>{order.userPhone || order.phone}</td></tr>) : <tr><td colSpan={9}>No confirmed orders in this period.</td></tr>}</tbody></table></div></div>}
          {view === "damaged" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Every damaged item</strong><span>{report.damagedRows.length} records · {report.damagedUnits} units</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Date</th><th>Product</th><th>SKU</th><th>Category</th><th>Quantity</th><th>Scope</th><th>Reason</th><th>Retail value</th><th>Cost value</th></tr></thead><tbody>{report.damagedRows.length ? report.damagedRows.map((row) => <tr key={row.id}><td>{row.createdAt.slice(0, 10)}</td><td>{row.productName}</td><td>{row.sku}</td><td>{row.category}</td><td>{row.quantity}</td><td>{row.stockScope}</td><td>{row.reason}</td><td>{formatAdminCurrency(row.retailValue)}</td><td>{formatAdminCurrency(row.costValue)}</td></tr>) : <tr><td colSpan={9}>No damaged items in this period.</td></tr>}</tbody></table></div></div>}
