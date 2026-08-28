@@ -36,6 +36,7 @@ type CustomerAuthUser = { id: string; phone: string };
 type CheckoutErrors = {
   name?: string;
   phone?: string;
+  email?: string;
   address?: string;
   pickupHub?: string;
 };
@@ -584,6 +585,7 @@ export default function Home() {
   const [checkoutErrors, setCheckoutErrors] = useState<CheckoutErrors>({});
   const checkoutNameRef = useRef<HTMLInputElement>(null);
   const checkoutPhoneRef = useRef<HTMLInputElement>(null);
+  const checkoutEmailRef = useRef<HTMLInputElement>(null);
   const checkoutAddressRef = useRef<HTMLInputElement>(null);
   const checkoutPickupHubRef = useRef<HTMLSelectElement>(null);
   const [couponInput, setCouponInput] = useState("");
@@ -2254,16 +2256,20 @@ export default function Home() {
     if (cartStockIssues.length) return announce(cartHasSoldOutItems ? "Remove sold out items before checkout" : "Reduce item quantities before checkout");
     const name = checkoutForm.name.trim();
     const digits = checkoutForm.phone.replace(/\D/g, "");
+    const email = checkoutForm.email.trim();
     const validationErrors: CheckoutErrors = {};
     if (!name) validationErrors.name = "Enter the customer name for this order.";
+    if (!email) validationErrors.email = "Enter an email address for this order.";
+    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) validationErrors.email = "Enter a valid email address.";
     if (digits.length < 10) validationErrors.phone = "Enter a valid WhatsApp number with at least 10 digits.";
     if (fulfillmentMethod === "pickup" && !selectedPickupHub) validationErrors.pickupHub = "Select the hub where you will collect this order.";
     if (fulfillmentMethod === "delivery" && !checkoutForm.address.trim()) validationErrors.address = "Enter the complete delivery address.";
-    const firstValidationError = validationErrors.name || validationErrors.phone || validationErrors.pickupHub || validationErrors.address;
+    const firstValidationError = validationErrors.name || validationErrors.email || validationErrors.phone || validationErrors.pickupHub || validationErrors.address;
     if (firstValidationError) {
       setCheckoutErrors(validationErrors);
       requestAnimationFrame(() => {
         if (validationErrors.name) checkoutNameRef.current?.focus();
+        else if (validationErrors.email) checkoutEmailRef.current?.focus();
         else if (validationErrors.phone) checkoutPhoneRef.current?.focus();
         else if (validationErrors.pickupHub) checkoutPickupHubRef.current?.focus();
         else checkoutAddressRef.current?.focus();
@@ -2467,7 +2473,7 @@ export default function Home() {
     if (/care|clean|maintain/.test(query)) return "Keep jewellery away from perfume, water, and sprays. Store each piece separately in a soft pouch and gently wipe it after wear.";
     if (/gift|present|birthday|anniversary/.test(query)) return "For gifting, I’d start with a versatile pair of earrings or a delicate necklace. Tell me the recipient’s style or your budget and I’ll narrow it down.";
     if (/offer|discount|coupon|promo|sale/.test(query)) return "Look for the current offer banner on the storefront. You can copy an active coupon code there before checkout.";
-    if (/payment|cod|cash|online|razorpay/.test(query)) return "At checkout, enter your name, WhatsApp number, email if needed, and delivery address. Available payment options are shown when the order is placed.";
+    if (/payment|cod|cash|online|razorpay/.test(query)) return "At checkout, enter your name, WhatsApp number, email address, and delivery address. Available payment options are shown when the order is placed.";
     if (/category|collection|what do you sell|jewellery|jewelry/.test(query)) return "Fanzzy has earrings, necklaces, bracelets, and rings. Ask for a category or open View all categories to browse the full edit.";
     const category = ["earrings", "necklaces", "bracelets", "rings"].find((item) => query.includes(item));
     if (category) {
@@ -2624,7 +2630,7 @@ export default function Home() {
             {Object.keys(checkoutErrors).length > 0 && (
               <div className="checkout-validation-summary" role="alert">
                 <strong>Complete the required details</strong>
-                <span>{checkoutErrors.name || checkoutErrors.phone || checkoutErrors.pickupHub || checkoutErrors.address}</span>
+                <span>{checkoutErrors.name || checkoutErrors.email || checkoutErrors.phone || checkoutErrors.pickupHub || checkoutErrors.address}</span>
               </div>
             )}
             <div className="checkout-grid">
@@ -2656,8 +2662,9 @@ export default function Home() {
                 {checkoutErrors.phone && <small className="checkout-field-error" id="checkout-phone-error">{checkoutErrors.phone}</small>}
               </label>
               <label>
-                Email address <span className="optional-mark">Optional</span>
-                <input type="email" value={checkoutForm.email} onChange={(event) => setCheckoutForm((current) => ({ ...current, email: event.target.value }))} placeholder="you@example.com" />
+                Email address <span className="required-mark">Required</span>
+                <input ref={checkoutEmailRef} type="email" value={checkoutForm.email} onChange={(event) => { setCheckoutForm((current) => ({ ...current, email: event.target.value })); clearCheckoutError("email"); }} placeholder="you@example.com" autoComplete="email" aria-invalid={Boolean(checkoutErrors.email)} aria-describedby={checkoutErrors.email ? "checkout-email-error" : undefined} required />
+                {checkoutErrors.email && <small className="checkout-field-error" id="checkout-email-error">{checkoutErrors.email}</small>}
               </label>
               <div className="checkout-fulfillment checkout-wide">
                 <p className="field-label">How would you like to receive your order?</p>
