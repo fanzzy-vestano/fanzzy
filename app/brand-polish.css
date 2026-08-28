@@ -53,3 +53,117 @@
     width: 100px;
   }
 }
+
+.vendor-strip-section {
+  background: var(--cream);
+  padding-top: 0;
+}
+
+.vendor-strip-heading {
+  align-items: end;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 30px;
+}
+
+.vendor-strip-heading h2 {
+  font-family: var(--serif);
+  font-size: clamp(37px, 4.6vw, 68px);
+  font-weight: 500;
+  letter-spacing: -.06em;
+  line-height: .98;
+  margin: 0;
+}
+
+.vendor-strip {
+  display: flex;
+  gap: 14px;
+  overflow-x: auto;
+  padding: 4px 2px 12px;
+  scrollbar-width: thin;
+}
+
+.vendor-strip-card {
+  align-items: center;
+  background: #fffaf3;
+  border: 1px solid rgba(85, 26, 45, .13);
+  border-radius: 16px;
+  color: var(--wine);
+  display: flex;
+  flex: 0 0 min(265px, 72vw);
+  gap: 14px;
+  min-height: 92px;
+  padding: 14px;
+  transition: border-color .25s ease, box-shadow .25s ease, transform .25s ease;
+}
+
+.vendor-strip-card:hover {
+  border-color: var(--wine);
+  box-shadow: 0 12px 28px rgba(53, 19, 34, .1);
+  transform: translateY(-2px);
+}
+
+.vendor-strip-logo {
+  align-items: center;
+  background: #ead9d0;
+  border-radius: 50%;
+  color: var(--wine);
+  display: flex;
+  flex: 0 0 62px;
+  font-family: var(--serif);
+  font-size: 27px;
+  height: 62px;
+  justify-content: center;
+  overflow: hidden;
+  width: 62px;
+}
+
+.vendor-strip-logo img {
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+.vendor-strip-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.vendor-strip-copy strong {
+  font-family: var(--serif);
+  font-size: 19px;
+  font-weight: 500;
+  letter-spacing: -.03em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vendor-strip-copy small {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.vendor-strip-copy small span {
+  color: var(--wine);
+  font-size: 13px;
+  margin-left: 4px;
+}
+
+@media (max-width: 760px) {
+  .vendor-strip-heading {
+    align-items: start;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  .vendor-strip {
+    margin-right: -20px;
+    padding-right: 20px;
+  }
+}

@@ -251,7 +251,7 @@ export function subscribeToStoreSetting(key: keyof typeof settingKeys, onChange:
   };
 }
 
-export async function uploadStoreImage(file: File, folder: "products" | "homepage" | "categories") {
+export async function uploadStoreImage(file: File, folder: "products" | "homepage" | "categories" | "vendors") {
   if (!supabase) return { url: null, error: new Error("Supabase is not configured") };
   try {
     const extension = file.name.split(".").pop()?.toLowerCase() || "jpg";

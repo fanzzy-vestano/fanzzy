@@ -609,7 +609,7 @@ const menu = [
   { label: "Product Image Scanner", icon: "⌁" },
   { label: "Categories", icon: "▦" },
   { label: "Collections", icon: "✧" },
-  { label: "Orders", icon: "↗", count: "12" },
+  { label: "Orders", icon: "↗" },
   { label: "Customers", icon: "♧" },
   { label: "Marketing", icon: "◈" },
   { label: "Buy 1 Get X Free", icon: "✦" },
@@ -1098,7 +1098,7 @@ function AdminDashboard() {
             >
               <span className="nav-icon">{item.icon}</span>
               {item.label}
-              {item.count && <b>{item.count}</b>}
+              {(item.label === "Orders" ? dashboardOrders.length : item.count) !== undefined && <b>{item.label === "Orders" ? dashboardOrders.length : item.count}</b>}
             </button>
           ))}
         </nav>
@@ -4134,6 +4134,7 @@ function OrdersWorkspace({
   const [enlargedOrderImage, setEnlargedOrderImage] = useState<{ src: string; alt: string } | null>(null);
   const [phone, setPhone] = useState("");
   const [lastOrdersSync, setLastOrdersSync] = useState<Date | null>(null);
+  const [ordersSyncError, setOrdersSyncError] = useState("");
   const [catalogProducts, setCatalogProducts] = useState<Array<{ id: string; name: string; sku: string; category: string; stock: number; price: number; status: string; image: string; variants: ProductVariant[] }>>([]);
   const [orderItemDraft, setOrderItemDraft] = useState({ productId: "", variantName: "", quantity: "1", price: "" });
 
@@ -4159,6 +4160,11 @@ function OrdersWorkspace({
       }
       if (localOrders.length) setOrders(localOrders);
       const remote = await fetchStoreOrders<OrderRecord>();
+      if (remote.error) {
+        setOrdersSyncError("Live order storage is unavailable. Records may be incomplete.");
+      } else {
+        setOrdersSyncError("");
+      }
       // The shared record is written newest-first. Keep that order as the
       // primary ordering and append only local records not yet synced.
       const merged = new Map<string, OrderRecord>();
@@ -4188,7 +4194,9 @@ function OrdersWorkspace({
           variants: Array.isArray(variantsMap[product.sku]) ? variantsMap[product.sku].map((variant, index) => ({ ...variant, name: variant.name || `Option ${index + 1}` })) : [],
         })));
       }
-      setLastOrdersSync(new Date());
+      if (!remote.error) setLastOrdersSync(new Date());
+      } catch {
+        setOrdersSyncError("Live order storage is unavailable. Records may be incomplete.");
       } finally {
         syncInFlight = false;
       }
@@ -4451,9 +4459,9 @@ function OrdersWorkspace({
           <i className="status-light" />
           {filteredOrders.length} orders found
         </span>
-        <span className="orders-live-status">
+        <span className={`orders-live-status${ordersSyncError ? " is-error" : ""}`} role={ordersSyncError ? "alert" : "status"}>
           <i className="status-light" />
-          Live sync{lastOrdersSync ? ` · ${lastOrdersSync.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}` : " · connecting…"}
+          {ordersSyncError || `Live sync${lastOrdersSync ? ` · ${lastOrdersSync.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}` : " · connecting…"}`}
         </span>
         <span>
           {filter === "custom"
@@ -6094,7 +6102,7 @@ function ProductLibraryWorkspace({
         [selectedProduct.sku]: [...(productDamages[selectedProduct.sku] || []), nextRecord],
       };
       let remoteProductError: Error | null = null;
-      let settingErrors: Array<Error | null> = [];
+      let settingErrors: Array<Error | null | void> = [];
       try {
         remoteProductError = await saveCatalogProduct(toCatalogProduct(updated));
         settingErrors = await Promise.all([
@@ -6113,7 +6121,7 @@ function ProductLibraryWorkspace({
       persistCatalog(nextProducts);
       persistProductDamages(nextDamages);
       setDamageFormOpen(false);
-      const remoteError = remoteProductError || settingErrors.find(Boolean);
+      const remoteError = remoteProductError || settingErrors.find((error): error is Error => error instanceof Error);
       onNotify(remoteError ? "Damage recorded locally; Supabase needs its tables" : `${quantity} damaged unit${quantity === 1 ? "" : "s"} recorded`);
     } finally {
       setDamageSaving(false);
@@ -6159,9 +6167,6 @@ function ProductLibraryWorkspace({
   const closeProductDetails = () => {
     setSelectedProduct(null);
     setIsEditing(false);
-    setProductSearch("");
-    setProductCategoryFilter("all");
-    setProductVariantFilter("all");
   };
   const saveProduct = async () => {
     if (!newProduct.name.trim()) return onNotify("Add a product name");

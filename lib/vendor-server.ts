@@ -76,6 +76,88 @@ async function rest<T>(table: string, query = "", options: RestOptions = {}) {
   return parsed as T;
 }
 
+async function readStoreSettingMap<T = unknown>(key: string) {
+  const rows = await rest<Array<{ value?: string }>>(
+    "store_settings",
+    `key=eq.${encodeURIComponent(key)}&select=value`,
+    { privileged: true },
+  );
+  try {
+    const parsed = JSON.parse(rows[0]?.value || "{}");
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, T>;
+  } catch {
+    // Ignore malformed optional metadata and treat it as empty.
+  }
+  return {} as Record<string, T>;
+}
+
+async function updateStoreSettingMap(key: string, sku: string, value: unknown) {
+  const map = await readStoreSettingMap<unknown>(key);
+  map[sku] = value;
+  await rest(
+    "store_settings",
+    "on_conflict=key",
+    {
+      privileged: true,
+      method: "POST",
+      body: [{ key, value: JSON.stringify(map), updated_at: new Date().toISOString() }],
+      headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+    },
+  );
+}
+
+const numericProductValue = (value: unknown) => Math.max(0, Number(String(value ?? "").replace(/[^0-9.-]/g, "")) || 0);
+
+async function saveVendorProductMetadata(sku: string, data: Record<string, unknown>) {
+  const rawVariants = Array.isArray(data.variants) ? data.variants : [];
+  const variants = rawVariants
+    .filter((variant): variant is Record<string, unknown> => Boolean(variant && typeof variant === "object" && !Array.isArray(variant)))
+    .map((variant) => ({
+      name: String(variant.name || "").trim(),
+      ...(String(variant.size || "").trim() ? { size: String(variant.size).trim() } : {}),
+      image: String(variant.image || ""),
+      ...(variant.stock !== undefined && variant.stock !== "" ? { stock: numericProductValue(variant.stock) } : {}),
+    }))
+    .filter((variant) => variant.name || variant.size || variant.image);
+  const variantType = data.variantType === "size" ? "size" : "normal";
+  const sizes = Array.isArray(data.sizes)
+    ? Array.from(new Set(data.sizes.map((size) => String(size).trim()).filter(Boolean)))
+    : [];
+  const sizeStockInput = data.sizeStock && typeof data.sizeStock === "object" && !Array.isArray(data.sizeStock)
+    ? data.sizeStock as Record<string, unknown>
+    : {};
+  const sizeStock = Object.fromEntries(
+    sizes.map((size) => [size, numericProductValue(sizeStockInput[size])]),
+  );
+  const variantSizes = variantType === "size"
+    ? Array.from(new Set(variants.map((variant) => String(variant.size || variant.name).trim()).filter(Boolean)))
+    : [];
+  const variantSizeStock = Object.fromEntries(
+    variants
+      .map((variant) => [String(variant.size || variant.name).trim(), numericProductValue(variant.stock)] as const)
+      .filter(([size]) => Boolean(size)),
+  );
+
+  const updates: Array<Promise<void>> = [
+    updateStoreSettingMap("product_variant_type", sku, variantType),
+    updateStoreSettingMap("product_variants", sku, variants),
+    updateStoreSettingMap("product_barcodes", sku, String(data.barcode || "").trim()),
+    updateStoreSettingMap("product_hsn_codes", sku, String(data.hsnCode || "").trim()),
+    updateStoreSettingMap("product_bill_names", sku, String(data.billName || "").trim()),
+    updateStoreSettingMap("product_descriptions", sku, String(data.description || "").trim()),
+    updateStoreSettingMap("product_pricing", sku, {
+      gstRate: numericProductValue(data.gstRate),
+      markup: numericProductValue(data.markup),
+      costWithGst: String(data.costWithGst || "₹0"),
+    }),
+  ];
+  if (variantType === "size") {
+    updates.push(updateStoreSettingMap("product_sizes", sku, variantSizes.length ? variantSizes : sizes));
+    updates.push(updateStoreSettingMap("product_size_stock", sku, variantSizes.length ? variantSizeStock : sizeStock));
+  }
+  await Promise.all(updates);
+}
+
 const hmacSecret = () => process.env.VENDOR_AUTH_SECRET?.trim() || process.env.ADMIN_AUTH_SECRET?.trim() || process.env.AUTH_SECRET?.trim() || "";
 const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
 const safeEqual = (left: string, right: string) => {
@@ -242,6 +324,41 @@ export async function listVendorsForAdmin() {
   return vendors.map(({ ...vendor }) => vendor);
 }
 
+export async function listVendorCommissionRules() {
+  return rest<Array<Record<string, unknown>>>("vendor_commission_rules", "select=*&order=scope_type.asc,created_at.desc", { privileged: true });
+}
+
+export async function saveVendorCommissionRule(data: Record<string, unknown>, actorId: string) {
+  const scopeType = String(data.scopeType || data.scope_type || "").trim();
+  if (!["global", "vendor", "category", "product"].includes(scopeType)) throw new VendorDataError("Choose a valid commission scope.", 400);
+  const scopeId = data.scopeId == null ? String(data.scope_id || "").trim() : String(data.scopeId).trim();
+  if (scopeType !== "global" && !scopeId) throw new VendorDataError("A vendor, category, or product is required for this rule.", 400);
+  const mode = String(data.mode || "percentage") === "fixed" ? "fixed" : "percentage";
+  const body = { scope_type: scopeType, scope_id: scopeType === "global" ? null : scopeId, mode, rate: Math.max(0, Number(data.rate) || 0), fixed_amount: Math.max(0, Number(data.fixedAmount ?? data.fixed_amount) || 0), active: data.active === undefined ? true : Boolean(data.active), updated_at: new Date().toISOString() };
+  const requestedId = String(data.id || "").trim();
+  let existingId = requestedId;
+  if (!existingId) {
+    const scopeQuery = scopeType === "global" ? "scope_id=is.null" : `scope_id=eq.${encodeURIComponent(scopeId)}`;
+    const existing = await rest<Array<{ id: string }>>("vendor_commission_rules", `scope_type=eq.${scopeType}&${scopeQuery}&select=id&limit=1`, { privileged: true });
+    existingId = existing[0]?.id || "";
+  }
+  const rows = existingId
+    ? await rest<Array<Record<string, unknown>>>("vendor_commission_rules", `id=eq.${encodeURIComponent(existingId)}`, { privileged: true, method: "PATCH", body, headers: { Prefer: "return=representation" } })
+    : await rest<Array<Record<string, unknown>>>("vendor_commission_rules", "", { privileged: true, method: "POST", body: [{ ...body, created_at: new Date().toISOString() }], headers: { Prefer: "return=representation" } });
+  const rule = rows[0];
+  if (!rule) throw new VendorDataError("Commission rule could not be saved.");
+  await audit("admin", actorId, scopeType === "vendor" ? scopeId : undefined, "vendor.commission_rule_saved", "commission_rule", String(rule.id), { scopeType, scopeId, mode });
+  return rule;
+}
+
+export async function deleteVendorCommissionRule(ruleId: string, actorId: string) {
+  const id = String(ruleId || "").trim();
+  if (!id) throw new VendorDataError("Commission rule id is required.", 400);
+  await rest("vendor_commission_rules", `id=eq.${encodeURIComponent(id)}`, { privileged: true, method: "DELETE" });
+  await audit("admin", actorId, undefined, "vendor.commission_rule_deleted", "commission_rule", id);
+  return { id };
+}
+
 export async function updateVendorAdmin(vendorId: string, data: Record<string, unknown>, actorId: string) {
   if (data.status !== undefined && !["Active", "Suspended", "Inactive"].includes(String(data.status))) throw new VendorDataError("Invalid vendor account status.", 400);
   if (data.storeVisibility !== undefined && !["Visible", "Hidden"].includes(String(data.storeVisibility))) throw new VendorDataError("Invalid store visibility.", 400);
@@ -259,33 +376,172 @@ export async function updateVendorAdmin(vendorId: string, data: Record<string, u
 }
 
 export async function getVendorProducts(vendorId: string, privileged = true) {
-  return rest<Array<Record<string, unknown>>>("products", `vendor_id=eq.${encodeURIComponent(vendorId)}&select=*&order=created_at.desc`, { privileged });
+  const products = await rest<Array<Record<string, unknown>>>("products", `vendor_id=eq.${encodeURIComponent(vendorId)}&select=*&order=created_at.desc`, { privileged });
+  const [variants, variantTypes, sizes, sizeStocks, barcodes, hsnCodes, billNames, descriptions, pricing] = await Promise.all([
+    readStoreSettingMap<unknown>("product_variants"),
+    readStoreSettingMap<unknown>("product_variant_type"),
+    readStoreSettingMap<unknown>("product_sizes"),
+    readStoreSettingMap<unknown>("product_size_stock"),
+    readStoreSettingMap<unknown>("product_barcodes"),
+    readStoreSettingMap<unknown>("product_hsn_codes"),
+    readStoreSettingMap<unknown>("product_bill_names"),
+    readStoreSettingMap<unknown>("product_descriptions"),
+    readStoreSettingMap<unknown>("product_pricing"),
+  ]);
+  const enrichedProducts: Array<Record<string, unknown>> = products.map((product) => {
+    const sku = String(product.sku || "");
+    const productPricing = pricing[sku] && typeof pricing[sku] === "object" && !Array.isArray(pricing[sku])
+      ? pricing[sku] as Record<string, unknown>
+      : {};
+    return {
+      ...product,
+      variants: variants[sku] || [],
+      variantType: variantTypes[sku] === "size" ? "size" : "normal",
+      sizes: Array.isArray(sizes[sku]) ? sizes[sku] : [],
+      sizeStock: sizeStocks[sku] && typeof sizeStocks[sku] === "object" && !Array.isArray(sizeStocks[sku]) ? sizeStocks[sku] : {},
+      barcode: String(barcodes[sku] || ""),
+      hsnCode: String(hsnCodes[sku] || ""),
+      billName: String(billNames[sku] || ""),
+      description: String(descriptions[sku] || ""),
+      gstRate: numericProductValue(productPricing.gstRate),
+      markup: numericProductValue(productPricing.markup),
+      costWithGst: String(productPricing.costWithGst || "₹"),
+    };
+  });
+  return enrichedProducts;
 }
 
 export async function saveVendorProduct(vendorId: string, data: Record<string, unknown>, admin = false) {
-  const sku = String(data.sku || "").trim();
-  if (!sku || !String(data.name || "").trim()) throw new VendorDataError("Product name and SKU are required.", 400);
-  const skuRows = await rest<Array<{ sku: string; vendor_id?: string | null }>>("products", `sku=eq.${encodeURIComponent(sku)}&select=sku,vendor_id`, { privileged: true });
-  if (skuRows[0] && skuRows[0].vendor_id !== vendorId) throw new VendorDataError("This SKU already belongs to another catalog product.", 409);
-  const vendorRows = await rest<VendorRecord[]>("vendors", `id=eq.${encodeURIComponent(vendorId)}&select=id,status,automatic_approval`, { privileged: true });
+  const name = String(data.name || "").trim();
+  if (!name) throw new VendorDataError("Product name is required.", 400);
+  const vendorRows = await rest<Array<Pick<VendorRecord, "id" | "slug" | "status" | "automatic_approval">>>("vendors", `id=eq.${encodeURIComponent(vendorId)}&select=id,slug,status,automatic_approval`, { privileged: true });
   const vendor = vendorRows[0];
   if (!vendor) throw new VendorDataError("Vendor not found.", 404);
+  let sku = String(data.sku || "").trim();
+  if (!sku) {
+    const vendorCode = String(vendor.slug || "vendor").replace(/[^a-z0-9]/gi, "").slice(0, 10).toUpperCase() || "VENDOR";
+    const productCode = slugifyVendorName(name).replace(/-/g, "").slice(0, 12).toUpperCase() || "ITEM";
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const candidate = `VND-${vendorCode}-${productCode}-${randomBytes(3).toString("hex").toUpperCase()}`;
+      const existing = await rest<Array<{ sku: string }>>("products", `sku=eq.${encodeURIComponent(candidate)}&select=sku`, { privileged: true });
+      if (!existing[0]) { sku = candidate; break; }
+    }
+    if (!sku) throw new VendorDataError("Could not generate a unique SKU. Please try again.", 409);
+  }
+  const skuRows = await rest<Array<{ sku: string; vendor_id?: string | null }>>("products", `sku=eq.${encodeURIComponent(sku)}&select=sku,vendor_id`, { privileged: true });
+  if (skuRows[0] && skuRows[0].vendor_id !== vendorId) throw new VendorDataError("This SKU already belongs to another catalog product.", 409);
   const requestedStatus = String(data.vendor_status || "Draft") as VendorProductStatus;
   const vendorStatus = admin ? requestedStatus : vendor.automatic_approval ? "Approved" : requestedStatus === "Approved" ? "Pending Approval" : requestedStatus;
-  const rows = await rest<Array<Record<string, unknown>>>("products", "", { privileged: true, method: "POST", body: [{ sku, name: String(data.name).trim(), category: String(data.category || "Uncategorised").trim(), stock: Math.max(0, Math.floor(Number(data.stock) || 0)), price: Math.max(0, Number(data.price) || 0), cost: Math.max(0, Number(data.cost) || 0), status: vendorStatus === "Approved" ? "Published" : "Draft", image: String(data.image || ""), hover_image: String(data.hover_image || data.image || ""), compare_at: data.compare_at == null ? null : Number(data.compare_at), tag: data.tag || null, tone: data.tone || null, vendor_id: vendorId, vendor_status: vendorStatus, vendor_rejection_reason: data.vendor_rejection_reason || null, public_vendor_visible: vendorStatus === "Approved", low_stock_limit: Math.max(0, Math.floor(Number(data.low_stock_limit) || 5)), updated_at: new Date().toISOString() }], headers: { Prefer: "resolution=merge-duplicates,return=representation" } });
+  const rows = await rest<Array<Record<string, unknown>>>("products", "", { privileged: true, method: "POST", body: [{ sku, name, category: String(data.category || "Uncategorised").trim(), stock: Math.max(0, Math.floor(Number(data.stock) || 0)), price: Math.max(0, numericProductValue(data.price)), cost: Math.max(0, numericProductValue(data.cost)), status: vendorStatus === "Approved" ? "Published" : "Draft", image: String(data.image || ""), hover_image: String(data.hover_image || data.image || ""), compare_at: data.compare_at == null ? null : numericProductValue(data.compare_at), tag: data.tag || null, tone: data.tone || null, vendor_id: vendorId, vendor_status: vendorStatus, vendor_rejection_reason: data.vendor_rejection_reason || null, public_vendor_visible: vendorStatus === "Approved", low_stock_limit: Math.max(0, Math.floor(Number(data.low_stock_limit) || 5)), updated_at: new Date().toISOString() }], headers: { Prefer: "resolution=merge-duplicates,return=representation" } });
+  if (!rows[0]) throw new VendorDataError("Product could not be saved.");
+  await saveVendorProductMetadata(sku, data);
   return rows[0];
 }
 
 export async function updateVendorProduct(vendorId: string, sku: string, data: Record<string, unknown>, admin = false) {
-  const existing = await rest<Array<Record<string, unknown>>>("products", `sku=eq.${encodeURIComponent(sku)}&vendor_id=eq.${encodeURIComponent(vendorId)}&select=sku,vendor_status`, { privileged: true });
-  if (!existing[0]) throw new VendorDataError("Product not found for this vendor.", 404);
-  const patch: Record<string, unknown> = { ...data, updated_at: new Date().toISOString() };
-  if (!admin) {
-    delete patch.vendor_id; delete patch.vendor_status; delete patch.public_vendor_visible;
-    if (data.vendor_status === "Approved") patch.vendor_status = "Pending Approval";
-  }
+  const [existing, vendorRows] = await Promise.all([
+    rest<Array<Record<string, unknown>>>("products", `sku=eq.${encodeURIComponent(sku)}&vendor_id=eq.${encodeURIComponent(vendorId)}&select=sku,vendor_status`, { privileged: true }),
+    rest<Array<Pick<VendorRecord, "automatic_approval">>>("vendors", `id=eq.${encodeURIComponent(vendorId)}&select=automatic_approval`, { privileged: true }),
+  ]);
+  if (!existing[0] || !vendorRows[0]) throw new VendorDataError("Product not found for this vendor.", 404);
+  const requestedStatus = String(data.vendor_status || existing[0].vendor_status || "Draft") as VendorProductStatus;
+  const vendorStatus = admin ? requestedStatus : vendorRows[0].automatic_approval ? "Approved" : "Pending Approval";
+  const patch: Record<string, unknown> = {
+    name: String(data.name || "").trim(),
+    category: String(data.category || "Uncategorised").trim(),
+    stock: Math.max(0, Math.floor(Number(data.stock) || 0)),
+    price: numericProductValue(data.price),
+    cost: numericProductValue(data.cost),
+    status: vendorStatus === "Approved" ? "Published" : "Draft",
+    image: String(data.image || ""),
+    hover_image: String(data.hover_image || data.image || ""),
+    compare_at: data.compare_at == null ? null : numericProductValue(data.compare_at),
+    tag: data.tag || null,
+    tone: data.tone || null,
+    vendor_status: vendorStatus,
+    vendor_rejection_reason: data.vendor_rejection_reason || null,
+    public_vendor_visible: vendorStatus === "Approved",
+    low_stock_limit: Math.max(0, Math.floor(Number(data.low_stock_limit) || 5)),
+    updated_at: new Date().toISOString(),
+  };
   const rows = await rest<Array<Record<string, unknown>>>("products", `sku=eq.${encodeURIComponent(sku)}&vendor_id=eq.${encodeURIComponent(vendorId)}`, { privileged: true, method: "PATCH", body: patch, headers: { Prefer: "return=representation" } });
+  if (!rows[0]) throw new VendorDataError("Product could not be updated.");
+  await saveVendorProductMetadata(sku, data);
   return rows[0];
+}
+
+export async function deleteVendorProduct(vendorId: string, sku: string, actorId: string) {
+  const existing = await rest<Array<{ sku: string }>>(
+    "products",
+    `sku=eq.${encodeURIComponent(sku)}&vendor_id=eq.${encodeURIComponent(vendorId)}&select=sku`,
+    { privileged: true },
+  );
+  if (!existing[0]) throw new VendorDataError("Product not found for this vendor.", 404);
+  await rest(
+    "products",
+    `sku=eq.${encodeURIComponent(sku)}&vendor_id=eq.${encodeURIComponent(vendorId)}`,
+    { privileged: true, method: "DELETE" },
+  );
+  await audit("vendor", actorId, vendorId, "vendor.product_deleted", "product", sku);
+  return { sku };
+}
+
+export async function getVendorOrders(vendorId: string) {
+  return rest<Array<Record<string, unknown>>>(
+    "vendor_orders",
+    `vendor_id=eq.${encodeURIComponent(vendorId)}&select=*&order=created_at.desc`,
+    { privileged: true },
+  );
+}
+
+export async function listAllVendorOrders() {
+  return rest<Array<Record<string, unknown>>>("vendor_orders", "select=*&order=created_at.desc", { privileged: true });
+}
+
+export async function listAllVendorPayouts() {
+  return rest<Array<Record<string, unknown>>>("vendor_payouts", "select=*&order=created_at.desc", { privileged: true });
+}
+
+export async function getAdminVendorReport() {
+  const [vendors, orders, products, payouts] = await Promise.all([
+    listVendorsForAdmin(),
+    listAllVendorOrders(),
+    rest<Array<Record<string, unknown>>>("products", "vendor_id=not.is.null&select=sku,name,vendor_id,status,vendor_status,stock,price", { privileged: true }),
+    listAllVendorPayouts(),
+  ]);
+  const amount = (value: unknown) => Number(value) || 0;
+  const rows = vendors.map((vendor) => {
+    const vendorOrders = orders.filter((order) => order.vendor_id === vendor.id);
+    const vendorProducts = products.filter((product) => product.vendor_id === vendor.id);
+    const vendorPayouts = payouts.filter((payout) => payout.vendor_id === vendor.id);
+    return {
+      vendorId: vendor.id,
+      vendorName: vendor.business_name,
+      status: vendor.status,
+      orderCount: vendorOrders.length,
+      deliveredOrders: vendorOrders.filter((order) => order.status === "Delivered").length,
+      grossSales: vendorOrders.reduce((sum, order) => sum + amount(order.gross_product_amount), 0),
+      commission: vendorOrders.reduce((sum, order) => sum + amount(order.commission_amount), 0),
+      vendorEarnings: vendorOrders.reduce((sum, order) => sum + amount(order.vendor_net_amount), 0),
+      paidOut: vendorPayouts.filter((payout) => ["Paid", "Approved", "Processing"].includes(String(payout.status))).reduce((sum, payout) => sum + amount(payout.amount), 0),
+      productCount: vendorProducts.length,
+      publishedProducts: vendorProducts.filter((product) => product.vendor_status === "Approved" && product.status === "Published").length,
+      lowStockProducts: vendorProducts.filter((product) => amount(product.stock) <= 5).length,
+    };
+  });
+  return {
+    rows,
+    totals: {
+      vendors: vendors.length,
+      orders: orders.length,
+      grossSales: rows.reduce((sum, row) => sum + row.grossSales, 0),
+      commission: rows.reduce((sum, row) => sum + row.commission, 0),
+      vendorEarnings: rows.reduce((sum, row) => sum + row.vendorEarnings, 0),
+      paidOut: rows.reduce((sum, row) => sum + row.paidOut, 0),
+      products: products.length,
+      publishedProducts: rows.reduce((sum, row) => sum + row.publishedProducts, 0),
+    },
+  };
 }
 
 export async function reviewVendorProduct(vendorId: string, sku: string, decision: "Approved" | "Rejected" | "Inactive", reason: string | undefined, actorId: string) {

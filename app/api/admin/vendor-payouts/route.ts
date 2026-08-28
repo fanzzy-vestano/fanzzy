@@ -1,11 +1,10 @@
 import { isAdminSessionValid } from "../../../../lib/admin-auth";
-import { createVendorPayout, listVendorPayouts, VendorDataError } from "../../../../lib/vendor-server";
+import { createVendorPayout, listAllVendorPayouts, listVendorPayouts, VendorDataError } from "../../../../lib/vendor-server";
 
 export async function GET(request: Request) {
   if (!isAdminSessionValid(request)) return Response.json({ error: "Admin authentication required." }, { status: 401 });
   const vendorId = new URL(request.url).searchParams.get("vendorId") || "";
-  if (!vendorId) return Response.json({ error: "vendorId is required." }, { status: 400 });
-  try { return Response.json({ payouts: await listVendorPayouts(vendorId) }); }
+  try { return Response.json({ payouts: vendorId ? await listVendorPayouts(vendorId) : await listAllVendorPayouts() }); }
   catch (error) { const status = error instanceof VendorDataError ? error.status : 500; return Response.json({ error: error instanceof VendorDataError ? error.message : "Could not load payouts." }, { status }); }
 }
 

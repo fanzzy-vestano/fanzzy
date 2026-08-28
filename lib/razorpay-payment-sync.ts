@@ -14,6 +14,9 @@ type StoredOrder = {
   paymentStatus?: "pending" | "paid";
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
+  inventoryReserved?: boolean;
+  inventoryReservedAt?: string;
+  inventoryReleased?: boolean;
   inventoryAdjusted?: boolean;
   couponDiscount?: number;
   promotionDiscount?: number;
@@ -123,9 +126,26 @@ const findSettingKey = <T>(settings: Record<string, T>, sku: string) =>
   Object.keys(settings).find((key) => normalizeSku(key) === normalizeSku(sku));
 const resolveSettingKey = <T>(settings: Record<string, T>, sku: string) => findSettingKey(settings, sku) || sku;
 
-type InventoryAdjustment = { complete: boolean };
+type InventoryMode = "decrement" | "release";
+type InventoryAdjustment = { complete: boolean; reason?: string };
 
-async function adjustInventory(order: StoredOrder): Promise<InventoryAdjustment> {
+const inventoryMutationQueue: { current: Promise<void> } = { current: Promise.resolve() };
+const withInventoryMutationLock = async <T>(operation: () => Promise<T>) => {
+  const previous = inventoryMutationQueue.current;
+  let release!: () => void;
+  inventoryMutationQueue.current = new Promise<void>((resolve) => { release = resolve; });
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+  }
+};
+
+const stockAfterAdjustment = (current: number, quantity: number, mode: InventoryMode) =>
+  mode === "release" ? Math.max(0, Math.floor(current + quantity)) : Math.max(0, Math.floor(current - quantity));
+
+async function adjustInventory(order: StoredOrder, mode: InventoryMode = "decrement", requireAvailable = false): Promise<InventoryAdjustment> {
   const [savedVariants, savedSizeStock, savedVariantTypes] = await Promise.all([
     readJsonSetting<Record<string, StoredVariant[]>>("product_variants", {}),
     readJsonSetting<Record<string, Record<string, number>>>("product_size_stock", {}),
@@ -160,7 +180,7 @@ async function adjustInventory(order: StoredOrder): Promise<InventoryAdjustment>
     const quantity = Math.floor(Number(item.quantity) || 0);
     if (!sku || quantity <= 0) return;
     const product = productRows.find((candidate) => normalizeSku(candidate.sku) === normalizeSku(sku));
-    const hasBaseStock = Number.isFinite(Number(product?.stock));
+    const hasBaseStock = product?.stock !== undefined && product?.stock !== null && Number.isFinite(Number(product.stock));
 
     const variantTypeKey = resolveSettingKey(savedVariantTypes, sku);
     // The checkout line is the source of truth for the selected stock bucket.
@@ -187,20 +207,30 @@ async function adjustInventory(order: StoredOrder): Promise<InventoryAdjustment>
         // A zero base stock cannot represent the selected size. Keep the
         // payment pending until the size metadata is restored instead of
         // incorrectly marking its inventory as adjusted.
-        if (!hasBaseStock || Number(product?.stock) <= 0) unresolvedProductIds.add(rawSku || sku);
+        if (!hasBaseStock) unresolvedProductIds.add(rawSku || sku);
         else baseQuantities.set(sku, (baseQuantities.get(sku) || 0) + quantity);
         return;
       }
       if (hasConfiguredSizeStock) {
+        const available = Math.floor(Number(configuredSizeStock));
+        if (mode === "decrement" && requireAvailable && available < quantity) {
+          unresolvedProductIds.add(rawSku || sku);
+          return;
+        }
         sizeStock[sizeStockKey] = {
           ...currentSizeStock,
-          [sizeKey]: Math.max(0, Math.floor(Number(configuredSizeStock) - quantity)),
+          [sizeKey]: stockAfterAdjustment(available, quantity, mode),
         };
         sizeStockChanged = true;
       }
       if (hasVariantStock && sizeVariant) {
+        const available = Math.floor(Number(sizeVariant.stock));
+        if (mode === "decrement" && requireAvailable && available < quantity) {
+          unresolvedProductIds.add(rawSku || sku);
+          return;
+        }
         variants[variantsKey] = productVariants.map((variant, index) => index === variantIndex
-          ? { ...variant, stock: Math.max(0, Math.floor(Number(variant.stock) - quantity)) }
+          ? { ...variant, stock: stockAfterAdjustment(available, quantity, mode) }
           : variant);
         variantsChanged = true;
       }
@@ -220,8 +250,13 @@ async function adjustInventory(order: StoredOrder): Promise<InventoryAdjustment>
         else baseQuantities.set(sku, (baseQuantities.get(sku) || 0) + quantity);
         return;
       }
+      const available = Math.floor(Number(selectedVariant.stock));
+      if (mode === "decrement" && requireAvailable && available < quantity) {
+        unresolvedProductIds.add(rawSku || sku);
+        return;
+      }
       variants[variantsKey] = productVariants.map((variant, index) => index === variantIndex
-        ? { ...variant, stock: Math.max(0, Math.floor(Number(variant.stock) - quantity)) }
+        ? { ...variant, stock: stockAfterAdjustment(available, quantity, mode) }
         : variant);
       variantsChanged = true;
       return;
@@ -234,25 +269,58 @@ async function adjustInventory(order: StoredOrder): Promise<InventoryAdjustment>
   // Do not partially deduct an order. A local-only or deleted product cannot
   // be reconciled from this server, so its order stays pending instead of
   // making its other lines reduce again during every future sync.
-  if (unresolvedProductIds.size > 0) return { complete: false };
+  if (unresolvedProductIds.size > 0) {
+    return { complete: false, reason: mode === "decrement" && requireAvailable ? "One or more products do not have enough stock." : undefined };
+  }
+
+  for (const [sku, quantity] of baseQuantities) {
+    let expectedStock = Number(productRows.find((product) => normalizeSku(product.sku) === normalizeSku(sku))?.stock);
+    if (!Number.isFinite(expectedStock)) return { complete: false };
+    if (mode === "decrement" && requireAvailable && expectedStock < quantity) {
+      return { complete: false, reason: "One or more products do not have enough stock." };
+    }
+    let updated = false;
+    for (let attempt = 0; attempt < 3 && !updated; attempt += 1) {
+      const nextStock = stockAfterAdjustment(expectedStock, quantity, mode);
+      const updateResponse = await fetch(`${supabaseUrl}/rest/v1/products?sku=eq.${encodeURIComponent(sku)}&stock=eq.${encodeURIComponent(String(expectedStock))}`, {
+        method: "PATCH",
+        headers: { ...headers, Prefer: "return=representation" },
+        body: JSON.stringify({ stock: nextStock, updated_at: new Date().toISOString() }),
+      });
+      if (!updateResponse.ok) throw new Error("Could not update product inventory");
+      const updatedRows = await updateResponse.json() as Array<{ sku?: string }>;
+      if (updatedRows.length > 0) {
+        updated = true;
+        break;
+      }
+      const retryResponse = await fetch(`${supabaseUrl}/rest/v1/products?sku=eq.${encodeURIComponent(sku)}&select=sku,stock`, { headers });
+      if (!retryResponse.ok) return { complete: false };
+      const retryRows = await retryResponse.json() as Array<{ sku?: string; stock?: number }>;
+      expectedStock = Number(retryRows[0]?.stock);
+      if (!Number.isFinite(expectedStock)) return { complete: false };
+      if (mode === "decrement" && requireAvailable && expectedStock < quantity) {
+        return { complete: false, reason: "One or more products do not have enough stock." };
+      }
+    }
+    if (!updated) return { complete: false, reason: "Inventory changed while this order was being reserved." };
+  }
 
   if (sizeStockChanged) await writeJsonSetting("product_size_stock", sizeStock);
   if (variantsChanged) await writeJsonSetting("product_variants", variants);
-
-  for (const [sku, quantity] of baseQuantities) {
-    const currentStock = Number(productRows.find((product) => normalizeSku(product.sku) === normalizeSku(sku))?.stock);
-    if (!Number.isFinite(currentStock)) return { complete: false };
-    const updateResponse = await fetch(`${supabaseUrl}/rest/v1/products?sku=eq.${encodeURIComponent(sku)}`, {
-      method: "PATCH",
-      headers: { ...headers, Prefer: "return=minimal" },
-      body: JSON.stringify({ stock: Math.max(0, currentStock - quantity), updated_at: new Date().toISOString() }),
-    });
-    if (!updateResponse.ok) throw new Error("Could not update product inventory");
-  }
   return { complete: true };
 }
 
 export async function reconcilePendingOrderInventory() {
+  const initialOrders = await readOrders();
+  const reservationExpiry = Date.now() - 5 * 60 * 1000;
+  for (const order of initialOrders) {
+    if (order.paymentStatus !== "pending" || order.inventoryReserved !== true || order.inventoryReleased === true) continue;
+    const reservedAt = Date.parse(order.inventoryReservedAt || order.createdAt || order.date || "");
+    if (Number.isFinite(reservedAt) && reservedAt <= reservationExpiry) {
+      await releaseReservedOrderInventory(order.id).catch(() => undefined);
+    }
+  }
+
   const orders = await readOrders();
   let reconciled = 0;
   let pending = 0;
@@ -263,7 +331,13 @@ export async function reconcilePendingOrderInventory() {
   for (const order of orders) {
     if (order.paymentStatus !== "paid" || order.inventoryAdjusted === true) continue;
     try {
-      const adjustment = await adjustInventory(order);
+      if (order.inventoryReserved === true && order.inventoryReleased !== true) {
+        order.inventoryAdjusted = true;
+        reconciled += 1;
+        ordersChanged = true;
+        continue;
+      }
+      const adjustment = await withInventoryMutationLock(() => adjustInventory(order));
       if (adjustment.complete) {
         order.inventoryAdjusted = true;
         reconciled += 1;
@@ -282,7 +356,7 @@ export async function reconcilePendingOrderInventory() {
   return { reconciled, pending };
 }
 
-export async function finalizeRazorpayPayment(payment: RazorpayPayment, receipt?: string) {
+async function finalizeRazorpayPaymentInternal(payment: RazorpayPayment, receipt?: string) {
   if (!payment.id) throw new Error("Razorpay payment ID is missing");
   const orders = await readOrders();
   let order = orders.find((candidate) => candidate.razorpayPaymentId === payment.id);
@@ -325,19 +399,61 @@ export async function finalizeRazorpayPayment(payment: RazorpayPayment, receipt?
   order.razorpayOrderId = payment.order_id || order.razorpayOrderId;
   order.razorpayPaymentId = payment.id;
   restorePaymentContactDetails(order, payment);
-  order.inventoryAdjusted = false;
+  order.inventoryAdjusted = order.inventoryReserved === true && order.inventoryReleased !== true;
   await writeOrders(orders);
 
   // Payment confirmation must not be lost because an older product is missing
   // size/variant metadata. Keep the paid order and let the next admin sync
   // retry inventory correction while it remains visibly pending.
-  try {
-    const adjustment = await adjustInventory(order);
-    order.inventoryAdjusted = adjustment.complete;
-  } catch {
-    order.inventoryAdjusted = false;
+  if (!order.inventoryAdjusted) {
+    try {
+      const adjustment = await adjustInventory(order);
+      order.inventoryAdjusted = adjustment.complete;
+    } catch {
+      order.inventoryAdjusted = false;
+    }
   }
   await writeOrders(orders);
   await syncVendorOrderForPaidOrder(order).catch(() => undefined);
   return order;
+}
+
+export async function finalizeRazorpayPayment(payment: RazorpayPayment, receipt?: string) {
+  return withInventoryMutationLock(() => finalizeRazorpayPaymentInternal(payment, receipt));
+}
+
+export async function reserveOrderInventory(orderId: string) {
+  return withInventoryMutationLock(async () => {
+    const orders = await readOrders();
+    const order = orders.find((candidate) => candidate.id === orderId);
+    if (!order) throw new Error("Order could not be found for stock reservation.");
+    if (order.paymentStatus === "paid") return order;
+    if (order.inventoryReserved === true && order.inventoryReleased !== true) return order;
+
+    const adjustment = await adjustInventory(order, "decrement", true);
+    if (!adjustment.complete) throw new Error(adjustment.reason || "One or more products do not have enough stock.");
+    order.inventoryReserved = true;
+    order.inventoryReservedAt = new Date().toISOString();
+    order.inventoryReleased = false;
+    order.inventoryAdjusted = false;
+    await writeOrders(orders);
+    return order;
+  });
+}
+
+export async function releaseReservedOrderInventory(orderId: string) {
+  return withInventoryMutationLock(async () => {
+    const orders = await readOrders();
+    const order = orders.find((candidate) => candidate.id === orderId);
+    if (!order) throw new Error("Order could not be found for stock release.");
+    if (order.paymentStatus === "paid" || order.inventoryReserved !== true || order.inventoryReleased === true) return order;
+
+    const adjustment = await adjustInventory(order, "release");
+    if (!adjustment.complete) throw new Error("Reserved stock could not be released.");
+    order.inventoryReserved = true;
+    order.inventoryReleased = true;
+    order.inventoryAdjusted = false;
+    await writeOrders(orders);
+    return order;
+  });
 }

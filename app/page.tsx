@@ -63,6 +63,15 @@ type Product = {
   vendorName?: string;
   vendorSlug?: string;
 };
+type StorefrontVendor = {
+  id: string;
+  slug: string;
+  businessName: string;
+  logoUrl?: string;
+  coverUrl?: string;
+  description?: string;
+  featured: boolean;
+};
 type ImageAdjustments = { zoom: number; x: number; y: number; rotate: number };
 type ProductVariant = { name: string; size?: string; image: string; stock?: number; adjustments?: ImageAdjustments };
 type ProductImageAdjustments = {
@@ -105,6 +114,9 @@ type CustomerOrder = {
   paymentStatus?: "pending" | "paid";
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
+  inventoryReserved?: boolean;
+  inventoryReservedAt?: string;
+  inventoryReleased?: boolean;
   inventoryAdjusted?: boolean;
   items?: Array<{ name: string; quantity: number; price: string; regularPrice?: number; productId?: string; image?: string; variantName?: string; variantImage?: string; size?: string; vendorId?: string | null; vendorName?: string; vendorSlug?: string; promotion?: PromotionCartLine }>;
 };
@@ -284,7 +296,7 @@ const loadRazorpayCheckout = () => new Promise<new (options: RazorpayCheckoutOpt
 });
 
 const razorpayApiBaseUrl = (process.env.NEXT_PUBLIC_RAZORPAY_API_URL ?? "").replace(/\/$/, "");
-const razorpayApiUrl = (path: "order" | "verify") => razorpayApiBaseUrl
+const razorpayApiUrl = (path: "order" | "verify" | "reserve-stock" | "release-stock") => razorpayApiBaseUrl
   ? `${razorpayApiBaseUrl}/${path}`
   : `/api/razorpay/${path}`;
 
@@ -510,7 +522,7 @@ const ProductCard = memo(function ProductCard({ product, wished, promotions, car
         <div>
           <p className="eyebrow">{product.category}</p>
           <h3>{product.name}</h3>
-          <a className="product-sold-by" href={product.vendorSlug ? `/vendors/${product.vendorSlug}` : "/vendors"}>Sold by: {product.vendorName || "Vestano"}</a>
+          {product.vendorId && product.vendorName && <a className="product-sold-by" href={product.vendorSlug ? `/vendors/${product.vendorSlug}` : "/vendors"}>{product.vendorName}’S PRODUCT</a>}
         </div>
         {cartQuantity > 0 ? <div className="product-cart-control is-added"><button type="button" onClick={onDecrease} aria-label={`Decrease ${product.name} quantity`}>−</button><span>{cartQuantity}</span><button type="button" onClick={onIncrease} aria-label={`Increase ${product.name} quantity`}>+</button></div> : <button className="add-to-cart-button" type="button" onClick={onAdd} disabled={isOutOfStock} aria-label={isOutOfStock ? `${product.name} is sold out` : `Add ${product.name} to cart`}>Add to cart</button>}
       </div>
@@ -527,7 +539,9 @@ export default function Home() {
   const [products, setProducts] = useState<Product[]>(defaultProducts);
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [categories, setCategories] = useState(defaultCategories);
+  const [vendors, setVendors] = useState<StorefrontVendor[]>([]);
   const [activeCategory, setActiveCategory] = useState("All pieces");
+  const [productSort, setProductSort] = useState("featured");
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -585,6 +599,7 @@ export default function Home() {
   const overlayClosedFromBack = useRef(false);
   const overlayLastBackUrl = useRef<string | null>(null);
   const quickProductCloseRequested = useRef(false);
+  const cartActionFromUrl = useRef<string | null>(typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("fanzzy-cart-action") : null);
   const overlayRestoredFromUrl = useRef(Boolean(typeof window !== "undefined" && new URLSearchParams(window.location.search).get("fanzzy-product")));
   const [zoomedImage, setZoomedImage] = useState<{ src: string; alt: string; adjustments?: ImageAdjustments } | null>(null);
   const [selectedVariant, setSelectedVariant] = useState<ProductVariant | null>(null);
@@ -989,6 +1004,16 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    let active = true;
+    fetch("/api/vendors", { cache: "no-store" }).then(async (response) => {
+      if (!response.ok) return;
+      const body = await response.json() as { vendors?: StorefrontVendor[] };
+      if (active) setVendors(body.vendors || []);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
     const requestedCategory = new URLSearchParams(window.location.search).get("category")?.trim().toLowerCase();
     if (!requestedCategory || !categories.length) return;
     const matchingCategory = categories.find((category) => category.name.trim().toLowerCase() === requestedCategory);
@@ -1018,6 +1043,7 @@ export default function Home() {
       try {
         const remote = await fetchStoreOrders<CustomerOrder>();
         const merged = new Map<string, CustomerOrder>();
+        const localOnlyOrders: CustomerOrder[] = [];
         remote.data?.forEach((order) => {
           if (order?.id && isCustomerOrder(order, authUser)) {
             merged.set(order.id, order);
@@ -1029,17 +1055,35 @@ export default function Home() {
           if (Array.isArray(parsed)) {
             parsed.forEach((order) => {
               if (order?.id && isCustomerOrder(order as CustomerOrder, authUser) && !merged.has(order.id)) {
-                merged.set(order.id, order as CustomerOrder);
+                const localOrder = order as CustomerOrder;
+                merged.set(localOrder.id, localOrder);
+                localOnlyOrders.push(localOrder);
               }
             });
           }
           const sharedStored = window.localStorage.getItem("fanzzy-orders");
           const sharedParsed = sharedStored ? JSON.parse(sharedStored) : [];
           if (Array.isArray(sharedParsed)) sharedParsed.forEach((order) => {
-            if (order?.id && isCustomerOrder(order as CustomerOrder, authUser) && !merged.has(order.id)) merged.set(order.id, order as CustomerOrder);
+            if (order?.id && isCustomerOrder(order as CustomerOrder, authUser) && !merged.has(order.id)) {
+              const localOrder = order as CustomerOrder;
+              merged.set(localOrder.id, localOrder);
+              localOnlyOrders.push(localOrder);
+            }
           });
         } catch {
           window.localStorage.removeItem(`fanzzy-orders:${userId}`);
+        }
+        // A completed payment can be preserved locally while the shared order
+        // store is offline. As soon as it comes back, add only the missing
+        // customer records to the full remote collection without overwriting
+        // orders from other customers.
+        if (!remote.error && localOnlyOrders.length) {
+          const allOrders = new Map<string, CustomerOrder>();
+          remote.data?.forEach((order) => { if (order?.id) allOrders.set(order.id, order); });
+          localOnlyOrders.forEach((order) => allOrders.set(order.id, order));
+          if (allOrders.size > (remote.data?.length || 0)) {
+            await saveStoreOrders(Array.from(allOrders.values()));
+          }
         }
         setOrders(Array.from(merged.values()));
       } finally {
@@ -1066,12 +1110,31 @@ export default function Home() {
 
   const filteredProducts = useMemo(() => {
     const query = search.trim().toLowerCase();
-    return products.filter((product) => {
-      const categoryMatch = activeCategory === "All pieces" || product.category === activeCategory;
-      const searchMatch = !query || `${product.name} ${product.category}`.toLowerCase().includes(query);
-      return categoryMatch && searchMatch;
-    }).sort((left, right) => Number(isProductOutOfStock(left)) - Number(isProductOutOfStock(right)));
-  }, [activeCategory, products, search]);
+    return products
+      .filter((product) => {
+        const categoryMatch = activeCategory === "All pieces" || product.category === activeCategory;
+        const searchMatch = !query || `${product.name} ${product.category} ${product.vendorName || ""}`.toLowerCase().includes(query);
+        return categoryMatch && searchMatch;
+      })
+      .sort((left, right) => {
+        // Keep available pieces before sold-out pieces for every sort mode.
+        const stockOrder = Number(isProductOutOfStock(left)) - Number(isProductOutOfStock(right));
+        if (stockOrder) return stockOrder;
+
+        switch (productSort) {
+          case "price-low":
+            return getCustomerPrice(left) - getCustomerPrice(right);
+          case "price-high":
+            return getCustomerPrice(right) - getCustomerPrice(left);
+          case "name":
+            return left.name.localeCompare(right.name);
+          case "stock":
+            return right.stock - left.stock;
+          default:
+            return 0;
+        }
+      });
+  }, [activeCategory, productSort, products, search]);
 
   const offersForProduct = useCallback((product: Product) => promotionalOffers.filter((offer) => {
     const paidScope = offer.eligiblePaid;
@@ -1387,8 +1450,8 @@ export default function Home() {
 
   const announce = (message: string) => setToast(message);
   const openSearch = () => {
-    setSearch("");
-    setSearchOpen(true);
+    setSearchOpen(false);
+    document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" });
   };
   const closeSearch = () => {
     setSearch("");
@@ -1959,6 +2022,16 @@ export default function Home() {
     setQuickProduct(null);
     setCheckoutOpen(true);
   };
+  useEffect(() => {
+    const action = cartActionFromUrl.current;
+    if (!action || !cartReadyOwner || !cartItems.length) return;
+    cartActionFromUrl.current = null;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("fanzzy-cart-action");
+    window.history.replaceState(window.history.state, "", url.href);
+    if (action === "buy") void openCheckout();
+    else setCartOpen(true);
+  }, [cartItems.length, cartReadyOwner]);
   const clearCheckoutError = (field: keyof CheckoutErrors) => {
     setCheckoutErrors((current) => {
       if (!current[field]) return current;
@@ -2115,7 +2188,7 @@ export default function Home() {
       return;
     }
     const nextOrders = [newOrder, ...Array.from(merged.values()).filter((order) => order.id !== newOrder.id)];
-    await saveStoreOrders(nextOrders);
+    const saveError = await saveStoreOrders(nextOrders);
     window.localStorage.setItem("fanzzy-orders", JSON.stringify(nextOrders));
     const userOrders = nextOrders.filter((order) => belongsToCustomer(order, authUser) && isPaidOrder(order));
     window.localStorage.setItem(`fanzzy-orders:${authUser.id}`, JSON.stringify(userOrders));
@@ -2134,7 +2207,9 @@ export default function Home() {
     setIsPaying(false);
     if (newOrder.inventoryAdjusted === true) decrementLocalInventoryOnce(newOrder);
     window.dispatchEvent(new Event("fanzzy-products-updated"));
-    announce(`${newOrder.id} placed successfully`);
+    announce(saveError
+      ? `${newOrder.id} is paid and saved on this device. It will sync when the order service is restored.`
+      : `${newOrder.id} placed successfully`);
   };
   const persistPendingOrder = async (newOrder: CustomerOrder) => {
     if (!authUser) throw new Error("Sign in before placing an order");
@@ -2161,6 +2236,12 @@ export default function Home() {
       JSON.stringify(nextOrders.filter((order) => belongsToCustomer(order, authUser))),
     );
     window.dispatchEvent(new Event("fanzzy-orders-updated"));
+    // Do not open Razorpay unless this pre-payment order has reached the
+    // shared store. A browser-only copy cannot be seen by the live admin and
+    // would turn a successful payment into a missing order.
+    if (saveError) {
+      throw new Error("Orders are temporarily unavailable. No payment was started. Please try again shortly.");
+    }
   };
   const submitCheckout = async () => {
     if (isPaying) return;
@@ -2224,10 +2305,46 @@ export default function Home() {
     };
 
     setIsPaying(true);
+    let stockReserved = false;
+    let reservedPendingOrder = pendingOrder;
+    const releaseCheckoutStock = async () => {
+      if (!stockReserved) return;
+      // Flip the local guard first so a dismiss callback and a verification
+      // failure cannot release the same reservation twice.
+      stockReserved = false;
+      try {
+        await fetch(razorpayApiUrl("release-stock"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ fanzzyOrderId: orderId }),
+        });
+      } catch {
+        // The server-side payment sync also releases abandoned reservations
+        // after their timeout, so a temporary network error is recoverable.
+      }
+    };
     try {
       // Save before opening Razorpay so a completed payment can always be matched
       // in Admin Orders, even if the customer's browser closes during the callback.
       await persistPendingOrder(pendingOrder);
+      const reservationResponse = await fetch(razorpayApiUrl("reserve-stock"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fanzzyOrderId: orderId }),
+      });
+      const reservation = await readRazorpayResponse<{ reserved?: boolean; reservedAt?: string; error?: string }>(reservationResponse);
+      if (!reservationResponse.ok || !reservation.reserved) {
+        throw new Error(reservation.error || "This product is no longer available in the requested quantity");
+      }
+      stockReserved = true;
+      reservedPendingOrder = {
+        ...pendingOrder,
+        inventoryReserved: true,
+        inventoryReservedAt: reservation.reservedAt || new Date().toISOString(),
+        inventoryReleased: false,
+        inventoryAdjusted: false,
+      };
+      await persistPendingOrder(reservedPendingOrder);
       const orderResponse = await fetch(razorpayApiUrl("order"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2235,7 +2352,8 @@ export default function Home() {
       });
       const razorpayOrder = await readRazorpayResponse<{ id?: string; amount?: number; currency?: string; keyId?: string; error?: string }>(orderResponse);
       if (!orderResponse.ok || !razorpayOrder.id || !razorpayOrder.keyId) throw new Error(razorpayOrder.error || "Razorpay order creation failed");
-      await persistPendingOrder({ ...pendingOrder, razorpayOrderId: razorpayOrder.id });
+      reservedPendingOrder = { ...reservedPendingOrder, razorpayOrderId: razorpayOrder.id };
+      await persistPendingOrder(reservedPendingOrder);
       const Razorpay = await loadRazorpayCheckout();
       const checkout = new Razorpay({
         key: razorpayOrder.keyId,
@@ -2261,18 +2379,23 @@ export default function Home() {
               });
               const verification = await readRazorpayResponse<{ verified?: boolean; error?: string; inventoryAdjusted?: boolean }>(verifyResponse);
               if (!verifyResponse.ok || !verification.verified) throw new Error(verification.error || "Payment verification failed");
-              const paidOrder = { ...pendingOrder, paymentStatus: "paid" as const, razorpayOrderId: payment.razorpay_order_id, razorpayPaymentId: payment.razorpay_payment_id, inventoryAdjusted: verification.inventoryAdjusted === true };
+              const paidOrder = { ...reservedPendingOrder, paymentStatus: "paid" as const, razorpayOrderId: payment.razorpay_order_id, razorpayPaymentId: payment.razorpay_payment_id, inventoryAdjusted: verification.inventoryAdjusted === true };
+              // The verify endpoint has now made the reservation permanent for
+              // this paid order. Never release it after this point.
+              stockReserved = false;
               await persistPaidOrder(paidOrder);
             } catch (error) {
+              await releaseCheckoutStock();
               setIsPaying(false);
               announce(error instanceof Error ? error.message : "Payment could not be verified");
             }
           })();
         },
-        modal: { ondismiss: () => setIsPaying(false) },
+        modal: { ondismiss: () => { void releaseCheckoutStock(); setIsPaying(false); } },
       });
       checkout.open();
     } catch (error) {
+      await releaseCheckoutStock();
       setIsPaying(false);
       announce(error instanceof Error ? error.message : "Online payment could not start");
     }
@@ -2399,7 +2522,7 @@ export default function Home() {
         <a href="#top" className="wordmark" aria-label="fanZZy home"><img src={siteAsset("fanzzy-mark.png")} alt="fanZZy" className="brand-logo" /><span className="navbar-brand-name">fanZZy</span></a>
         <nav className="desktop-nav" aria-label="Main navigation"><a href="#shop">Shop</a><a href="#categories">Collections</a><a href="#story">The journal</a><a href="#footer">About</a></nav>
         <div className="header-actions">
-          <label className="navbar-search"><span aria-hidden="true">⌕</span><input readOnly placeholder="Search jewellery" onFocus={openSearch} aria-label="Open search" /></label>
+          <label className="navbar-search"><span aria-hidden="true">⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search jewellery" onFocus={openSearch} aria-label="Search jewellery" />{search && <button className="navbar-search-clear" type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => setSearch("")} aria-label="Clear search">×</button>}</label>
           <button className="header-action-with-icon saved-header-action" onClick={() => setSavedOpen(true)} aria-label="View saved pieces"><svg className="header-action-icon" viewBox="0 0 16 16" aria-hidden="true" fill="none"><path d="M8 13.25S2.75 10.15 2.75 6.55A2.55 2.55 0 0 1 8 5.8a2.55 2.55 0 0 1 5.25.75C13.25 10.15 8 13.25 8 13.25Z" /></svg><span className="action-label">Saved</span>{wishlist.length > 0 && <b>{wishlist.length}</b>}</button>
           <button className="header-action-with-icon" onClick={openOrders} aria-label="View my orders"><svg className="header-action-icon" viewBox="0 0 16 16" aria-hidden="true" fill="none"><path d="M5 2.5h6v11L8 11.7 5 13.5v-11Z" /><path d="M6.6 5.4h2.8M6.6 7.7h2.1" /></svg><span className="action-label">My orders</span>{orders.length > 0 && <b>{orders.length}</b>}</button>
           <button className="header-action-with-icon" onClick={openCart} aria-label={cartCount > 0 ? `Open shopping cart, ${cartCount} item${cartCount === 1 ? "" : "s"}` : "Open shopping cart"}><svg className="header-action-icon cart-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none"><path d="M3 4h2l2.2 11h10.9l3-8H6" /><circle cx="9" cy="19" r="1.5" /><circle cx="18" cy="19" r="1.5" /></svg><span className="action-label">Cart</span>{cartCount > 0 && <span className="bag-count">({cartCount})</span>}</button>
@@ -2426,11 +2549,12 @@ export default function Home() {
 
       {heroSlides.length > 0 && <section className="hero hero-background" id="top"><div className="hero-slide-layer" key={heroSlides[heroSlideIndex]}><img src={heroSlides[heroSlideIndex]} alt="Fanzzy collection highlight" /></div></section>}
 
-      <section className="section-block" id="categories"><div className="category-showcase"><div className="category-intro"><h2>Find your <em>signature.</em></h2><div><a className="text-link" href={`${siteBasePath}/collections`}>View all categories <span>↗</span></a><a className="text-link" href={`${siteBasePath}/vendors`}>Shop by vendor <span>↗</span></a></div></div><div className="category-grid">{categories.slice(0, 4).map((category, index) => <button className={`category-card category-${index + 1}`} key={category.name} onClick={() => { selectCategory(category.name); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}><img src={category.image || categoryImageFallback(category.name, index)} alt={category.name} /><span className="category-overlay" /><span className="category-info"><strong>{category.name}</strong></span></button>)}</div></div></section>
+      <section className="section-block" id="categories"><div className="category-showcase"><div className="category-intro"><h2>Find your <em>signature.</em></h2><div><a className="text-link" href={`${siteBasePath}/collections`}>View all categories <span>↗</span></a></div></div><div className="category-grid">{categories.slice(0, 4).map((category, index) => <button className={`category-card category-${index + 1}`} key={category.name} onClick={() => { selectCategory(category.name); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}><img src={category.image || categoryImageFallback(category.name, index)} alt={category.name} /><span className="category-overlay" /><span className="category-info"><strong>{category.name}</strong></span></button>)}</div></div></section>
+      {vendors.length > 0 && <section className="section-block vendor-strip-section" aria-labelledby="vendor-strip-title"><div className="vendor-strip-heading"><div><p className="eyebrow">SHOP BY VENDOR</p><h2 id="vendor-strip-title">Meet the <em>makers.</em></h2></div><a className="text-link" href={`${siteBasePath}/vendors`}>View all vendors <span>↗</span></a></div><div className="vendor-strip" role="list">{vendors.map((vendor) => { const image = vendor.logoUrl || vendor.coverUrl; return <a className="vendor-strip-card" href={`${siteBasePath}/vendors/${vendor.slug}`} key={vendor.id} role="listitem"><span className="vendor-strip-logo">{image ? <img src={image} alt="" /> : <strong>{vendor.businessName.trim().charAt(0).toUpperCase()}</strong>}</span><span className="vendor-strip-copy"><strong>{vendor.businessName}</strong><small>{vendor.featured ? "Featured vendor" : "Explore store"} <span>↗</span></small></span></a>; })}</div></section>}
 
       <section className="manifesto"><p className="eyebrow">THE FANZZY STANDARD</p><h2>Jewellery with a point of view.<br /><em>Made for your everyday extraordinary.</em></h2><p className="manifesto-copy">Fanzzy is a study in contrast — soft and sculptural, familiar and unexpected. Every piece is made in small batches with considered materials and a little bit of magic.</p></section>
 
-      <section className="section-block product-section" id="shop"><div className="section-heading"><div><p className="eyebrow">CURATED FOR YOU</p><h2>Pieces worth <em>keeping.</em></h2></div><a className="text-link" href="#footer">Shop all <span>↗</span></a></div>{promotionalOffers.length > 0 && <div className="storefront-offer-rail"><span className="eyebrow">LIVE OFFERS</span><div className="storefront-offer-list">{promotionalOffers.map((offer) => <button key={offer.id} onClick={() => { const first = products.find((product) => offersForProduct(product).some((item) => item.id === offer.id)); if (first) openQuickProduct(first); }}>{offerTypeLabel(offer)} {offer.freeQuantity > 0 && <span className="offer-free-label">FREE</span>} <b>↗</b></button>)}</div></div>}<div className="filter-row"><div className="filter-pills"><button className={activeCategory === "All pieces" ? "active" : ""} onClick={() => selectCategory("All pieces")}>All pieces</button>{categories.map((category) => <button className={activeCategory === category.name ? "active" : ""} key={category.name} onClick={() => selectCategory(category.name)}>{category.name}</button>)}</div><span className="result-count">{catalogLoading ? "Loading pieces…" : `${filteredProducts.length} pieces`}</span></div><div className="product-grid">{catalogLoading ? <p className="muted">Loading all pieces…</p> : filteredProducts.map((product) => { const productPromotions = promotionsByProductId.get(product.id) ?? []; return <ProductCard key={product.id} product={product} promotions={productPromotions} cartQuantity={getProductCartQuantity(product)} wished={wishlist.includes(product.id)} onWishlist={() => toggleWishlist(product.id)} onAdd={() => (getProductVariantType(product) === "normal" && product.variants?.length) || (getProductVariantType(product) === "size" && product.sizes?.length) || productPromotions.length ? openQuickProduct(product) : addToCart(product)} onDecrease={() => decreaseProductCart(product)} onIncrease={() => increaseProductCart(product)} onQuickView={() => openQuickProduct(product)} onImageZoom={() => setZoomedImage({ src: product.image, alt: product.name, adjustments: product.imageAdjustments })} />; })}</div></section>
+      <section className="section-block product-section" id="shop"><div className="section-heading"><div><p className="eyebrow">CURATED FOR YOU</p><h2>Pieces worth <em>keeping.</em></h2></div><a className="text-link" href="#footer">Shop all <span>↗</span></a></div>{promotionalOffers.length > 0 && <div className="storefront-offer-rail"><span className="eyebrow">LIVE OFFERS</span><div className="storefront-offer-list">{promotionalOffers.map((offer) => <button key={offer.id} onClick={() => { const first = products.find((product) => offersForProduct(product).some((item) => item.id === offer.id)); if (first) openQuickProduct(first); }}>{offerTypeLabel(offer)} {offer.freeQuantity > 0 && <span className="offer-free-label">FREE</span>} <b>↗</b></button>)}</div></div>}<div className="filter-row"><div className="filter-pills"><button className={activeCategory === "All pieces" ? "active" : ""} onClick={() => selectCategory("All pieces")}>All pieces</button>{categories.map((category) => <button className={activeCategory === category.name ? "active" : ""} key={category.name} onClick={() => selectCategory(category.name)}>{category.name}</button>)}</div><div className="filter-tools"><label className="product-sort-control"><span>Sort by</span><select value={productSort} onChange={(event) => setProductSort(event.target.value)} aria-label="Sort products"><option value="featured">Featured</option><option value="price-low">Price: low to high</option><option value="price-high">Price: high to low</option><option value="name">Name: A to Z</option><option value="stock">Availability</option></select></label><span className="result-count">{catalogLoading ? "Loading pieces…" : `${filteredProducts.length} pieces`}</span></div></div><div className="product-grid">{catalogLoading ? <p className="muted">Loading all pieces…</p> : filteredProducts.map((product) => { const productPromotions = promotionsByProductId.get(product.id) ?? []; return <ProductCard key={product.id} product={product} promotions={productPromotions} cartQuantity={getProductCartQuantity(product)} wished={wishlist.includes(product.id)} onWishlist={() => toggleWishlist(product.id)} onAdd={() => (getProductVariantType(product) === "normal" && product.variants?.length) || (getProductVariantType(product) === "size" && product.sizes?.length) || productPromotions.length ? openQuickProduct(product) : addToCart(product)} onDecrease={() => decreaseProductCart(product)} onIncrease={() => increaseProductCart(product)} onQuickView={() => openQuickProduct(product)} onImageZoom={() => setZoomedImage({ src: product.image, alt: product.name, adjustments: product.imageAdjustments })} />; })}</div></section>
 
       <section className="editorial" id="story"><div className="editorial-image"><img src="https://images.unsplash.com/photo-1515562141207-7a88fb7ce338?auto=format&fit=crop&w=1100&q=85" alt="Close-up of sculptural gold jewelry" /><span>THE ART OF<br /><em>ADORNMENT</em></span></div><div className="editorial-copy"><p className="eyebrow">A NOTE FROM THE STUDIO</p><h2>Less noise.<br /><em>More meaning.</em></h2><p>There is beauty in the in-between. The way a quiet chain layers with your favourite shirt. A ring that becomes part of your hand. Fanzzy is made for these small rituals — the ones that make a day feel like yours.</p><a className="button button-dark" href="#footer">Read our story <span>↗</span></a><div className="editorial-sign">F / 19<br /></div></div></section>
 

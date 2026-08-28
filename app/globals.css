@@ -650,3 +650,17 @@ img { display: block; width: 100%; }
     object-fit: contain !important;
   }
 }
+.navbar-search .navbar-search-clear { background: transparent; border: 0; color: var(--wine); cursor: pointer; font-size: 15px; line-height: 1; padding: 0 0 0 3px; position: static; }
+.navbar-search .navbar-search-clear:hover { color: var(--gold); }
+
+.filter-tools { align-items: center; display: flex; gap: 18px; }
+.product-sort-control { align-items: center; display: flex; gap: 9px; }
+.product-sort-control span { color: var(--muted); font-family: var(--mono); font-size: 8px; letter-spacing: .1em; text-transform: uppercase; }
+.product-sort-control select { background: var(--paper); border: 1px solid var(--line); border-radius: 999px; color: var(--wine); font-family: var(--mono); font-size: 9px; letter-spacing: .04em; min-height: 38px; padding: 0 13px; }
+.product-sort-control select:focus { border-color: var(--wine); outline: 2px solid rgba(75, 28, 43, .12); outline-offset: 2px; }
+@media (max-width: 760px) {
+  .filter-tools { align-items: stretch; justify-content: space-between; width: 100%; }
+  .product-sort-control { flex: 1; justify-content: space-between; }
+  .product-sort-control select { min-height: 40px; }
+  .filter-tools .result-count { align-self: center; }
+}
