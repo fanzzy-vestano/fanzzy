@@ -9,7 +9,7 @@ type InventoryAdjustmentConfig = {
   supabaseKey: string;
 };
 
-export type InventoryAdjustment = { complete: boolean };
+export type InventoryAdjustment = { complete: boolean; reason?: string };
 
 const normalizeSelection = (value?: string) => String(value || "").trim().replace(/^size\s+/i, "").toLowerCase();
 const normalizeSku = (value?: string) => String(value || "").trim().replace(/[^a-z0-9]/gi, "").toLowerCase();
@@ -45,7 +45,17 @@ async function writeJsonSetting(config: InventoryAdjustmentConfig, key: string, 
   if (!response.ok) throw new Error(`Could not update ${key}`);
 }
 
-export async function adjustOrderInventory(order: InventoryOrder, config: InventoryAdjustmentConfig): Promise<InventoryAdjustment> {
+export type InventoryAdjustmentMode = "decrement" | "release";
+
+const stockAfterAdjustment = (current: number, quantity: number, mode: InventoryAdjustmentMode) =>
+  mode === "release" ? Math.max(0, Math.floor(current + quantity)) : Math.max(0, Math.floor(current - quantity));
+
+export async function adjustOrderInventory(
+  order: InventoryOrder,
+  config: InventoryAdjustmentConfig,
+  mode: InventoryAdjustmentMode = "decrement",
+  requireAvailable = false,
+): Promise<InventoryAdjustment> {
   const [savedVariants, savedSizeStock, savedVariantTypes] = await Promise.all([
     readJsonSetting<Record<string, StoredVariant[]>>(config, "product_variants", {}),
     readJsonSetting<Record<string, Record<string, number>>>(config, "product_size_stock", {}),
@@ -106,15 +116,25 @@ export async function adjustOrderInventory(order: InventoryOrder, config: Invent
         return;
       }
       if (hasConfiguredSizeStock) {
+        const available = Math.floor(Number(configuredSizeStock));
+        if (mode === "decrement" && requireAvailable && available < quantity) {
+          unresolvedProductIds.add(rawSku || sku);
+          return;
+        }
         sizeStock[sizeStockKey] = {
           ...currentSizeStock,
-          [sizeKey]: Math.max(0, Math.floor(Number(configuredSizeStock) - quantity)),
+          [sizeKey]: stockAfterAdjustment(available, quantity, mode),
         };
         sizeStockChanged = true;
       }
       if (hasVariantStock && sizeVariant) {
+        const available = Math.floor(Number(sizeVariant.stock));
+        if (mode === "decrement" && requireAvailable && available < quantity) {
+          unresolvedProductIds.add(rawSku || sku);
+          return;
+        }
         variants[variantsKey] = productVariants.map((variant, index) => index === variantIndex
-          ? { ...variant, stock: Math.max(0, Math.floor(Number(variant.stock) - quantity)) }
+          ? { ...variant, stock: stockAfterAdjustment(available, quantity, mode) }
           : variant);
         variantsChanged = true;
       }
@@ -149,7 +169,9 @@ export async function adjustOrderInventory(order: InventoryOrder, config: Invent
 
   // Do not partially deduct an order. An unresolved line stays pending so a
   // later retry cannot reduce the rest of the order a second time.
-  if (unresolvedProductIds.size > 0) return { complete: false };
+  if (unresolvedProductIds.size > 0) {
+    return { complete: false, reason: mode === "decrement" && requireAvailable ? "One or more products do not have enough stock." : undefined };
+  }
 
   if (sizeStockChanged) await writeJsonSetting(config, "product_size_stock", sizeStock);
   if (variantsChanged) await writeJsonSetting(config, "product_variants", variants);
@@ -157,10 +179,13 @@ export async function adjustOrderInventory(order: InventoryOrder, config: Invent
   for (const [sku, quantity] of baseQuantities) {
     const currentStock = Number(productRows.find((product) => normalizeSku(product.sku) === normalizeSku(sku))?.stock);
     if (!Number.isFinite(currentStock)) return { complete: false };
+    if (mode === "decrement" && requireAvailable && currentStock < quantity) {
+      return { complete: false, reason: "One or more products do not have enough stock." };
+    }
     const updateResponse = await fetch(`${config.supabaseUrl}/rest/v1/products?sku=eq.${encodeURIComponent(sku)}`, {
       method: "PATCH",
       headers: { ...headers, Prefer: "return=minimal" },
-      body: JSON.stringify({ stock: Math.max(0, currentStock - quantity), updated_at: new Date().toISOString() }),
+      body: JSON.stringify({ stock: stockAfterAdjustment(currentStock, quantity, mode), updated_at: new Date().toISOString() }),
     });
     if (!updateResponse.ok) throw new Error("Could not update product inventory");
   }

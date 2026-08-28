@@ -4,6 +4,7 @@ declare const Deno: {
 };
 
 const TWO_FACTOR_BASE_URL = "https://2factor.in/API/V1";
+const TWO_FACTOR_TEMPLATE_NAME = "Fanzzy Login OTP";
 const OTP_EXPIRES_MS = 5 * 60 * 1000;
 const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
 const OTP_WINDOW_MS = 15 * 60 * 1000;
@@ -111,30 +112,23 @@ const sendOtp = async (phone: string) => {
   const apiKey = Deno.env.get("TWO_FACTOR_API_KEY")?.trim() || "";
   if (!apiKey) throw new Error("SMS provider is not configured.");
   const code = String(Math.floor(100000 + crypto.getRandomValues(new Uint32Array(1))[0] % 900000));
-  const providerResponse = await fetch(`${TWO_FACTOR_BASE_URL}/${encodeURIComponent(apiKey)}/SMS/${encodeURIComponent(phone)}/${encodeURIComponent(code)}`, {
+  const providerResponse = await fetch(`${TWO_FACTOR_BASE_URL}/${encodeURIComponent(apiKey)}/SMS/${encodeURIComponent(phone)}/${encodeURIComponent(code)}/${encodeURIComponent(TWO_FACTOR_TEMPLATE_NAME)}`, {
     method: "POST",
     headers: { accept: "application/json" },
   });
-  const providerResult = await providerResponse.json() as { Status?: string; Details?: string; StatusCode?: string };
-  if (!providerResponse.ok || String(providerResult.Status || "").toLowerCase() !== "success") {
-    throw new Error(providerResult.Details || "The SMS provider could not send the code.");
+  const rawProviderResponse = await providerResponse.text();
+  let providerResult: Record<string, unknown> = {};
+  try {
+    providerResult = JSON.parse(rawProviderResponse) as Record<string, unknown>;
+  } catch {
+    if (!providerResponse.ok) throw new Error("The SMS provider could not send the code.");
   }
-  return { code, details: providerResult.Details || "sent" };
-};
-
-const sendVoiceOtp = async (phone: string) => {
-  const apiKey = Deno.env.get("TWO_FACTOR_API_KEY")?.trim() || "";
-  if (!apiKey) throw new Error("Voice OTP provider is not configured.");
-  const code = String(Math.floor(100000 + crypto.getRandomValues(new Uint32Array(1))[0] % 900000));
-  const providerResponse = await fetch(`${TWO_FACTOR_BASE_URL}/${encodeURIComponent(apiKey)}/VOICE/${encodeURIComponent(phone)}/${code}`, {
-    method: "GET",
-    headers: { accept: "application/json" },
-  });
-  const providerResult = await providerResponse.json() as { Status?: string; Details?: string };
-  if (!providerResponse.ok || String(providerResult.Status || "").toLowerCase() !== "success") {
-    throw new Error(providerResult.Details || "The voice OTP provider could not start the call.");
+  const providerStatus = String(providerResult.Status ?? providerResult.status ?? providerResult.StatusCode ?? providerResult.statusCode ?? "").trim().toLowerCase();
+  const providerDetails = String(providerResult.Details ?? providerResult.details ?? providerResult.Message ?? providerResult.message ?? rawProviderResponse).trim();
+  if (!providerResponse.ok || (providerStatus && providerStatus !== "success") || !providerDetails) {
+    throw new Error(providerDetails || "The SMS provider could not send the code.");
   }
-  return { code, details: providerResult.Details || "started" };
+  return { code, details: providerDetails || "sent" };
 };
 
 const route = async (request: Request) => {
@@ -157,19 +151,6 @@ const route = async (request: Request) => {
       return response({ sent: true, pendingToken: await createToken({ kind: "pending", phone, code, expiresAt: Date.now() + OTP_EXPIRES_MS }) }, 200, origin);
     } catch (error) {
       return response({ error: error instanceof Error ? error.message : "The SMS service is unavailable." }, 502, origin);
-    }
-  }
-
-  if (action === "send-voice-otp") {
-    const phone = normalizeMobileNumber(body.phone);
-    if (!phone) return response({ error: "Enter a valid 10-digit Indian mobile number" }, 400, origin);
-    const retryAfter = checkRateLimit(sendLimits, clientKey(request, phone), OTP_WINDOW_MS, OTP_MAX_REQUESTS, OTP_RESEND_COOLDOWN_MS);
-    if (retryAfter) return response({ error: `Please wait ${retryAfter} seconds before requesting another OTP.` }, 429, origin);
-    try {
-      const { code } = await sendVoiceOtp(phone);
-      return response({ sent: true, pendingToken: await createToken({ kind: "pending", phone, code, expiresAt: Date.now() + OTP_EXPIRES_MS }) }, 200, origin);
-    } catch (error) {
-      return response({ error: error instanceof Error ? error.message : "The voice OTP service is unavailable." }, 502, origin);
     }
   }
 

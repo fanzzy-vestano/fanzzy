@@ -1,5 +1,6 @@
 const TWO_FACTOR_BASE_URL = "https://2factor.in/API/V1";
 const TWO_FACTOR_TIMEOUT_MS = 15_000;
+const TWO_FACTOR_TEMPLATE_NAME = "Fanzzy Login OTP";
 
 type TwoFactorResponse = {
   ok: boolean;
@@ -23,14 +24,15 @@ const readProviderResponse = async (response: Response): Promise<TwoFactorRespon
   try {
     result = JSON.parse(raw) as Record<string, unknown>;
   } catch {
-    throw new TwoFactorSmsError("2Factor returned an invalid response.", "network");
+    if (!response.ok) throw new TwoFactorSmsError("2Factor could not send the SMS code.", "send");
+    return { ok: true, httpStatus: response.status, status: "success", details: raw.trim() };
   }
 
   return {
     ok: response.ok,
     httpStatus: response.status,
     status: String(result.Status ?? result.status ?? "").trim().toLowerCase(),
-    details: String(result.Details ?? result.details ?? result.Message ?? result.message ?? result.Errors ?? result.errors ?? "").trim(),
+    details: String(result.Details ?? result.details ?? result.Message ?? result.message ?? result.Errors ?? result.errors ?? result.Error ?? result.error ?? raw).trim(),
   };
 };
 
@@ -55,7 +57,7 @@ const requestProvider = async (path: string, method: "GET" | "POST", payload?: R
 };
 
 export const sendTwoFactorOtp = async (phone: string, code: string) => {
-  const result = await requestProvider(`/SMS/${encodeURIComponent(phone)}/${encodeURIComponent(code)}`, "POST");
+  const result = await requestProvider(`/SMS/${encodeURIComponent(phone)}/${encodeURIComponent(code)}/${encodeURIComponent(TWO_FACTOR_TEMPLATE_NAME)}`, "POST");
   if (!result.ok || result.status !== "success" || !result.details) {
     throw new TwoFactorSmsError(result.details || "2Factor could not send the SMS code.", "send");
   }

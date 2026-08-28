@@ -13,6 +13,9 @@ type StoredOrder = InventoryOrder & {
   paymentStatus?: "pending" | "paid";
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
+  inventoryReserved?: boolean;
+  inventoryReservedAt?: string;
+  inventoryReleased?: boolean;
   inventoryAdjusted?: boolean;
 };
 
@@ -58,6 +61,19 @@ const supabaseHeaders = (env: WorkerEnv) => {
   };
 };
 
+const inventoryMutationQueue: { current: Promise<void> } = { current: Promise.resolve() };
+const withInventoryMutationLock = async <T>(operation: () => Promise<T>) => {
+  const previous = inventoryMutationQueue.current;
+  let release!: () => void;
+  inventoryMutationQueue.current = new Promise<void>((resolve) => { release = resolve; });
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+  }
+};
+
 async function readOrders(env: WorkerEnv) {
   const { supabaseUrl } = supabaseConfig(env);
   const response = await fetch(`${supabaseUrl}/rest/v1/store_settings?key=eq.orders&select=value`, {
@@ -101,14 +117,16 @@ async function finalizeOrderInventory(
   order.paymentStatus = "paid";
   order.razorpayOrderId = payment.order_id || order.razorpayOrderId;
   order.razorpayPaymentId = payment.id || order.razorpayPaymentId;
-  order.inventoryAdjusted = false;
+  order.inventoryAdjusted = order.inventoryReserved === true && order.inventoryReleased !== true;
   await writeOrders(env, orders);
 
-  try {
-    const adjustment = await adjustOrderInventory(order, supabaseConfig(env));
-    order.inventoryAdjusted = adjustment.complete;
-  } catch {
-    order.inventoryAdjusted = false;
+  if (!order.inventoryAdjusted) {
+    try {
+      const adjustment = await adjustOrderInventory(order, supabaseConfig(env));
+      order.inventoryAdjusted = adjustment.complete;
+    } catch {
+      order.inventoryAdjusted = false;
+    }
   }
   await writeOrders(env, orders);
   return order.inventoryAdjusted === true;
@@ -143,6 +161,66 @@ const createOrder = async (request: Request, env: WorkerEnv) => {
   }
 };
 
+const orderIdFromRequest = async (request: Request) => {
+  let body: { fanzzyOrderId?: unknown };
+  try {
+    body = await request.json() as typeof body;
+  } catch {
+    return { orderId: "", error: "Invalid stock request" };
+  }
+  const orderId = typeof body.fanzzyOrderId === "string" ? body.fanzzyOrderId.trim() : "";
+  if (!/^#FZ-[A-Z0-9-]+$/i.test(orderId)) return { orderId: "", error: "A valid order id is required" };
+  return { orderId };
+};
+
+const reserveStock = async (request: Request, env: WorkerEnv) => {
+  const parsed = await orderIdFromRequest(request);
+  if (parsed.error) return json(request, { error: parsed.error }, 400);
+  try {
+    return await withInventoryMutationLock(async () => {
+      const orders = await readOrders(env);
+      const order = orders.find((candidate) => candidate.id === parsed.orderId);
+      if (!order) return json(request, { error: "Order could not be found for stock reservation." }, 404);
+      if (order.paymentStatus === "paid" || (order.inventoryReserved === true && order.inventoryReleased !== true)) {
+        return json(request, { reserved: order.inventoryReserved === true, reservedAt: order.inventoryReservedAt });
+      }
+      const adjustment = await adjustOrderInventory(order, supabaseConfig(env), "decrement", true);
+      if (!adjustment.complete) return json(request, { error: adjustment.reason || "One or more products do not have enough stock." }, 409);
+      order.inventoryReserved = true;
+      order.inventoryReservedAt = new Date().toISOString();
+      order.inventoryReleased = false;
+      order.inventoryAdjusted = false;
+      await writeOrders(env, orders);
+      return json(request, { reserved: true, reservedAt: order.inventoryReservedAt });
+    });
+  } catch (error) {
+    return json(request, { error: error instanceof Error ? error.message : "Could not reserve product stock" }, 502);
+  }
+};
+
+const releaseStock = async (request: Request, env: WorkerEnv) => {
+  const parsed = await orderIdFromRequest(request);
+  if (parsed.error) return json(request, { error: parsed.error }, 400);
+  try {
+    return await withInventoryMutationLock(async () => {
+      const orders = await readOrders(env);
+      const order = orders.find((candidate) => candidate.id === parsed.orderId);
+      if (!order) return json(request, { error: "Order could not be found for stock release." }, 404);
+      if (order.paymentStatus === "paid" || order.inventoryReserved !== true || order.inventoryReleased === true) {
+        return json(request, { released: order.inventoryReleased === true });
+      }
+      const adjustment = await adjustOrderInventory(order, supabaseConfig(env), "release");
+      if (!adjustment.complete) return json(request, { error: "Reserved stock could not be released." }, 502);
+      order.inventoryReleased = true;
+      order.inventoryAdjusted = false;
+      await writeOrders(env, orders);
+      return json(request, { released: true });
+    });
+  } catch (error) {
+    return json(request, { error: error instanceof Error ? error.message : "Could not release reserved stock" }, 502);
+  }
+};
+
 const verifySignature = async (orderId: string, paymentId: string, signature: string, secret: string) => {
   if (!/^[0-9a-f]{64}$/i.test(signature)) return false;
   const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
@@ -170,7 +248,7 @@ const verifyPayment = async (request: Request, env: WorkerEnv) => {
     if (!response.ok || payment.id !== paymentId || payment.order_id !== orderId) {
       return json(request, { error: payment.error?.description || "Razorpay payment could not be confirmed" }, 502);
     }
-    const inventoryAdjusted = await finalizeOrderInventory(env, payment);
+    const inventoryAdjusted = await withInventoryMutationLock(() => finalizeOrderInventory(env, payment));
     return json(request, { verified: true, razorpayOrderId: orderId, razorpayPaymentId: paymentId, inventoryAdjusted });
   } catch (error) {
     return json(request, { error: error instanceof Error ? error.message : "Razorpay payment confirmation is temporarily unavailable" }, 502);
@@ -184,6 +262,8 @@ export default {
     if (request.method !== "POST") return json(request, { error: "Method not allowed" }, 405);
     const path = new URL(request.url).pathname.replace(/\/$/, "").split("/").pop();
     if (path === "order") return createOrder(request, env);
+    if (path === "reserve-stock") return reserveStock(request, env);
+    if (path === "release-stock") return releaseStock(request, env);
     if (path === "verify") return verifyPayment(request, env);
     return json(request, { error: "Not found" }, 404);
   },
