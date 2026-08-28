@@ -306,15 +306,16 @@ export async function forceLogoutVendor(vendorId: string, actorId: string) {
   await audit("admin", actorId, vendorId, "vendor.force_logout", "vendor", vendorId);
 }
 
-const publicVendorSelect = "id,slug,business_name,logo_url,cover_url,description,featured,vendor_users!inner(id)";
-
 export async function listPublicVendors() {
-  const vendors = await rest<VendorRecord[]>("vendors", `status=eq.Active&store_visibility=eq.Visible&select=${publicVendorSelect}&order=featured.desc,business_name.asc`, { privileged: true });
+  // The only application write path for vendors is the admin-authenticated
+  // POST /api/vendors route. Keep this public read on the publishable key so
+  // the storefront does not depend on the server-only service key.
+  const vendors = await rest<VendorRecord[]>("vendors", "status=eq.Active&store_visibility=eq.Visible&select=id,slug,business_name,logo_url,cover_url,description,featured&order=featured.desc,business_name.asc");
   return vendors.map((vendor) => ({ id: vendor.id, slug: vendor.slug, businessName: vendor.business_name, logoUrl: vendor.logo_url || undefined, coverUrl: vendor.cover_url || undefined, description: vendor.description, featured: vendor.featured }));
 }
 
 export async function getPublicVendor(slug: string) {
-  const vendors = await rest<VendorRecord[]>("vendors", `slug=eq.${encodeURIComponent(slug)}&status=eq.Active&store_visibility=eq.Visible&select=${publicVendorSelect}`, { privileged: true });
+  const vendors = await rest<VendorRecord[]>("vendors", `slug=eq.${encodeURIComponent(slug)}&status=eq.Active&store_visibility=eq.Visible&select=id,slug,business_name,logo_url,cover_url,description,featured`);
   const vendor = vendors[0];
   if (!vendor) throw new VendorDataError("Vendor store not found.", 404);
   const products = await rest<Array<Record<string, unknown>>>("products", `vendor_id=eq.${encodeURIComponent(vendor.id)}&vendor_status=eq.Approved&public_vendor_visible=eq.true&select=*&order=created_at.desc`);
