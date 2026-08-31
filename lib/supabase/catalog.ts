@@ -198,12 +198,11 @@ export async function removeCatalogCategory(name: string) {
 
 export async function renameCatalogCategory(previousName: string, category: CatalogCategory) {
   if (!supabase) return new Error("Supabase is not configured");
-  const { error } = await supabase.from("categories").update({
-    name: category.name,
-    pieces: category.pieces,
-    image: category.image ?? null,
-    sort_order: category.sortOrder ?? 0,
-  }).eq("name", previousName);
+  const updates: Record<string, unknown> = { name: category.name };
+  if (category.pieces !== undefined) updates.pieces = category.pieces;
+  if (category.image !== undefined) updates.image = category.image;
+  if (category.sortOrder !== undefined) updates.sort_order = category.sortOrder;
+  const { error } = await supabase.from("categories").update(updates).eq("name", previousName);
   return error;
 }
 

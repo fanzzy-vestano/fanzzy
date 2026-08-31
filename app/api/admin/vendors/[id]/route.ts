@@ -1,5 +1,5 @@
 import { isAdminSessionValid } from "../../../../../lib/admin-auth";
-import { forceLogoutVendor, resetVendorPassword, VendorDataError } from "../../../../../lib/vendor-server";
+import { deleteVendorAdmin, forceLogoutVendor, resetVendorPassword, VendorDataError } from "../../../../../lib/vendor-server";
 
 export async function PATCH(request: Request, context: { params: Promise<{ id: string }> }) {
   if (!isAdminSessionValid(request)) return Response.json({ error: "Admin authentication required." }, { status: 401 });
@@ -12,4 +12,15 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     const vendor = await updateVendorAdmin(id, body, "admin-session");
     return Response.json({ vendor });
   } catch (error) { const status = error instanceof VendorDataError ? error.status : 500; return Response.json({ error: error instanceof VendorDataError ? error.message : "Could not update vendor." }, { status }); }
+}
+
+export async function DELETE(request: Request, context: { params: Promise<{ id: string }> }) {
+  if (!isAdminSessionValid(request)) return Response.json({ error: "Admin authentication required." }, { status: 401 });
+  const id = (await context.params).id;
+  try {
+    return Response.json({ deleted: await deleteVendorAdmin(id, "admin-session") });
+  } catch (error) {
+    const status = error instanceof VendorDataError ? error.status : 500;
+    return Response.json({ error: error instanceof VendorDataError ? error.message : "Could not delete vendor." }, { status });
+  }
 }

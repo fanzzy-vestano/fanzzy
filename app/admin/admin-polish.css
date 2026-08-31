@@ -716,11 +716,49 @@
   resize: vertical;
 }
 
+.admin-vendor-form .vendor-form-explainer small {
+  color: var(--admin-muted);
+  font-family: var(--sans);
+  font-size: 10px;
+  letter-spacing: 0;
+  line-height: 1.4;
+  text-transform: none;
+}
+
 .admin-vendor-form .vendor-form-grid input:focus,
 .admin-vendor-form .vendor-form-grid select:focus,
 .admin-vendor-form .vendor-form-grid textarea:focus {
   border-color: var(--wine);
   box-shadow: 0 0 0 2px rgba(75, 28, 43, .08);
+}
+
+.admin-vendor-form .vendor-password-control {
+  display: block;
+  position: relative;
+}
+
+.admin-vendor-form .vendor-password-control input {
+  padding-right: 42px;
+}
+
+.admin-vendor-form .vendor-password-toggle {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--admin-muted);
+  cursor: pointer;
+  display: flex;
+  justify-content: center;
+  padding: 6px;
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.admin-vendor-form .vendor-password-toggle:hover,
+.admin-vendor-form .vendor-password-toggle:focus-visible {
+  color: var(--wine);
 }
 
 .admin-vendor-form .vendor-form-wide {
@@ -786,6 +824,10 @@
   gap: 14px;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   padding: 18px 0;
+}
+
+.vendor-admin-rule-form {
+  grid-template-columns: minmax(170px, 1.15fr) minmax(180px, 1.35fr) minmax(150px, 1fr) minmax(150px, 1fr) auto minmax(150px, 1fr);
 }
 
 .vendor-admin-rule-form label,
@@ -3502,6 +3544,26 @@
   padding: 9px;
 }
 
+.order-status-filter {
+  color: var(--admin-muted);
+  display: grid;
+  font-family: var(--mono);
+  font-size: 7px;
+  gap: 6px;
+  letter-spacing: .08em;
+  min-width: 165px;
+  text-transform: uppercase;
+}
+
+.order-status-filter select {
+  background: #f0ebe5;
+  border: 1px solid var(--admin-line);
+  color: var(--wine);
+  font-family: var(--mono);
+  font-size: 9px;
+  padding: 9px;
+}
+
 .order-list {
   display: grid;
 }
@@ -3614,6 +3676,11 @@
 
   .order-date-fields label,
   .order-date-fields input {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .order-status-filter {
     min-width: 0;
     width: 100%;
   }

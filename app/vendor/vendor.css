@@ -41,3 +41,78 @@
 @media(max-width:720px){.vendor-cart-action-bar{align-items:stretch;bottom:max(12px,env(safe-area-inset-bottom));display:block;left:12px;padding:13px;transform:none;width:calc(100% - 24px)}.vendor-cart-action-buttons{display:grid;grid-template-columns:1fr 1fr;margin-top:11px}.vendor-cart-view-button,.vendor-cart-buy-button{align-items:center;display:flex;justify-content:center;min-height:40px}.vendor-cart-dismiss-button{position:absolute;right:8px;top:8px}}
 .vendor-profile-card{max-width:1120px;padding:0;overflow:hidden}.vendor-profile-heading{align-items:center;background:linear-gradient(135deg,#fff,#f8eee8);border-bottom:1px solid #eadfd8;display:flex;gap:18px;padding:30px 34px}.vendor-profile-avatar{align-items:center;background:var(--wine);border:6px solid #ead5c8;border-radius:50%;color:#fff8ef;display:flex;font-family:var(--serif);font-size:38px;height:76px;justify-content:center;width:76px}.vendor-profile-heading .eyebrow{margin-bottom:7px}.vendor-profile-heading h2{color:var(--wine);font-family:var(--serif);font-size:clamp(1.7rem,3vw,2.5rem);font-weight:500;letter-spacing:-.04em;margin:0 0 8px}.vendor-profile-status{background:#e7f2e8;border:1px solid #bcd4be;border-radius:999px;color:#316146;display:inline-block;font-family:var(--mono);font-size:9px;letter-spacing:.08em;padding:6px 10px;text-transform:uppercase}.vendor-profile-grid{display:grid;gap:0 24px;grid-template-columns:repeat(2,minmax(0,1fr));padding:8px 34px 24px}.vendor-profile-grid>div{border-bottom:1px solid #eee3de;display:flex;flex-direction:column;gap:7px;min-width:0;padding:18px 0}.vendor-profile-grid>div:nth-last-child(-n+2){border-bottom:0}.vendor-profile-grid span{color:#8a7379;font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase}.vendor-profile-grid strong{color:var(--ink);font-size:14px;font-weight:600;overflow-wrap:anywhere}.vendor-profile-field-wide{grid-column:1/-1}.vendor-profile-card+.vendor-data-card{margin-top:0}.vendor-sidebar{box-shadow:10px 0 28px rgba(50,23,36,.08);position:sticky;top:0}.vendor-sidebar-name{font-family:var(--serif);font-size:20px;letter-spacing:-.03em}.vendor-sidebar button{font-size:14px;transition:background .2s ease,transform .2s ease}.vendor-sidebar button.active{box-shadow:inset 3px 0 #d6ad78}.vendor-sidebar button:hover{transform:translateX(2px)}
 @media(max-width:720px){.vendor-profile-heading{align-items:flex-start;padding:24px 20px}.vendor-profile-avatar{font-size:30px;height:60px;width:60px}.vendor-profile-grid{display:block;padding:4px 20px 18px}.vendor-profile-grid>div:nth-last-child(-n+2){border-bottom:1px solid #eee3de}.vendor-profile-grid>div:last-child{border-bottom:0}.vendor-profile-field-wide{grid-column:auto}.vendor-sidebar{position:relative}}
+
+.vendor-category-list .vendor-chip-list,
+.vendor-category-workspace > .vendor-chip-list {
+  align-items: stretch;
+  gap: 12px;
+}
+
+.vendor-category-list .vendor-chip,
+.vendor-category-workspace > .vendor-chip-list .vendor-chip {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  min-width: 180px;
+}
+
+.vendor-category-actions {
+  align-items: center;
+  display: inline-flex;
+  gap: 7px;
+}
+
+.vendor-category-actions button {
+  background: #fff;
+  border: 1px solid #b99da0;
+  color: #321724;
+  cursor: pointer;
+  font-size: .7rem;
+  padding: 6px 8px;
+}
+
+.vendor-category-actions button:hover:not(:disabled) {
+  background: #f8ece8;
+}
+
+.vendor-category-actions .vendor-category-delete {
+  border-color: #b65f63;
+  color: #9a3f46;
+}
+
+.vendor-category-actions button:disabled {
+  cursor: wait;
+  opacity: .55;
+}
+
+@media(max-width:720px) {
+  .vendor-category-list .vendor-chip,
+  .vendor-category-workspace > .vendor-chip-list .vendor-chip {
+    min-width: 0;
+    width: 100%;
+  }
+}
+
+.vendor-payout-summary {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  margin: 0 0 18px;
+}
+
+.vendor-payout-summary article {
+  background: #f8f0ea;
+  border: 1px solid #eadfd8;
+  padding: 16px;
+}
+
+.vendor-payout-summary small,
+.vendor-payout-summary strong {
+  display: block;
+}
+
+.vendor-payout-summary strong {
+  font-size: 1.3rem;
+  margin-top: 8px;
+}

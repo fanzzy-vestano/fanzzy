@@ -304,6 +304,7 @@ type OrderStatus =
   | "Shipped"
   | "Delivered"
   | "Cancelled";
+type OrderStatusFilter = "all" | OrderStatus;
 type PromotionCartLine = { groupId: string; offerId: string; role: "paid" | "free" | "bundle"; label: string; regularPrice: number; linePrice: number };
 type OrderRecord = {
   id: string;
@@ -335,6 +336,7 @@ const isDemoOrder = (order: { id?: string }) => /^#FZ-104[4-8]$/.test(String(ord
 // Only verified payments belong in the operational Orders and Reports views.
 // Pending checkout records remain stored for payment recovery but stay hidden.
 const hasConfirmedPayment = (order: Pick<OrderRecord, "paymentStatus" | "razorpayPaymentId">) => order.paymentStatus === "paid" || Boolean(order.razorpayPaymentId);
+const orderListsEqual = (left: OrderRecord[], right: OrderRecord[]) => left.length === right.length && left.every((order, index) => order.id === right[index]?.id && JSON.stringify(order) === JSON.stringify(right[index]));
 const siteBasePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 const siteAsset = (name: string) => `${siteBasePath}/${name}`;
 const createSku = (
@@ -2453,7 +2455,6 @@ function ReportsWorkspace({
   const periodLabel = period === "today" ? "Today" : period === "this-week" ? "This week" : period === "this-month" ? "This month" : period === "last-month" ? "Last month" : period === "all-time" ? "All dates" : `${fromDate || "Start"} → ${toDate || "End"}`;
   const maxCategoryUnits = Math.max(1, report.categoryRows[0]?.units ?? 0);
   const showProductReport = view === "overview" || view === "item" || view === "top-selling";
-  const showSalesReport = view === "sales";
   const showCategoryReport = view === "overview" || view === "category";
   const showInventoryReport = view === "overview" || view === "inventory";
   const showOrderReport = view === "overview" || view === "orders";
@@ -2559,10 +2560,6 @@ function ReportsWorkspace({
         <div className="report-kpi"><small>Cost value</small><strong>{formatAdminCurrency(report.costValue)}</strong><span>Current stock at cost</span></div>
       </div>
       <div className="reports-grid">
-        {showSalesReport && <article className="report-card report-card-wide">
-          <div className="report-card-head"><div><p className="eyebrow">SALES REPORT</p><h3>Daily sales performance</h3></div><span>{report.dailyRows.length} active dates</span></div>
-          {report.dailyRows.length ? <div className="report-table"><div className="report-row sales-report-header"><span><strong>Date</strong></span><em>Orders / units</em><strong>Revenue</strong></div>{report.dailyRows.map((day) => <div className="report-row sales-report-row" key={day.date}><span><strong>{day.date}</strong><small>{day.orders} confirmed orders</small></span><em>{day.units} units</em><strong>{formatAdminCurrency(day.revenue)}</strong></div>)}</div> : <div className="report-empty">No confirmed sales in this period.</div>}
-        </article>}
         {showProductReport && <article className="report-card report-card-wide">
           <div className="report-card-head"><div><p className="eyebrow">PRODUCT PERFORMANCE</p><h3>{view === "top-selling" ? "Top-selling items" : "Item performance"}</h3></div><span>Units sold</span></div>
           {report.hasItemSales ? <div className="report-table">{report.topProducts.map((row, index) => <div className="report-row" key={row.product.sku}><b>{String(index + 1).padStart(2, "0")}</b><span><strong>{row.product.name}</strong><small>{row.product.category}</small></span><em>{row.units} units</em><strong>{formatAdminCurrency(row.revenue)}</strong></div>)}</div> : <div className="report-empty">Item-level sales will appear here after orders include products.</div>}
@@ -2591,12 +2588,11 @@ function ReportsWorkspace({
         <div className="report-detail-head"><div><p className="eyebrow">FULL BREAKDOWN</p><h3>{detailTitle}</h3><span>{periodLabel} · {filteredOrders.length} confirmed orders · {products.length} catalog items</span></div><span className="report-detail-note">Use Export report for the same detail in CSV format.</span></div>
         {view === "overview" && <div className="report-detail-split">
           <div className="report-detail-block"><div className="report-detail-block-head"><strong>Daily sales detail</strong><span>{report.dailyRows.length} active dates</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Date</th><th>Orders</th><th>Units</th><th>Revenue</th></tr></thead><tbody>{report.dailyRows.length ? report.dailyRows.map((day) => <tr key={day.date}><td>{day.date}</td><td>{day.orders}</td><td>{day.units}</td><td>{formatAdminCurrency(day.revenue)}</td></tr>) : <tr><td colSpan={4}>No confirmed sales in this period.</td></tr>}</tbody></table></div></div>
-          <div className="report-detail-block"><div className="report-detail-block-head"><strong>Payment &amp; fulfilment</strong><span>Order mix</span></div><div className="report-mini-list">{report.payments.map((payment) => <div key={payment.name}><span>{payment.name}<small>{formatAdminCurrency(payment.revenue)}</small></span><strong>{payment.count}</strong></div>)}{report.fulfilment.map((method) => <div key={method.name}><span>{method.name}<small>Fulfilment method</small></span><strong>{method.count}</strong></div>)}</div></div>
         </div>}
         {view === "sales" && <div className="report-detail-split">
           <div className="report-detail-block"><div className="report-detail-block-head"><strong>Daily sales detail</strong><span>{report.dailyRows.length} active dates</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Date</th><th>Orders</th><th>Units</th><th>Revenue</th></tr></thead><tbody>{report.dailyRows.length ? report.dailyRows.map((day) => <tr key={day.date}><td>{day.date}</td><td>{day.orders}</td><td>{day.units}</td><td>{formatAdminCurrency(day.revenue)}</td></tr>) : <tr><td colSpan={4}>No confirmed sales in this period.</td></tr>}</tbody></table></div></div>
-          <div className="report-detail-block"><div className="report-detail-block-head"><strong>Payment &amp; fulfilment</strong><span>Order mix</span></div><div className="report-mini-list">{report.payments.map((payment) => <div key={payment.name}><span>{payment.name}<small>{formatAdminCurrency(payment.revenue)}</small></span><strong>{payment.count}</strong></div>)}{report.fulfilment.map((method) => <div key={method.name}><span>{method.name}<small>Fulfilment method</small></span><strong>{method.count}</strong></div>)}</div></div>
         </div>}
+        {view === "sales" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Payment &amp; fulfilment</strong><span>Order mix</span></div><div className="report-mini-list">{report.payments.map((payment) => <div key={payment.name}><span>{payment.name}<small>{formatAdminCurrency(payment.revenue)}</small></span><strong>{payment.count}</strong></div>)}{report.fulfilment.map((method) => <div key={method.name}><span>{method.name}<small>Fulfilment method</small></span><strong>{method.count}</strong></div>)}</div></div>}
         {view === "sales" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Sales by product</strong><span>{report.salesProductRows.length} product lines</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Invoice number</th><th>Order ID</th><th>Customer name</th><th>Date</th><th>Product</th><th>SKU</th><th>Units</th><th>Item rate</th><th>Taxable sales</th><th>CGST</th><th>SGST</th><th>Gross sales</th><th>Gross profit</th></tr></thead><tbody>{report.salesProductRows.length ? report.salesProductRows.map((row, index) => <tr key={`${row.orderId}-${row.sku}-${index}`}><td>{row.invoiceNumber}</td><td>{row.orderId}</td><td>{row.customerName}</td><td>{row.date}</td><td>{row.productName}</td><td>{row.sku || "—"}</td><td>{row.units}</td><td>{formatMoney(row.unitRate)}</td><td>{formatMoney(row.taxableSales)}</td><td>{formatMoney(row.cgst)}</td><td>{formatMoney(row.sgst)}</td><td>{formatMoney(row.grossSales)}</td><td>{row.grossProfit === null ? "Unavailable" : formatMoney(row.grossProfit)}</td></tr>) : <tr><td colSpan={13}>No confirmed sales in this period.</td></tr>}</tbody></table></div><p className="report-help">Item rate is the gross selling rate for one unit. CGST and SGST are split equally from the GST included in each product sale. Gross profit is taxable sales less product cost. Decimal values are shown up to 2 places.</p></div>}
         {view === "overview" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Category summary</strong><span>{report.categoryRows.length} categories</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Category</th><th>Products</th><th>Units sold</th><th>Revenue</th><th>Profit</th><th>Stock value</th><th>Cost value</th></tr></thead><tbody>{report.categoryRows.map((category) => <tr key={category.name}><td>{category.name}</td><td>{category.products}</td><td>{category.units}</td><td>{formatAdminCurrency(category.revenue)}</td><td>{formatAdminCurrency(category.profit)}</td><td>{formatAdminCurrency(category.stockValue)}</td><td>{formatAdminCurrency(category.costValue)}</td></tr>)}</tbody></table></div></div>}
         {view === "category" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Every category</strong><span>{report.categoryRows.length} rows</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Category</th><th>Products</th><th>Units sold</th><th>Revenue</th><th>Profit</th><th>Stock units</th><th>Stock value</th><th>Cost value</th></tr></thead><tbody>{report.categoryRows.map((category) => <tr key={category.name}><td>{category.name}</td><td>{category.products}</td><td>{category.units}</td><td>{formatAdminCurrency(category.revenue)}</td><td>{formatAdminCurrency(category.profit)}</td><td>{category.stockUnits}</td><td>{formatAdminCurrency(category.stockValue)}</td><td>{formatAdminCurrency(category.costValue)}</td></tr>)}</tbody></table></div></div>}
@@ -4278,6 +4274,7 @@ function OrdersWorkspace({
 }) {
   const [orders, setOrders] = useState<OrderRecord[]>(adminOrders);
   const [filter, setFilter] = useState<OrderDateFilter>("this-month");
+  const [statusFilter, setStatusFilter] = useState<OrderStatusFilter>("all");
   const [fromDate, setFromDate] = useState(() => `${reportDateKey(new Date()).slice(0, 8)}01`);
   const [toDate, setToDate] = useState(() => reportDateKey(new Date()));
   const [selectedOrder, setSelectedOrder] = useState<OrderRecord | null>(null);
@@ -4309,7 +4306,9 @@ function OrdersWorkspace({
       } catch {
         window.localStorage.removeItem("fanzzy-orders");
       }
-      if (localOrders.length) setOrders(localOrders);
+      // Show locally cached orders only while the first live request is loading.
+      // Do not replace an already rendered list on every polling cycle.
+      if (localOrders.length) setOrders((current) => current.length ? current : localOrders);
       const remote = await fetchStoreOrders<OrderRecord>();
       if (remote.error) {
         setOrdersSyncError("Live order storage is unavailable. Records may be incomplete.");
@@ -4321,7 +4320,8 @@ function OrdersWorkspace({
       const merged = new Map<string, OrderRecord>();
       remote.data?.forEach((order) => { if (order?.id && !isDemoOrder(order) && hasConfirmedPayment(order)) merged.set(order.id, order); });
       localOrders.forEach((order) => { if (!merged.has(order.id)) merged.set(order.id, order); });
-      setOrders(Array.from(merged.values()));
+      const nextOrders = Array.from(merged.values());
+      setOrders((current) => orderListsEqual(current, nextOrders) ? current : nextOrders);
       const [catalog, variantsRemote] = await Promise.all([fetchCatalogProducts(), fetchStoreSetting("productVariants")]);
       let variantsMap: Record<string, ProductVariant[]> = {};
       if (variantsRemote.value) {
@@ -4333,7 +4333,7 @@ function OrdersWorkspace({
         }
       }
       if (!catalog.error && catalog.data) {
-        setCatalogProducts(catalog.data.filter((product) => !isDemoProduct(product)).map((product) => ({
+        const nextCatalogProducts = catalog.data.filter((product) => !isDemoProduct(product)).map((product) => ({
           id: product.sku.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
           name: product.name,
           sku: product.sku,
@@ -4343,9 +4343,10 @@ function OrdersWorkspace({
           status: product.status,
           image: product.image || adminPlaceholderImage,
           variants: Array.isArray(variantsMap[product.sku]) ? variantsMap[product.sku].map((variant, index) => ({ ...variant, name: variant.name || `Option ${index + 1}` })) : [],
-        })));
+        }));
+        setCatalogProducts((current) => JSON.stringify(current) === JSON.stringify(nextCatalogProducts) ? current : nextCatalogProducts);
       }
-      if (!remote.error) setLastOrdersSync(new Date());
+      if (!remote.error) setLastOrdersSync((current) => current && Date.now() - current.getTime() < 30_000 ? current : new Date());
       } catch {
         setOrdersSyncError("Live order storage is unavailable. Records may be incomplete.");
       } finally {
@@ -4407,13 +4408,18 @@ function OrdersWorkspace({
       .filter((order) => {
         const orderDate = String(order.date || "").slice(0, 10);
         const matchesDate = orderDate >= from && orderDate <= to;
-        return matchesDate;
+        const matchesStatus = statusFilter === "all" || order.status === statusFilter;
+        return matchesDate && matchesStatus;
       })
-      // Orders are stored newest-first. The stable sort keeps that insertion
-      // order for orders placed on the same day while always putting newer
-      // dates ahead of older dates.
-      .sort((left, right) => String(right.date || "").slice(0, 10).localeCompare(String(left.date || "").slice(0, 10)));
-  }, [orders, filter, fromDate, toDate]);
+      // Keep a deterministic newest-first order so polling cannot reshuffle
+      // same-day rows when the remote array arrives in a different order.
+      .sort((left, right) => {
+        const dateOrder = String(right.date || "").slice(0, 10).localeCompare(String(left.date || "").slice(0, 10));
+        if (dateOrder) return dateOrder;
+        const createdOrder = String(right.createdAt || "").localeCompare(String(left.createdAt || ""));
+        return createdOrder || String(right.id || "").localeCompare(String(left.id || ""));
+      });
+  }, [orders, filter, fromDate, statusFilter, toDate]);
 
   const formatOrderDate = (value: string) =>
     new Intl.DateTimeFormat("en-IN", {
@@ -4604,6 +4610,17 @@ function OrdersWorkspace({
             </label>
           </div>
         )}
+        <label className="order-status-filter">
+          Status
+          <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as OrderStatusFilter)}>
+            <option value="all">All statuses</option>
+            <option value="Processing">Processing</option>
+            <option value="Packed">Packed</option>
+            <option value="Shipped">Shipped</option>
+            <option value="Delivered">Delivered</option>
+            <option value="Cancelled">Cancelled</option>
+          </select>
+        </label>
       </div>
       <div className="module-summary">
         <span>
@@ -4622,6 +4639,7 @@ function OrdersWorkspace({
                 .replace("all-time", "All dates")
                 .replace("today", "Today")}
         </span>
+        {statusFilter !== "all" && <span>Status: {statusFilter}</span>}
       </div>
       <div className="order-list">
         {filteredOrders.map((order) => (

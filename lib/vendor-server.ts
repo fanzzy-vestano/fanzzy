@@ -107,6 +107,7 @@ async function updateStoreSettingMap(key: string, sku: string, value: unknown) {
 }
 
 const numericProductValue = (value: unknown) => Math.max(0, Number(String(value ?? "").replace(/[^0-9.-]/g, "")) || 0);
+const booleanInput = (value: unknown) => value === true || value === "true" || value === 1 || value === "1";
 
 async function saveVendorProductMetadata(sku: string, data: Record<string, unknown>) {
   const rawVariants = Array.isArray(data.variants) ? data.variants : [];
@@ -263,6 +264,12 @@ export async function createVendor(input: VendorInput, actorId: string) {
   const password = String(input.initialPassword || "");
   if (!businessName || !ownerName || !/^\S+@\S+\.\S+$/.test(loginEmail)) throw new VendorDataError("Business name, owner name, and a valid login email are required.", 400);
   if (password.length < 8) throw new VendorDataError("Vendor passwords must be at least 8 characters.", 400);
+  const existingVendor = await rest<Array<{ id: string }>>(
+    "vendors",
+    `login_email=eq.${encodeURIComponent(loginEmail)}&select=id&limit=1`,
+    { privileged: true },
+  );
+  if (existingVendor[0]) throw new VendorDataError("A vendor with this login email already exists.", 409);
   const slugBase = slugifyVendorName(businessName);
   const slug = `${slugBase}-${randomBytes(3).toString("hex")}`;
   const vendorRows = await rest<VendorRecord[]>("vendors", "", { privileged: true, method: "POST", body: [{
@@ -270,7 +277,7 @@ export async function createVendor(input: VendorInput, actorId: string) {
     phone: String(input.phone || "").trim(), whatsapp: String(input.whatsappNumber || input.whatsapp || "").trim(),
     logo_url: input.logoUrl || input.logo_url || null, cover_url: input.coverUrl || input.cover_url || null,
     description: String(input.description || "").trim(), address: String(input.address || "").trim(), city: String(input.city || "").trim(), state: String(input.state || "").trim(), pin_code: String(input.pin_code || input.pinCode || "").trim(), gst_number: String(input.gst_number || input.gstNumber || "").trim(), pan_number: String(input.pan_number || input.panNumber || "").trim(),
-    status: input.status || "Active", store_visibility: input.store_visibility || input.storeVisibility || "Hidden", featured: Boolean(input.featured), automatic_approval: Boolean(input.automatic_approval || input.automaticApproval), commission_mode: input.commission_mode || "percentage", commission_rate: Number(input.commissionPercentage ?? input.commission_rate ?? 0) || 0, commission_fixed: Number(input.commission_fixed || 0) || 0,
+    status: input.status || "Active", store_visibility: input.store_visibility || input.storeVisibility || "Visible", featured: booleanInput(input.featured), automatic_approval: booleanInput(input.automatic_approval) || booleanInput(input.automaticApproval), commission_mode: input.commission_mode || "percentage", commission_rate: Number(input.commissionPercentage ?? input.commission_rate ?? 0) || 0, commission_fixed: Number(input.commission_fixed || 0) || 0,
   }], headers: { Prefer: "return=representation" } });
   const vendor = vendorRows[0];
   if (!vendor) throw new VendorDataError("Vendor could not be created.");
@@ -367,15 +374,39 @@ export async function updateVendorAdmin(vendorId: string, data: Record<string, u
   if (data.storeVisibility !== undefined && !["Visible", "Hidden"].includes(String(data.storeVisibility))) throw new VendorDataError("Invalid store visibility.", 400);
   const allowed: Record<string, unknown> = {};
   const fields: Array<[string, string]> = [["businessName", "business_name"], ["ownerName", "owner_name"], ["phone", "phone"], ["whatsappNumber", "whatsapp"], ["description", "description"], ["address", "address"], ["city", "city"], ["state", "state"], ["pinCode", "pin_code"], ["gstNumber", "gst_number"], ["panNumber", "pan_number"], ["logoUrl", "logo_url"], ["coverUrl", "cover_url"], ["status", "status"], ["storeVisibility", "store_visibility"], ["featured", "featured"], ["automaticApproval", "automatic_approval"], ["commissionMode", "commission_mode"], ["commissionPercentage", "commission_rate"], ["commissionFixed", "commission_fixed"]];
-  for (const [input, output] of fields) if (data[input] !== undefined) allowed[output] = ["featured", "automatic_approval"].includes(output) ? Boolean(data[input]) : ["commission_rate", "commission_fixed"].includes(output) ? Number(data[input]) || 0 : data[input];
+  for (const [input, output] of fields) if (data[input] !== undefined) allowed[output] = ["featured", "automatic_approval"].includes(output) ? booleanInput(data[input]) : ["commission_rate", "commission_fixed"].includes(output) ? Number(data[input]) || 0 : data[input];
   allowed.updated_at = new Date().toISOString();
   const rows = await rest<VendorRecord[]>("vendors", `id=eq.${encodeURIComponent(vendorId)}`, { privileged: true, method: "PATCH", body: allowed, headers: { Prefer: "return=representation" } });
   if (!rows[0]) throw new VendorDataError("Vendor not found.", 404);
   if (allowed.store_visibility !== undefined) {
     await rest("products", `vendor_id=eq.${encodeURIComponent(vendorId)}`, { privileged: true, method: "PATCH", body: { public_vendor_visible: allowed.store_visibility === "Visible", updated_at: new Date().toISOString() } });
   }
+  if (allowed.automatic_approval === true) {
+    await rest("products", `vendor_id=eq.${encodeURIComponent(vendorId)}&vendor_status=eq.${encodeURIComponent("Pending Approval")}`, { privileged: true, method: "PATCH", body: { vendor_status: "Approved", vendor_rejection_reason: null, status: "Published", public_vendor_visible: true, updated_at: new Date().toISOString() } });
+  }
   await audit("admin", actorId, vendorId, "vendor.updated", "vendor", vendorId, { changedFields: Object.keys(allowed).filter((key) => key !== "updated_at") });
   return rows[0];
+}
+
+export async function deleteVendorAdmin(vendorId: string, actorId: string) {
+  const id = String(vendorId || "").trim();
+  if (!id) throw new VendorDataError("Vendor id is required.", 400);
+  const vendors = await rest<Array<{ id: string; business_name: string }>>(
+    "vendors",
+    `id=eq.${encodeURIComponent(id)}&select=id,business_name`,
+    { privileged: true },
+  );
+  const vendor = vendors[0];
+  if (!vendor) throw new VendorDataError("Vendor not found.", 404);
+  const payouts = await rest<Array<{ id: string }>>(
+    "vendor_payouts",
+    `vendor_id=eq.${encodeURIComponent(id)}&select=id&limit=1`,
+    { privileged: true },
+  );
+  if (payouts[0]) throw new VendorDataError("This vendor cannot be deleted because payout records already exist.", 409);
+  await audit("admin", actorId, id, "vendor.deleted", "vendor", id, { businessName: vendor.business_name });
+  await rest("vendors", `id=eq.${encodeURIComponent(id)}`, { privileged: true, method: "DELETE" });
+  return { id, businessName: vendor.business_name };
 }
 
 export async function getVendorProducts(vendorId: string, privileged = true) {
