@@ -2,17 +2,17 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 export type CustomerSmsIdentity = { id: string; phone: string };
 
-type PendingOtp = { phone: string; code: string; expiresAt: number };
+type PendingOtp = { phone: string; codeHash: string; expiresAt: number };
+type PendingOtpInput = { phone: string; code: string; expiresAt: number };
 type SignedValue = CustomerSmsIdentity | PendingOtp;
 
 const pendingCookie = "fanzzy_customer_otp";
 const sessionCookie = "fanzzy_customer_session";
 const isProduction = process.env.NODE_ENV === "production";
 
-export const getTwoFactorApiKey = () =>
-  process.env.TWO_FACTOR_API_KEY?.trim() || "";
+export const getCustomerAuthSecret = () => process.env.CUSTOMER_AUTH_SECRET?.trim() || "";
 
-const secret = () => process.env.CUSTOMER_AUTH_SECRET || getTwoFactorApiKey();
+const secret = getCustomerAuthSecret;
 
 export const OTP_RESEND_COOLDOWN_SECONDS = 60;
 export const OTP_EXPIRES_MS = 5 * 60 * 1000;
@@ -31,6 +31,8 @@ const base64Url = (value: string) => Buffer.from(value, "utf8").toString("base64
 const fromBase64Url = (value: string) => Buffer.from(value, "base64url").toString("utf8");
 
 const sign = (payload: string) => createHmac("sha256", secret()).update(payload).digest("base64url");
+const hashOtp = ({ phone, code, expiresAt }: PendingOtpInput) =>
+  createHmac("sha256", secret()).update(`otp:${phone}:${expiresAt}:${code}`).digest("base64url");
 
 const encode = (value: SignedValue) => {
   const payload = base64Url(JSON.stringify(value));
@@ -150,12 +152,23 @@ export const consumeOtpVerifyRateLimit = (request: Request, phone: string) => co
 
 export const displayMobileNumber = (phone: string) => `+${phone}`;
 
-export const createPendingOtpCookie = (pending: PendingOtp) =>
-  cookie(pendingCookie, encode(pending), Math.max(1, Math.ceil((pending.expiresAt - Date.now()) / 1000)));
+export const createPendingOtpCookie = (pending: PendingOtpInput) =>
+  cookie(
+    pendingCookie,
+    encode({ phone: pending.phone, codeHash: hashOtp(pending), expiresAt: pending.expiresAt }),
+    Math.max(1, Math.ceil((pending.expiresAt - Date.now()) / 1000)),
+  );
 
 export const getPendingOtp = (request: Request) => {
   const pending = decode<PendingOtp>(getCookie(request, pendingCookie));
   return pending && pending.expiresAt > Date.now() ? pending : null;
+};
+
+export const matchesPendingOtp = (pending: PendingOtp, code: string) => {
+  if (!secret() || !pending.codeHash) return false;
+  const expected = Buffer.from(hashOtp({ phone: pending.phone, code, expiresAt: pending.expiresAt }));
+  const received = Buffer.from(pending.codeHash);
+  return expected.length === received.length && timingSafeEqual(expected, received);
 };
 
 export const createCustomerSessionCookie = (phone: string) =>

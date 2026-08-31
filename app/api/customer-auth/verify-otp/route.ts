@@ -1,4 +1,4 @@
-import { clearPendingOtpCookie, consumeOtpVerifyRateLimit, createCustomerSessionCookie, getPendingOtp } from "../../../../lib/customer-sms-auth";
+import { clearPendingOtpCookie, consumeOtpVerifyRateLimit, createCustomerSessionCookie, getPendingOtp, matchesPendingOtp } from "../../../../lib/customer-sms-auth";
 
 const json = (body: Record<string, unknown>, status = 200, headers?: HeadersInit) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
@@ -21,11 +21,11 @@ export async function POST(request: Request) {
   try {
     code = String((await request.json() as { code?: unknown }).code || "").replace(/\D/g, "");
   } catch {
-    return json({ error: "Enter the voice-call code" }, 400);
+    return json({ error: "Enter the SMS code" }, 400);
   }
-  if (code.length !== 6) return json({ error: "Enter the voice-call code" }, 400);
+  if (code.length !== 6) return json({ error: "Enter the SMS code" }, 400);
 
-  if (code !== pending.code) {
+  if (!matchesPendingOtp(pending, code)) {
     return json({ error: "Invalid OTP. Please try again." }, 401);
   }
 

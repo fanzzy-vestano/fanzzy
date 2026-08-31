@@ -55,6 +55,6 @@ GitHub Pages serves the storefront statically and cannot execute the app's `/api
 https://pdrcrkxeyqxqgpwfxqpu.supabase.co/functions/v1/customer-auth
 ```
 
-Deploy `supabase/functions/customer-auth/index.ts` to the existing Supabase project and configure the function secrets `TWO_FACTOR_API_KEY` and `CUSTOMER_AUTH_SECRET`. The function sends SMS-only OTPs through the approved 2Factor custom OTP template. Keep the 2Factor key in the function secrets; never put it in `NEXT_PUBLIC_*` variables or the GitHub Pages build.
+Deploy `supabase/functions/customer-auth/index.ts` to the existing Supabase project and configure the function secrets `SANGAMAM_SMS_ACCESS_TOKEN`, `SANGAMAM_SMS_ACCESS_TOKEN_KEY`, and `CUSTOMER_AUTH_SECRET`. The function signs requests to Sangamam FastSMS and sends the approved `FANZZY` transactional DLT template. The optional `SANGAMAM_SMS_HEADER`, `SANGAMAM_SMS_ENTITY_ID`, and `SANGAMAM_SMS_TEMPLATE_ID` secrets override the account defaults in `.env.example`. Keep all provider credentials server-side; never put them in `NEXT_PUBLIC_*` variables or the GitHub Pages build.
 
 
