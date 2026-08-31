@@ -627,9 +627,7 @@ const menu = [
 type AdminAuthResponse = { authenticated?: boolean; error?: string; message?: string; resetReady?: boolean };
 const isGitHubPagesHost = () =>
   typeof window !== "undefined" &&
-  (window.location.hostname === "fanzzy.in" ||
-    window.location.hostname === "www.fanzzy.in" ||
-    window.location.hostname.endsWith(".github.io"));
+  window.location.hostname.endsWith(".github.io");
 const staticAdminEmail = process.env.NEXT_PUBLIC_STATIC_ADMIN_EMAIL ?? "";
 const staticAdminPassword = process.env.NEXT_PUBLIC_STATIC_ADMIN_PASSWORD ?? "";
 const adminRecoveryEmail = (staticAdminEmail || "fanzzy@vestanoretail.com").trim().toLowerCase();
