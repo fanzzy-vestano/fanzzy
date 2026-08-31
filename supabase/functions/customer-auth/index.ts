@@ -112,9 +112,15 @@ const sendOtp = async (phone: string) => {
   const apiKey = Deno.env.get("TWO_FACTOR_API_KEY")?.trim() || "";
   if (!apiKey) throw new Error("SMS provider is not configured.");
   const code = String(Math.floor(100000 + crypto.getRandomValues(new Uint32Array(1))[0] % 900000));
-  const providerResponse = await fetch(`${TWO_FACTOR_BASE_URL}/${encodeURIComponent(apiKey)}/SMS/${encodeURIComponent(phone)}/${encodeURIComponent(code)}/${encodeURIComponent(TWO_FACTOR_TEMPLATE_NAME)}`, {
+  const providerResponse = await fetch(`${TWO_FACTOR_BASE_URL}/${encodeURIComponent(apiKey)}/ADDON_SERVICES/SEND/TSMS`, {
     method: "POST",
-    headers: { accept: "application/json" },
+    headers: { accept: "application/json", "content-type": "application/json" },
+    body: JSON.stringify({
+      From: "FANZZY",
+      To: phone,
+      TemplateName: TWO_FACTOR_TEMPLATE_NAME,
+      VAR1: code,
+    }),
   });
   const rawProviderResponse = await providerResponse.text();
   let providerResult: Record<string, unknown> = {};

@@ -1,6 +1,6 @@
 const TWO_FACTOR_BASE_URL = "https://2factor.in/API/V1";
 const TWO_FACTOR_TIMEOUT_MS = 15_000;
-const TWO_FACTOR_TEMPLATE_NAME = "Fanzzy DLT Login OTP SMS";
+const TWO_FACTOR_TEMPLATE_NAME = "Fanzzy Login OTP";
 
 type TwoFactorResponse = {
   ok: boolean;
