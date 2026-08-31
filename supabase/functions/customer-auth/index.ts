@@ -4,7 +4,6 @@ declare const Deno: {
 };
 
 const TWO_FACTOR_BASE_URL = "https://2factor.in/API/V1";
-const TWO_FACTOR_TEMPLATE_NAME = "Fanzzy Login OTP";
 const OTP_EXPIRES_MS = 5 * 60 * 1000;
 const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
 const OTP_WINDOW_MS = 15 * 60 * 1000;
@@ -110,29 +109,24 @@ const checkRateLimit = (limits: Map<string, RateEntry>, key: string, windowMs: n
 
 const sendOtp = async (phone: string) => {
   const apiKey = Deno.env.get("TWO_FACTOR_API_KEY")?.trim() || "";
-  if (!apiKey) throw new Error("SMS provider is not configured.");
+  if (!apiKey) throw new Error("Voice OTP provider is not configured.");
   const code = String(Math.floor(100000 + crypto.getRandomValues(new Uint32Array(1))[0] % 900000));
-  const providerResponse = await fetch(`${TWO_FACTOR_BASE_URL}/${encodeURIComponent(apiKey)}/ADDON_SERVICES/SEND/TSMS`, {
-    method: "POST",
-    headers: { accept: "application/json", "content-type": "application/json" },
-    body: JSON.stringify({
-      From: "FANZZY",
-      To: phone,
-      TemplateName: TWO_FACTOR_TEMPLATE_NAME,
-      VAR1: code,
-    }),
+  const voicePhone = phone.startsWith("91") ? phone.slice(2) : phone;
+  const providerResponse = await fetch(`${TWO_FACTOR_BASE_URL}/${encodeURIComponent(apiKey)}/VOICE/${encodeURIComponent(voicePhone)}/${encodeURIComponent(code)}`, {
+    method: "GET",
+    headers: { accept: "application/json" },
   });
   const rawProviderResponse = await providerResponse.text();
   let providerResult: Record<string, unknown> = {};
   try {
     providerResult = JSON.parse(rawProviderResponse) as Record<string, unknown>;
   } catch {
-    if (!providerResponse.ok) throw new Error("The SMS provider could not send the code.");
+    if (!providerResponse.ok) throw new Error("The voice OTP provider could not start the call.");
   }
   const providerStatus = String(providerResult.Status ?? providerResult.status ?? providerResult.StatusCode ?? providerResult.statusCode ?? "").trim().toLowerCase();
   const providerDetails = String(providerResult.Details ?? providerResult.details ?? providerResult.Message ?? providerResult.message ?? rawProviderResponse).trim();
   if (!providerResponse.ok || (providerStatus && providerStatus !== "success") || !providerDetails) {
-    throw new Error(providerDetails || "The SMS provider could not send the code.");
+    throw new Error(providerDetails || "The voice OTP provider could not start the call.");
   }
   return { code, details: providerDetails || "sent" };
 };
@@ -156,7 +150,7 @@ const route = async (request: Request) => {
       const { code } = await sendOtp(phone);
       return response({ sent: true, pendingToken: await createToken({ kind: "pending", phone, code, expiresAt: Date.now() + OTP_EXPIRES_MS }) }, 200, origin);
     } catch (error) {
-      return response({ error: error instanceof Error ? error.message : "The SMS service is unavailable." }, 502, origin);
+      return response({ error: error instanceof Error ? error.message : "The voice OTP service is unavailable." }, 502, origin);
     }
   }
 

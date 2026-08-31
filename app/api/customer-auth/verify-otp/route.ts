@@ -21,9 +21,9 @@ export async function POST(request: Request) {
   try {
     code = String((await request.json() as { code?: unknown }).code || "").replace(/\D/g, "");
   } catch {
-    return json({ error: "Enter the SMS code" }, 400);
+    return json({ error: "Enter the voice-call code" }, 400);
   }
-  if (code.length !== 6) return json({ error: "Enter the SMS code" }, 400);
+  if (code.length !== 6) return json({ error: "Enter the voice-call code" }, 400);
 
   if (code !== pending.code) {
     return json({ error: "Invalid OTP. Please try again." }, 401);

@@ -1,6 +1,5 @@
 const TWO_FACTOR_BASE_URL = "https://2factor.in/API/V1";
 const TWO_FACTOR_TIMEOUT_MS = 15_000;
-const TWO_FACTOR_TEMPLATE_NAME = "Fanzzy Login OTP";
 
 type TwoFactorResponse = {
   ok: boolean;
@@ -24,7 +23,7 @@ const readProviderResponse = async (response: Response): Promise<TwoFactorRespon
   try {
     result = JSON.parse(raw) as Record<string, unknown>;
   } catch {
-    if (!response.ok) throw new TwoFactorSmsError("2Factor could not send the SMS code.", "send");
+    if (!response.ok) throw new TwoFactorSmsError("2Factor could not place the voice OTP call.", "send");
     return { ok: true, httpStatus: response.status, status: "success", details: raw.trim() };
   }
 
@@ -38,7 +37,7 @@ const readProviderResponse = async (response: Response): Promise<TwoFactorRespon
 
 const requestProvider = async (path: string, method: "GET" | "POST", payload?: Record<string, string>): Promise<TwoFactorResponse> => {
   const apiKey = getApiKey();
-  if (!apiKey) throw new TwoFactorSmsError("2Factor SMS login is not configured.", "network");
+  if (!apiKey) throw new TwoFactorSmsError("2Factor voice OTP is not configured.", "network");
 
   try {
     const response = await fetch(`${TWO_FACTOR_BASE_URL}/${encodeURIComponent(apiKey)}${path}`, {
@@ -52,19 +51,15 @@ const requestProvider = async (path: string, method: "GET" | "POST", payload?: R
     return await readProviderResponse(response);
   } catch (error) {
     if (error instanceof TwoFactorSmsError) throw error;
-    throw new TwoFactorSmsError("2Factor SMS service could not be reached.", "network");
+    throw new TwoFactorSmsError("2Factor voice OTP service could not be reached.", "network");
   }
 };
 
 export const sendTwoFactorOtp = async (phone: string, code: string) => {
-  const result = await requestProvider("/ADDON_SERVICES/SEND/TSMS", "POST", {
-    From: "FANZZY",
-    To: phone,
-    TemplateName: TWO_FACTOR_TEMPLATE_NAME,
-    VAR1: code,
-  });
+  const voicePhone = phone.startsWith("91") ? phone.slice(2) : phone;
+  const result = await requestProvider(`/VOICE/${encodeURIComponent(voicePhone)}/${encodeURIComponent(code)}`, "GET");
   if (!result.ok || result.status !== "success" || !result.details) {
-    throw new TwoFactorSmsError(result.details || "2Factor could not send the SMS code.", "send");
+    throw new TwoFactorSmsError(result.details || "2Factor could not place the voice OTP call.", "send");
   }
   return result.details;
 };
