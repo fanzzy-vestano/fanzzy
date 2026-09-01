@@ -908,7 +908,9 @@ function AdminDashboard() {
   const [reportView, setReportView] = useState<ReportView>("overview");
   const [query, setQuery] = useState("");
   const [toast, setToast] = useState("");
-  const [dateRange, setDateRange] = useState<DateRange>("this-month");
+  // The Overview has no visible period selector, so default it to the complete
+  // confirmed-order history instead of silently hiding orders from prior months.
+  const [dateRange, setDateRange] = useState<DateRange>("all-time");
   const [dashboardFromDate, setDashboardFromDate] = useState(() => `${new Date().toISOString().slice(0, 8)}01`);
   const [dashboardToDate, setDashboardToDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [dashboardOrders, setDashboardOrders] = useState<OrderRecord[]>(adminOrders);
@@ -1070,6 +1072,13 @@ function AdminDashboard() {
   };
   const displayedMetrics = liveMetrics;
   const statusCount = (statuses: OrderStatus[]) => String(dashboardPeriodOrders.filter((order) => statuses.includes(order.status)).length);
+  const metricNote = dateRange === "this-month"
+    ? "vs. last month"
+    : dateRange === "all-time"
+      ? "All confirmed orders"
+      : dateRange === "custom"
+        ? "Selected dates"
+        : "Selected period";
   const dateLabels: Record<DateRange, string> = {
     "this-month": "This month",
     "last-month": "Last month",
@@ -1220,33 +1229,25 @@ function AdminDashboard() {
             label="Revenue"
             value={displayedMetrics.revenue}
             change={displayedMetrics.growth[0]}
-            note={
-              dateRange === "this-month" ? "vs. last month" : "selected period"
-            }
+            note={metricNote}
           />
           <Stat
             label="Orders"
             value={displayedMetrics.orders}
             change={displayedMetrics.growth[1]}
-            note={
-              dateRange === "this-month" ? "vs. last month" : "selected period"
-            }
+            note={metricNote}
           />
           <Stat
             label="Average order"
             value={displayedMetrics.average}
             change={displayedMetrics.growth[2]}
-            note={
-              dateRange === "this-month" ? "vs. last month" : "selected period"
-            }
+            note={metricNote}
           />
           <Stat
             label="New customers"
             value={displayedMetrics.customers}
             change={displayedMetrics.growth[3]}
-            note={
-              dateRange === "this-month" ? "vs. last month" : "selected period"
-            }
+            note={metricNote}
           />
         </div>
         <div className="dashboard-grid">
