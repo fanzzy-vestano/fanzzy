@@ -912,6 +912,7 @@ function AdminDashboard() {
   const [dashboardFromDate, setDashboardFromDate] = useState(() => `${new Date().toISOString().slice(0, 8)}01`);
   const [dashboardToDate, setDashboardToDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [dashboardOrders, setDashboardOrders] = useState<OrderRecord[]>(adminOrders);
+  const [dashboardProducts, setDashboardProducts] = useState<AdminProduct[]>(adminProducts);
   const [productFilter, setProductFilter] = useState<ProductFilter>("all");
   const [categoryFilter, setCategoryFilter] = useState("All categories");
   useEffect(() => {
@@ -921,13 +922,13 @@ function AdminDashboard() {
   const categories = useMemo(
     () => [
       "All categories",
-      ...Array.from(new Set(adminProducts.map((product) => product.category))),
+      ...Array.from(new Set(dashboardProducts.map((product) => product.category))),
     ],
-    [],
+    [dashboardProducts],
   );
   const shownProducts = useMemo(
     () =>
-      adminProducts.filter((product) => {
+      dashboardProducts.filter((product) => {
         const matchesQuery =
           `${product.name} ${product.sku} ${product.category}`
             .toLowerCase()
@@ -942,11 +943,61 @@ function AdminDashboard() {
           product.category === categoryFilter;
         return matchesQuery && matchesFilter && matchesCategory;
       }),
-    [categoryFilter, productFilter, query],
+    [categoryFilter, dashboardProducts, productFilter, query],
   );
   const activeRole = adminRoles.find((role) => role.id === activeRoleId) ?? defaultAdminRoles[0];
   const canAccess = (section: string) => activeRole.permissions.includes(section as AdminPermission);
   const visibleMenu = menu.filter((item) => canAccess(item.label));
+
+  useEffect(() => {
+    let active = true;
+    const syncDashboardProducts = async () => {
+      const remote = await fetchCatalogProducts();
+      if (!active) return;
+      if (!remote.error && remote.data !== null) {
+        setDashboardProducts(remote.data.filter((product) => !isDemoProduct(product)).map((product) => ({
+          name: product.name,
+          sku: product.sku,
+          category: product.category,
+          stock: product.stock,
+          price: formatAdminCurrency(product.price),
+          cost: formatAdminCurrency(product.cost ?? 0),
+          status: product.status,
+          image: product.image || adminPlaceholderImage,
+          hoverImage: product.hoverImage || product.image || adminPlaceholderImage,
+          compareAt: product.compareAt,
+        })));
+        return;
+      }
+      try {
+        const stored = window.localStorage.getItem("fanzzy-products");
+        const parsed = stored ? JSON.parse(stored) as Array<Partial<AdminProduct> & { price?: number | string; cost?: number | string }> : [];
+        if (!Array.isArray(parsed)) return;
+        setDashboardProducts(parsed.filter((product) => product.name && product.sku && !isDemoProduct(product)).map((product) => ({
+          name: String(product.name),
+          sku: String(product.sku),
+          category: String(product.category || "Uncategorised"),
+          stock: Number(product.stock) || 0,
+          price: typeof product.price === "number" ? formatAdminCurrency(product.price) : String(product.price || "₹0"),
+          cost: typeof product.cost === "number" ? formatAdminCurrency(product.cost) : String(product.cost || "₹0"),
+          status: product.status || "Draft",
+          image: String(product.image || adminPlaceholderImage),
+          hoverImage: String(product.hoverImage || product.image || adminPlaceholderImage),
+        })));
+      } catch {
+        setDashboardProducts([]);
+      }
+    };
+    void syncDashboardProducts();
+    const refreshDashboardProducts = () => { void syncDashboardProducts(); };
+    window.addEventListener("storage", refreshDashboardProducts);
+    window.addEventListener("fanzzy-products-updated", refreshDashboardProducts);
+    return () => {
+      active = false;
+      window.removeEventListener("storage", refreshDashboardProducts);
+      window.removeEventListener("fanzzy-products-updated", refreshDashboardProducts);
+    };
+  }, []);
 
   useEffect(() => {
     const syncDashboardOrders = async () => {
@@ -1109,7 +1160,7 @@ function AdminDashboard() {
             >
               <span className="nav-icon">{item.icon}</span>
               {item.label}
-              {(item.label === "Orders" ? dashboardOrders.length : item.count) !== undefined && <b>{item.label === "Orders" ? dashboardOrders.length : item.count}</b>}
+              {(item.label === "Orders" ? dashboardOrders.length : item.label === "Products" ? dashboardProducts.length : item.count) !== undefined && <b>{item.label === "Orders" ? dashboardOrders.length : item.label === "Products" ? dashboardProducts.length : item.count}</b>}
             </button>
           ))}
         </nav>
@@ -1324,13 +1375,13 @@ function AdminDashboard() {
                     className={productFilter === "low-stock" ? "active" : ""}
                     onClick={() => setProductFilter("low-stock")}
                   >
-                    Low stock <b>{adminProducts.filter((product) => product.stock < 10 || product.status === "Low stock").length}</b>
+                    Low stock <b>{dashboardProducts.filter((product) => product.stock < 10 || product.status === "Low stock").length}</b>
                   </button>
                   <button
                     className={productFilter === "drafts" ? "active" : ""}
                     onClick={() => setProductFilter("drafts")}
                   >
-                    Drafts <b>{adminProducts.filter((product) => product.status === "Draft").length}</b>
+                    Drafts <b>{dashboardProducts.filter((product) => product.status === "Draft").length}</b>
                   </button>
                 </div>
                 <select
