@@ -145,6 +145,7 @@ async function saveVendorProductMetadata(sku: string, data: Record<string, unkno
     updateStoreSettingMap("product_barcodes", sku, String(data.barcode || "").trim()),
     updateStoreSettingMap("product_hsn_codes", sku, String(data.hsnCode || "").trim()),
     updateStoreSettingMap("product_bill_names", sku, String(data.billName || "").trim()),
+    updateStoreSettingMap("product_supplier_names", sku, String(data.supplierName || "").trim()),
     updateStoreSettingMap("product_descriptions", sku, String(data.description || "").trim()),
     updateStoreSettingMap("product_pricing", sku, {
       gstRate: numericProductValue(data.gstRate),
@@ -411,7 +412,7 @@ export async function deleteVendorAdmin(vendorId: string, actorId: string) {
 
 export async function getVendorProducts(vendorId: string, privileged = true) {
   const products = await rest<Array<Record<string, unknown>>>("products", `vendor_id=eq.${encodeURIComponent(vendorId)}&select=*&order=created_at.desc`, { privileged });
-  const [variants, variantTypes, sizes, sizeStocks, barcodes, hsnCodes, billNames, descriptions, pricing] = await Promise.all([
+  const [variants, variantTypes, sizes, sizeStocks, barcodes, hsnCodes, billNames, supplierNames, descriptions, pricing] = await Promise.all([
     readStoreSettingMap<unknown>("product_variants"),
     readStoreSettingMap<unknown>("product_variant_type"),
     readStoreSettingMap<unknown>("product_sizes"),
@@ -419,6 +420,7 @@ export async function getVendorProducts(vendorId: string, privileged = true) {
     readStoreSettingMap<unknown>("product_barcodes"),
     readStoreSettingMap<unknown>("product_hsn_codes"),
     readStoreSettingMap<unknown>("product_bill_names"),
+    readStoreSettingMap<unknown>("product_supplier_names"),
     readStoreSettingMap<unknown>("product_descriptions"),
     readStoreSettingMap<unknown>("product_pricing"),
   ]);
@@ -436,6 +438,7 @@ export async function getVendorProducts(vendorId: string, privileged = true) {
       barcode: String(barcodes[sku] || ""),
       hsnCode: String(hsnCodes[sku] || ""),
       billName: String(billNames[sku] || ""),
+      supplierName: String(supplierNames[sku] || ""),
       description: String(descriptions[sku] || ""),
       gstRate: numericProductValue(productPricing.gstRate),
       markup: numericProductValue(productPricing.markup),

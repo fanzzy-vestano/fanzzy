@@ -58,6 +58,7 @@ type Product = {
   sizeStock?: Record<string, number>;
   variantType?: ProductVariantType;
   billName?: string;
+  supplierName?: string;
   imageAdjustments?: ImageAdjustments;
   hoverImageAdjustments?: ImageAdjustments;
   vendorId?: string;
@@ -119,7 +120,7 @@ type CustomerOrder = {
   inventoryReservedAt?: string;
   inventoryReleased?: boolean;
   inventoryAdjusted?: boolean;
-  items?: Array<{ name: string; quantity: number; price: string; regularPrice?: number; productId?: string; image?: string; variantName?: string; variantImage?: string; size?: string; vendorId?: string | null; vendorName?: string; vendorSlug?: string; promotion?: PromotionCartLine }>;
+  items?: Array<{ name: string; quantity: number; price: string; regularPrice?: number; productId?: string; image?: string; variantName?: string; variantImage?: string; size?: string; supplierName?: string; vendorId?: string | null; vendorName?: string; vendorSlug?: string; promotion?: PromotionCartLine }>;
 };
 type AssistantMessage = { role: "user" | "assistant"; text: string; productIds?: string[] };
 type RazorpayCheckoutResponse = {
@@ -467,6 +468,7 @@ function normalizeStoredProduct(value: unknown, index: number): Product | null {
     sizeStock: inferredSizeStock,
     variantType: raw.variantType === "size" || raw.variantType === "normal" ? raw.variantType : (inferredSizes.length ? "size" : "normal"),
     billName: typeof raw.billName === "string" ? raw.billName.trim() : "",
+    supplierName: typeof raw.supplierName === "string" ? raw.supplierName.trim() : "",
     imageAdjustments: normalizeImageAdjustments(raw.imageAdjustments),
     hoverImageAdjustments: normalizeImageAdjustments(raw.hoverImageAdjustments),
     vendorId: typeof raw.vendorId === "string" ? raw.vendorId : undefined,
@@ -776,6 +778,7 @@ export default function Home() {
         sizeStockRemote,
         imageAdjustmentsRemote,
         billNameRemote,
+        supplierNameRemote,
       ] = await Promise.all([
         fetchCatalogProducts(),
         fetchStoreSetting("productVariants"),
@@ -784,6 +787,7 @@ export default function Home() {
         fetchStoreSetting("productSizeStock"),
         fetchStoreSetting("productImageAdjustments"),
         fetchStoreSetting("productBillNames"),
+        fetchStoreSetting("productSupplierNames"),
       ]);
       let variantsMap: Record<string, ProductVariant[]> = {};
       let variantTypeMap: Record<string, ProductVariantType> = {};
@@ -791,6 +795,7 @@ export default function Home() {
       let sizeStockMap: Record<string, Record<string, number>> = {};
       let imageAdjustmentsMap: Record<string, ProductImageAdjustments> = {};
       let billNameMap: Record<string, string> = {};
+      let supplierNameMap: Record<string, string> = {};
       if (variantsRemote.value) {
         try {
           const parsed = JSON.parse(variantsRemote.value) as Record<string, ProductVariant[]>;
@@ -837,6 +842,18 @@ export default function Home() {
           billNameMap = {};
         }
       }
+      if (supplierNameRemote.value) {
+        try {
+          const parsed = JSON.parse(supplierNameRemote.value) as Record<string, unknown>;
+          if (parsed && typeof parsed === "object") {
+            supplierNameMap = Object.fromEntries(
+              Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+            );
+          }
+        } catch {
+          supplierNameMap = {};
+        }
+      }
       const localVariantsMap: Record<string, ProductVariant[]> = {};
       const storedVariantCache = window.localStorage.getItem(localProductVariantsKey);
       if (storedVariantCache) {
@@ -868,6 +885,7 @@ export default function Home() {
                 sizes: savedSizes?.length ? savedSizes : product.sizes?.length ? product.sizes : [],
                 sizeStock: savedSizeStock && Object.keys(savedSizeStock).length ? savedSizeStock : product.sizeStock || {},
                 variantType: savedVariantType || (savedSizes?.length ? "size" : product.variantType || (product.sizes?.length ? "size" : "normal")),
+                supplierName: getProductSetting(supplierNameMap, product.sku, product.id) || product.supplierName || "",
               };
             });
           }
@@ -911,6 +929,7 @@ export default function Home() {
           imageAdjustments: savedAdjustments?.image,
           hoverImageAdjustments: savedAdjustments?.hoverImage,
           billName: getProductSetting(billNameMap, product.sku) || "",
+          supplierName: getProductSetting(supplierNameMap, product.sku) || "",
           vendorId: product.vendorId,
           vendorName: product.vendorName,
           vendorSlug: product.vendorSlug,
@@ -943,7 +962,7 @@ export default function Home() {
     runSyncProducts();
     const onProductsStorage = () => { runSyncProducts(); };
     const onProductsUpdated = () => { runSyncProducts(); };
-    const unsubscribeFromProductSettings = (['productVariants', 'productVariantType', 'productSizes', 'productSizeStock'] as const)
+    const unsubscribeFromProductSettings = (['productVariants', 'productVariantType', 'productSizes', 'productSizeStock', 'productBillNames', 'productSupplierNames'] as const)
       .map((key) => subscribeToStoreSetting(key, () => { void syncProducts().catch(() => undefined); }));
     window.addEventListener("storage", onProductsStorage);
     window.addEventListener("fanzzy-products-updated", onProductsUpdated);
@@ -2270,7 +2289,7 @@ export default function Home() {
       couponDiscount,
       promotionDiscount: bogoDiscount,
       shippingTotal: deliveryTotal,
-      items: cartItems.map((product) => ({ productId: product.id, name: `${product.billName || product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}${product.size ? ` · Size ${product.size}` : ""}`, quantity: product.quantity, price: formatINR(getCartLinePrice(product)), regularPrice: getCustomerPrice(product), image: product.image, variantName: product.variant?.name, variantImage: product.variant?.image, size: product.size || undefined, vendorId: product.vendorId || null, vendorName: product.vendorName || "Vestano", vendorSlug: product.vendorSlug, promotion: product.promotion || undefined })),
+      items: cartItems.map((product) => ({ productId: product.id, name: `${product.billName || product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}${product.size ? ` · Size ${product.size}` : ""}`, quantity: product.quantity, price: formatINR(getCartLinePrice(product)), regularPrice: getCustomerPrice(product), image: product.image, variantName: product.variant?.name, variantImage: product.variant?.image, size: product.size || undefined, supplierName: product.supplierName || undefined, vendorId: product.vendorId || null, vendorName: product.vendorName || "Vestano", vendorSlug: product.vendorSlug, promotion: product.promotion || undefined })),
     };
 
     setIsPaying(true);

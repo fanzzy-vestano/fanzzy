@@ -23,6 +23,7 @@ export type CatalogProduct = {
   vendorId?: string;
   vendorName?: string;
   vendorSlug?: string;
+  supplierName?: string;
   vendorStatus?: string;
   publicVendorVisible?: boolean;
 };
@@ -49,6 +50,7 @@ const settingKeys = {
   productBarcodes: "product_barcodes",
   productHsnCodes: "product_hsn_codes",
   productBillNames: "product_bill_names",
+  productSupplierNames: "product_supplier_names",
   productPricing: "product_pricing",
   productVariants: "product_variants",
   productVariantType: "product_variant_type",
@@ -84,6 +86,7 @@ const asProduct = (row: Record<string, unknown>): CatalogProduct => ({
   publicVendorVisible: row.public_vendor_visible === false ? false : row.public_vendor_visible === true ? true : undefined,
   vendorName: row.vendors && typeof row.vendors === "object" && !Array.isArray(row.vendors) && typeof (row.vendors as Record<string, unknown>).business_name === "string" ? String((row.vendors as Record<string, unknown>).business_name) : undefined,
   vendorSlug: row.vendors && typeof row.vendors === "object" && !Array.isArray(row.vendors) && typeof (row.vendors as Record<string, unknown>).slug === "string" ? String((row.vendors as Record<string, unknown>).slug) : undefined,
+  supplierName: typeof row.supplier_name === "string" ? row.supplier_name : undefined,
 });
 
 const asCategory = (row: Record<string, unknown>): CatalogCategory => ({

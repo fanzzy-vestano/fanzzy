@@ -21,7 +21,7 @@ type StoredOrder = {
   couponDiscount?: number;
   promotionDiscount?: number;
   shippingTotal?: number;
-  items?: Array<{ name: string; quantity: number; price: string; regularPrice?: number; productId?: string; variantName?: string; size?: string; vendorId?: string | null; vendorName?: string; vendorSlug?: string }>;
+  items?: Array<{ name: string; quantity: number; price: string; regularPrice?: number; productId?: string; variantName?: string; size?: string; supplierName?: string; vendorId?: string | null; vendorName?: string; vendorSlug?: string }>;
 };
 
 import { syncVendorOrderForPaidOrder } from "./vendor-server";

@@ -8,7 +8,7 @@ export type BillOrder = {
   email?: string;
   address?: string;
   coupon?: string;
-  items?: Array<{ name: string; quantity: number; price: string }>;
+  items?: Array<{ name: string; quantity: number; price: string; supplierName?: string }>;
 };
 
 export type BillDesignSettings = {
@@ -68,7 +68,7 @@ const printableBillMarkup = (order: BillOrder, design: BillDesignSettings, origi
     ? design.qrCodeDataUrl
     : `${origin}/vestano-retail-qr-code.png`;
   const qrCode = qrSource ? `<section class="qr-section"><img class="receipt-qr" src="${escapeHtml(qrSource)}" alt="Vestano QR code" /><div>Powered by <strong>Vestano</strong></div></section>` : "";
-  const items = (order.items || []).map((item) => `<tr><td>${escapeHtml(item.name)}</td><td>${Math.max(1, Number(item.quantity) || 1)}</td><td>${escapeHtml(item.price)}</td></tr>`).join("");
+  const items = (order.items || []).map((item) => `<tr><td>${escapeHtml(item.name)}${item.supplierName ? `<small class="supplier">Supplier: ${escapeHtml(item.supplierName)}</small>` : ""}</td><td>${Math.max(1, Number(item.quantity) || 1)}</td><td>${escapeHtml(item.price)}</td></tr>`).join("");
   const separator = design.separator === "dashed" ? "dashed" : "dotted";
   return `<!doctype html><html><head><meta charset="utf-8" /><title>${escapeHtml(order.id)} · Fanzzy bill</title><style>
     @page { margin: 0; size: 80mm auto; }
@@ -90,6 +90,7 @@ const printableBillMarkup = (order: BillOrder, design: BillDesignSettings, origi
     th:not(:first-child), td:not(:first-child) { text-align: right; }
     td { border-top: 1px solid #eadfd9; padding: 2.5mm 0; vertical-align: top; }
     td:first-child { max-width: 42mm; overflow-wrap: anywhere; }
+    .supplier { color: #775f66; display: block; font-size: 8px; margin-top: 1mm; }
     .total { color: #551a2d; display: flex; font-size: 16px; font-weight: 700; justify-content: space-between; padding: 4mm 0; }
     .qr-section { border-top: 1px dotted #9b8589; margin-top: 4mm; padding-top: 4mm; text-align: center; }
     .qr-section img { display: block; height: 28mm; margin: 0 auto 2mm; width: 28mm; }

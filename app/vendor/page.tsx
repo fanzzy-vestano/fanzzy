@@ -46,6 +46,7 @@ type VendorProductForm = {
   barcode: string;
   hsnCode: string;
   billName: string;
+  supplierName: string;
   gstRate: string;
   markup: string;
   costWithGst: string;
@@ -68,6 +69,7 @@ const emptyProductForm = (): VendorProductForm => ({
   barcode: "",
   hsnCode: "",
   billName: "",
+  supplierName: "",
   gstRate: "",
   markup: "",
   costWithGst: "₹",
@@ -290,6 +292,7 @@ export default function VendorDashboardPage() {
       barcode: String(product.barcode || ""),
       hsnCode: String(product.hsnCode || ""),
       billName: String(product.billName || ""),
+      supplierName: String(product.supplierName || ""),
       gstRate: String(product.gstRate ?? ""),
       markup: String(product.markup ?? ""),
       costWithGst: String(product.costWithGst || "₹"),
@@ -544,6 +547,7 @@ export default function VendorDashboardPage() {
       <div className="vendor-product-form-grid">
         <label>Product name<input value={form.name} onChange={(event) => updateFormField("name", event.target.value)} placeholder="e.g. Celeste Hoops" required /></label>
         <label>Bill name<input value={form.billName} onChange={(event) => updateFormField("billName", event.target.value)} placeholder="Name shown on customer bill" /></label>
+        <label>Supplier name<input value={form.supplierName} onChange={(event) => updateFormField("supplierName", event.target.value)} placeholder="Supplier shown on the bill" /></label>
         <label>SKU <span className="vendor-field-note">Auto-generated</span><input value={form.sku || "Auto-generated"} readOnly aria-readonly="true" /></label>
         <label>Barcode<input value={form.barcode} onChange={(event) => updateFormField("barcode", event.target.value)} placeholder="Scan or enter barcode" inputMode="numeric" /></label>
         <label>HSN code<input value={form.hsnCode} onChange={(event) => updateFormField("hsnCode", event.target.value)} placeholder="e.g. 7117" inputMode="numeric" /></label>
