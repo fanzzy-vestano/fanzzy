@@ -95,7 +95,7 @@ type MarketingRecord = {
   getQuantity?: number;
   eligibleProductIds?: string[];
 };
-type DateRange = "this-month" | "last-month" | "all-time" | "custom";
+type DateRange = "today" | "this-month" | "last-month" | "all-time" | "custom";
 type ProductFilter = "all" | "low-stock" | "drafts";
 type OrderDateFilter =
   | "today"
@@ -1059,6 +1059,7 @@ function AdminDashboard() {
   const dashboardPeriodOrders = dateRange === "custom"
     ? customDashboardOrders
     : dashboardOrders.filter((order) => dateRange === "all-time"
+      || (dateRange === "today" && order.date === currentDate)
       || (dateRange === "this-month" && order.date >= monthStart && order.date <= currentDate)
       || (dateRange === "last-month" && order.date >= previousMonthStart && order.date < previousMonthEnd));
   const periodRevenue = dashboardPeriodOrders.reduce((total, order) => total + (Number(order.total.replace(/[^0-9.]/g, "")) || 0), 0);
@@ -1076,10 +1077,13 @@ function AdminDashboard() {
     ? "vs. last month"
     : dateRange === "all-time"
       ? "All confirmed orders"
+      : dateRange === "today"
+        ? "Today's confirmed orders"
       : dateRange === "custom"
         ? "Selected dates"
         : "Selected period";
   const dateLabels: Record<DateRange, string> = {
+    today: "Today",
     "this-month": "This month",
     "last-month": "Last month",
     "all-time": "All time",
@@ -1220,6 +1224,32 @@ function AdminDashboard() {
               Here’s what’s happening across Fanzzy today.
             </p>
           </div>
+          {active === "Overview" && (
+            <div className="dashboard-date-picker">
+              <label className="date-control">
+                Date filter
+                <select value={dateRange} onChange={(event) => setDateRange(event.target.value as DateRange)}>
+                  <option value="all-time">All time</option>
+                  <option value="today">Today</option>
+                  <option value="this-month">This month</option>
+                  <option value="last-month">Last month</option>
+                  <option value="custom">Custom dates</option>
+                </select>
+              </label>
+              {dateRange === "custom" && (
+                <div className="dashboard-date-fields">
+                  <label>
+                    From
+                    <input type="date" value={dashboardFromDate} onChange={(event) => setDashboardFromDate(event.target.value)} />
+                  </label>
+                  <label>
+                    To
+                    <input type="date" value={dashboardToDate} onChange={(event) => setDashboardToDate(event.target.value)} />
+                  </label>
+                </div>
+              )}
+            </div>
+          )}
         </div>
         {active !== "Overview" && (
           <ModuleWorkspace module={active} onNotify={notify} reportView={reportView} productScannerRequest={productScannerRequest} />
