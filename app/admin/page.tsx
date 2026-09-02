@@ -983,8 +983,6 @@ function AdminDashboard() {
   const [dashboardProducts, setDashboardProducts] = useState<AdminProduct[]>(adminProducts);
   const [productFilter, setProductFilter] = useState<ProductFilter>("all");
   const [categoryFilter, setCategoryFilter] = useState("All categories");
-  const [sidebarSuppliers, setSidebarSuppliers] = useState<SupplierRecord[]>([]);
-  const [supplierBillsOpen, setSupplierBillsOpen] = useState(true);
   useEffect(() => {
     const timer = window.setInterval(() => setLiveDate(new Date()), 60 * 1000);
     return () => window.clearInterval(timer);
@@ -1107,24 +1105,6 @@ function AdminDashboard() {
   }, []);
 
   useEffect(() => {
-    let active = true;
-    const syncSidebarSuppliers = async () => {
-      const remote = await fetchStoreSetting("suppliers");
-      if (!active) return;
-      const stored = remote.value || (typeof window !== "undefined" ? window.localStorage.getItem(localSuppliersKey) : null);
-      setSidebarSuppliers(ensurePreferredSupplier(parseSupplierRecords(stored)).suppliers);
-    };
-    void syncSidebarSuppliers();
-    window.addEventListener("fanzzy-suppliers-updated", syncSidebarSuppliers);
-    window.addEventListener("storage", syncSidebarSuppliers);
-    return () => {
-      active = false;
-      window.removeEventListener("fanzzy-suppliers-updated", syncSidebarSuppliers);
-      window.removeEventListener("storage", syncSidebarSuppliers);
-    };
-  }, []);
-
-  useEffect(() => {
     if (!canAccess(active)) setActive(canAccess("Overview") ? "Overview" : (visibleMenu[0]?.label ?? "Overview"));
     // The role controls the visible workspace; this keeps a previously selected page from leaking across roles.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1220,26 +1200,7 @@ function AdminDashboard() {
         </div>
         <p className="admin-label">Workspace</p>
         <nav className="admin-nav">
-          {visibleMenu.map((item) => item.label === "Supplier Bills" ? (
-            <div className="admin-nav-group" key={item.label}>
-              <button
-                className={active === item.label ? "active" : ""}
-                onClick={() => { setActive("Supplier Bills"); setSupplierBillsOpen((current) => !current); }}
-                aria-expanded={supplierBillsOpen}
-              >
-                <span className="nav-icon">{item.icon}</span>
-                {item.label}
-                <span className="nav-chevron">{supplierBillsOpen ? "−" : "+"}</span>
-              </button>
-              {supplierBillsOpen && <div className="admin-subnav supplier-bill-subnav">
-                {sidebarSuppliers.map((supplier) => <button key={supplier.id} className={active === "Supplier Bills" ? "active" : ""} onClick={() => setActive("Supplier Bills")}>
-                  <span>{supplier.name}</span>
-                  {supplier.isDefault && <em>Default</em>}
-                </button>)}
-                {!sidebarSuppliers.length && <span className="supplier-bill-subnav-empty">No suppliers yet</span>}
-              </div>}
-            </div>
-          ) : item.label === "Reports" ? (
+          {visibleMenu.map((item) => item.label === "Reports" ? (
             <div className="admin-nav-group" key={item.label}>
               <button
                 className={active === item.label ? "active" : ""}

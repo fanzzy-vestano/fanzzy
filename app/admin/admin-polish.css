@@ -2063,10 +2063,6 @@
   color: #fff9f0;
 }
 
-.supplier-bill-subnav button { align-items: center; display: flex; gap: 8px; justify-content: space-between; text-transform: none; }
-.supplier-bill-subnav button em { color: #d6b88a; font-size: 6px; font-style: normal; letter-spacing: .06em; text-transform: uppercase; }
-.supplier-bill-subnav-empty { color: #bfa7a1; font-family: var(--mono); font-size: 7px; padding: 7px 6px; text-transform: uppercase; }
-
 .module-workspace {
   margin-top: 12px;
 }
