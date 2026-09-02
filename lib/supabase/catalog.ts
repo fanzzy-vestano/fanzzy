@@ -6,6 +6,7 @@ export type ProductVariantType = "normal" | "size";
 export type CatalogProduct = {
   name: string;
   sku: string;
+  createdAt?: string;
   category: string;
   stock: number;
   price: number;
@@ -23,7 +24,6 @@ export type CatalogProduct = {
   vendorId?: string;
   vendorName?: string;
   vendorSlug?: string;
-  supplierName?: string;
   vendorStatus?: string;
   publicVendorVisible?: boolean;
 };
@@ -51,6 +51,7 @@ const settingKeys = {
   productHsnCodes: "product_hsn_codes",
   productBillNames: "product_bill_names",
   productSupplierNames: "product_supplier_names",
+  suppliers: "suppliers",
   productPricing: "product_pricing",
   productVariants: "product_variants",
   productVariantType: "product_variant_type",
@@ -70,6 +71,7 @@ export const isSupabaseReady = Boolean(supabase);
 const asProduct = (row: Record<string, unknown>): CatalogProduct => ({
   name: String(row.name ?? ""),
   sku: String(row.sku ?? ""),
+  createdAt: typeof row.created_at === "string" ? row.created_at : undefined,
   category: String(row.category ?? "Uncategorised"),
   stock: Number(row.stock ?? 0),
   price: Number(row.price ?? 0),
@@ -86,7 +88,6 @@ const asProduct = (row: Record<string, unknown>): CatalogProduct => ({
   publicVendorVisible: row.public_vendor_visible === false ? false : row.public_vendor_visible === true ? true : undefined,
   vendorName: row.vendors && typeof row.vendors === "object" && !Array.isArray(row.vendors) && typeof (row.vendors as Record<string, unknown>).business_name === "string" ? String((row.vendors as Record<string, unknown>).business_name) : undefined,
   vendorSlug: row.vendors && typeof row.vendors === "object" && !Array.isArray(row.vendors) && typeof (row.vendors as Record<string, unknown>).slug === "string" ? String((row.vendors as Record<string, unknown>).slug) : undefined,
-  supplierName: typeof row.supplier_name === "string" ? row.supplier_name : undefined,
 });
 
 const asCategory = (row: Record<string, unknown>): CatalogCategory => ({

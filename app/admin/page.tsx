@@ -41,6 +41,7 @@ import AdminVendorsWorkspace from "./vendors-workspace";
 type AdminProduct = {
   name: string;
   sku: string;
+  createdAt?: string;
   category: string;
   stock: number;
   price: string;
@@ -120,7 +121,10 @@ type AdminPermission =
   | "Reports"
   | "Announcement"
   | "Settings"
-  | "Vendors";
+  | "Vendors"
+  | "Suppliers"
+  | "Supplier Bills";
+type SupplierRecord = { id: string; name: string; createdAt?: string; isDefault?: boolean };
 type AdminRole = {
   id: string;
   name: string;
@@ -144,6 +148,8 @@ const allAdminPermissions: AdminPermission[] = [
   "Announcement",
   "Settings",
   "Vendors",
+  "Suppliers",
+  "Supplier Bills",
 ];
 const defaultAdminRoles: AdminRole[] = [
   { id: "vestano", name: "Vestano", title: "Super admin", permissions: allAdminPermissions },
@@ -167,6 +173,53 @@ const defaultHeroSlideDuration = 5.2;
 const defaultDeliveryCharge = { enabled: false, amount: 99, freeAboveEnabled: false, freeAbove: 999 };
 type PickupHub = { id: string; name: string; place: string };
 const defaultPickupHubs: PickupHub[] = [];
+const localSuppliersKey = "fanzzy-suppliers";
+const preferredDefaultSupplierName = "Thrissur bill";
+const parseSupplierRecords = (value: string | null | undefined): SupplierRecord[] => {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((supplier): supplier is Partial<SupplierRecord> => Boolean(supplier && typeof supplier === "object"))
+      .map((supplier, index) => ({
+        id: typeof supplier.id === "string" && supplier.id ? supplier.id : `supplier-${index + 1}`,
+        name: typeof supplier.name === "string" ? supplier.name.trim() : "",
+        createdAt: typeof supplier.createdAt === "string" ? supplier.createdAt : undefined,
+        isDefault: supplier.isDefault === true,
+      }))
+      .filter((supplier) => supplier.name);
+  } catch {
+    return [];
+  }
+};
+const persistSuppliers = (suppliers: SupplierRecord[]) => {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(localSuppliersKey, JSON.stringify(suppliers));
+  window.dispatchEvent(new Event("fanzzy-suppliers-updated"));
+};
+const ensurePreferredSupplier = (suppliers: SupplierRecord[]) => {
+  const preferredSupplier = suppliers.find(
+    (supplier) => supplier.name.toLowerCase() === preferredDefaultSupplierName.toLowerCase(),
+  );
+  if (preferredSupplier) {
+    if (suppliers.some((supplier) => supplier.isDefault)) return { suppliers, changed: false };
+    return {
+      suppliers: suppliers.map((supplier) => ({
+        ...supplier,
+        isDefault: supplier.id === preferredSupplier.id,
+      })),
+      changed: true,
+    };
+  }
+  return {
+    suppliers: [
+      ...suppliers.map((supplier) => ({ ...supplier, isDefault: false })),
+      { id: `supplier-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name: preferredDefaultSupplierName, createdAt: new Date().toISOString(), isDefault: true },
+    ],
+    changed: true,
+  };
+};
 const parseAdminPickupHubs = (value: string | null | undefined): PickupHub[] => {
   if (!value) return defaultPickupHubs;
   try {
@@ -330,7 +383,7 @@ type OrderRecord = {
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
   inventoryAdjusted?: boolean;
-  items?: Array<{ name: string; quantity: number; price: string; productId?: string; image?: string; variantName?: string; variantImage?: string; size?: string; supplierName?: string; promotion?: PromotionCartLine }>;
+  items?: Array<{ name: string; quantity: number; price: string; productId?: string; image?: string; variantName?: string; variantImage?: string; size?: string; promotion?: PromotionCartLine }>;
 };
 const adminOrders: OrderRecord[] = [];
 const isDemoOrder = (order: { id?: string }) => /^#FZ-104[4-8]$/.test(String(order.id ?? ""));
@@ -384,6 +437,17 @@ const calculateMarkupFromSellingPrice = (costValue: string, gstValue: string, pr
   const price = parseMoney(priceValue);
   const costWithGst = cost * (1 + gst / 100);
   return costWithGst > 0 && price > 0 ? String(Math.round(((price / costWithGst - 1) * 100) * 100) / 100) : "";
+};
+const normalizeSellingPriceForMargin = (costValue: string | number, priceValue: string | number) => {
+  const cost = parseMoney(String(costValue));
+  const price = parseMoney(String(priceValue));
+  if (price <= 0) return String(priceValue || "₹0");
+  if (cost > 0 && ((price - cost) / price) * 100 < 50) return formatAdminCurrency(Math.ceil(cost * 2));
+  return formatAdminCurrency(Math.round(price));
+};
+const normalizeWholeSellingPrice = (priceValue: string | number) => {
+  const price = parseMoney(String(priceValue));
+  return price > 0 ? formatAdminCurrency(Math.round(price)) : String(priceValue || "₹0");
 };
 const makeLocalImage = (file: File) =>
   new Promise<string>((resolve, reject) => {
@@ -619,6 +683,7 @@ const persistCategories = (
 const menu = [
   { label: "Overview", icon: "◌" },
   { label: "Products", icon: "◇", count: "24" },
+  { label: "Supplier Bills", icon: "▥" },
   { label: "Product Image Scanner", icon: "⌁" },
   { label: "Categories", icon: "▦" },
   { label: "Collections", icon: "✧" },
@@ -632,6 +697,7 @@ const menu = [
   { label: "Reports", icon: "▥" },
   { label: "Announcement", icon: "▤" },
   { label: "Vendors", icon: "♢" },
+  { label: "Suppliers", icon: "▤" },
 ];
 
 type AdminAuthResponse = { authenticated?: boolean; error?: string; message?: string; resetReady?: boolean };
@@ -1629,6 +1695,283 @@ function AnnouncementPanel({
   );
 }
 
+function SuppliersWorkspace({ onNotify }: { onNotify: (message: string) => void }) {
+  const [suppliers, setSuppliers] = useState<SupplierRecord[]>([]);
+  const [supplierName, setSupplierName] = useState("");
+  const [defaultSupplierId, setDefaultSupplierId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      const remote = await fetchStoreSetting("suppliers");
+      const stored = remote.value || window.localStorage.getItem(localSuppliersKey);
+      const parsedSuppliers = parseSupplierRecords(stored);
+      const ensured = ensurePreferredSupplier(parsedSuppliers);
+      const next = ensured.suppliers;
+      if (!active) return;
+      setSuppliers(next);
+      setDefaultSupplierId(next.find((supplier) => supplier.isDefault)?.id || null);
+      if (remote.value || ensured.changed) {
+        if (ensured.changed) await saveStoreSetting("suppliers", JSON.stringify(next));
+        persistSuppliers(next);
+      }
+    };
+    const sync = () => {
+      const next = parseSupplierRecords(window.localStorage.getItem(localSuppliersKey));
+      setSuppliers(next);
+      setDefaultSupplierId(next.find((supplier) => supplier.isDefault)?.id || null);
+    };
+    void load();
+    window.addEventListener("fanzzy-suppliers-updated", sync);
+    window.addEventListener("storage", sync);
+    return () => {
+      active = false;
+      window.removeEventListener("fanzzy-suppliers-updated", sync);
+      window.removeEventListener("storage", sync);
+    };
+  }, []);
+
+  const resetForm = () => {
+    setSupplierName("");
+    setEditingId(null);
+  };
+  const save = async () => {
+    const name = supplierName.trim();
+    if (!name) return onNotify("Enter a supplier bill name");
+    if (suppliers.some((supplier) => supplier.id !== editingId && supplier.name.toLowerCase() === name.toLowerCase())) {
+      return onNotify("That supplier already exists");
+    }
+    const next = editingId
+      ? suppliers.map((supplier) => supplier.id === editingId ? { ...supplier, name } : supplier)
+      : [...suppliers, { id: `supplier-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name, createdAt: new Date().toISOString(), isDefault: false }];
+    setSaving(true);
+    const remoteError = await saveStoreSetting("suppliers", JSON.stringify(next));
+    persistSuppliers(next);
+    setSuppliers(next);
+    setDefaultSupplierId(next.find((supplier) => supplier.isDefault)?.id || null);
+    resetForm();
+    setSaving(false);
+    onNotify(remoteError ? "Supplier saved locally; shared settings need attention" : editingId ? "Supplier updated" : "Supplier created");
+  };
+  const remove = async (supplier: SupplierRecord) => {
+    if (!window.confirm(`Delete supplier bill “${supplier.name}”? Existing products will keep this saved name.`)) return;
+    const next = suppliers.filter((item) => item.id !== supplier.id);
+    const remoteError = await saveStoreSetting("suppliers", JSON.stringify(next));
+    persistSuppliers(next);
+    setSuppliers(next);
+    setDefaultSupplierId(next.find((item) => item.isDefault)?.id || null);
+    if (editingId === supplier.id) resetForm();
+    onNotify(remoteError ? "Supplier removed locally; shared settings need attention" : "Supplier removed");
+  };
+  const setDefault = async (supplier: SupplierRecord) => {
+    const nextDefaultId = defaultSupplierId === supplier.id ? null : supplier.id;
+    const next = suppliers.map((item) => ({ ...item, isDefault: item.id === nextDefaultId }));
+    setSaving(true);
+    const remoteError = await saveStoreSetting("suppliers", JSON.stringify(next));
+    persistSuppliers(next);
+    setSuppliers(next);
+    setDefaultSupplierId(nextDefaultId);
+    setSaving(false);
+    onNotify(remoteError ? "Default saved locally; shared settings need attention" : nextDefaultId ? `${supplier.name} is now the default supplier` : "Default supplier cleared");
+  };
+  return (
+    <section className="panel module-workspace suppliers-workspace">
+      <div className="module-workspace-head">
+        <div>
+          <p className="eyebrow">PURCHASE SETUP</p>
+          <h2>Supplier bills</h2>
+          <p>Create the supplier bill names that can be selected while entering products.</p>
+        </div>
+        <div className="module-summary supplier-count-summary"><span><i className="status-light" />Shared supplier list</span><span>{defaultSupplierId ? `Default: ${suppliers.find((supplier) => supplier.id === defaultSupplierId)?.name || "—"}` : "No default selected"}</span></div>
+      </div>
+      <div className="supplier-form-card">
+        <div><p className="eyebrow">{editingId ? "EDIT SUPPLIER" : "NEW SUPPLIER"}</p><h3>{editingId ? "Update supplier bill" : "Create supplier bill"}</h3><p>Use the name exactly as it appears on the supplier invoice.</p></div>
+        <div className="supplier-form-row">
+          <label>Supplier bill name<input value={supplierName} onChange={(event) => setSupplierName(event.target.value)} placeholder="e.g. ABC Jewellery Traders" onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void save(); } }} /></label>
+          <div className="module-actions"><button className="module-primary" type="button" onClick={() => void save()} disabled={saving}>{saving ? "Saving…" : editingId ? "Save changes" : "Create supplier"}</button>{editingId && <button className="module-secondary" type="button" onClick={resetForm}>Cancel</button>}</div>
+        </div>
+      </div>
+      <div className="supplier-list">
+        {suppliers.map((supplier, index) => <article className="supplier-row" key={supplier.id}><span className="module-row-number">{String(index + 1).padStart(2, "0")}</span><div><strong>{supplier.name}</strong><small>Available in the product entry supplier dropdown</small>{supplier.isDefault && <em>Default for new products</em>}</div><div className="module-actions"><button className={`supplier-default-toggle${supplier.isDefault ? " is-default" : ""}`} type="button" onClick={() => void setDefault(supplier)} disabled={saving}>{supplier.isDefault ? "Default supplier" : "Make default"}</button><button className="module-secondary" type="button" onClick={() => { setEditingId(supplier.id); setSupplierName(supplier.name); }}>Edit</button><button className="module-secondary delete-action" type="button" onClick={() => void remove(supplier)}>Delete</button></div></article>)}
+        {!suppliers.length && <div className="supplier-empty"><strong>No supplier bills yet</strong><span>Create a supplier bill name here, then select it when adding a product.</span></div>}
+      </div>
+    </section>
+  );
+}
+
+type SupplierBillSummary = {
+  name: string;
+  entries: number;
+  units: number;
+  total: number;
+  products: Array<{ name: string; sku: string; createdAt?: string }>;
+  isUnassigned?: boolean;
+};
+const existingMarginFloorMigrationKey = "fanzzy-existing-margin-floor-applied";
+function SupplierBillsWorkspace() {
+  const [summaries, setSummaries] = useState<SupplierBillSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    const load = async () => {
+      setLoading(true);
+      const [catalogRemote, supplierNamesRemote, suppliersRemote] = await Promise.all([
+        fetchCatalogProducts(),
+        fetchStoreSetting("productSupplierNames"),
+        fetchStoreSetting("suppliers"),
+      ]);
+      const supplierNames = (() => {
+        try {
+          const parsed = JSON.parse(supplierNamesRemote.value || "{}") as Record<string, unknown>;
+          return parsed && typeof parsed === "object"
+            ? Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
+            : {};
+        } catch {
+          return {};
+        }
+      })();
+      let products: Array<{ name: string; sku: string; cost: string | number; price: string | number; stock: number; supplierName?: string; createdAt?: string }> = [];
+      if (!catalogRemote.error && catalogRemote.data !== null) {
+        products = catalogRemote.data.map((product) => ({
+          name: product.name,
+          sku: product.sku,
+          createdAt: product.createdAt,
+          cost: product.cost ?? 0,
+          price: product.price,
+          stock: Number(product.stock) || 0,
+          supplierName: (product as typeof product & { supplierName?: string }).supplierName,
+        }));
+      } else if (typeof window !== "undefined") {
+        try {
+          const parsed = JSON.parse(window.localStorage.getItem("fanzzy-products") || "[]") as Array<Partial<AdminProduct> & { id?: string; cost?: string | number }>;
+          products = parsed.filter((product) => product.sku || product.id).map((product, index) => ({
+            name: String(product.name || "Unnamed product"),
+            sku: product.sku || product.id || `local-${index}`,
+            createdAt: product.createdAt,
+            cost: product.cost ?? 0,
+            price: product.price ?? 0,
+            stock: Number(product.stock) || 0,
+            supplierName: product.supplierName,
+          }));
+        } catch {
+          products = [];
+        }
+      }
+      const missingSupplierProducts = products.filter((product) => !(product.supplierName || supplierNames[product.sku] || "").trim());
+      if (missingSupplierProducts.length) {
+        const assignedSupplierNames = Object.fromEntries(missingSupplierProducts.map((product) => [product.sku, preferredDefaultSupplierName]));
+        await saveStoreSetting("productSupplierNames", JSON.stringify({ ...supplierNames, ...assignedSupplierNames }));
+        if (typeof window !== "undefined") {
+          try {
+            const storedCatalog = JSON.parse(window.localStorage.getItem("fanzzy-products") || "[]") as Array<Record<string, unknown>>;
+            if (Array.isArray(storedCatalog)) {
+              window.localStorage.setItem("fanzzy-products", JSON.stringify(storedCatalog.map((product) => {
+                const sku = String(product.sku || product.id || "");
+                return assignedSupplierNames[sku] ? { ...product, supplierName: preferredDefaultSupplierName } : product;
+              })));
+              window.dispatchEvent(new Event("fanzzy-products-updated"));
+            }
+          } catch {
+            // The supplier setting remains the source of truth when local storage is unavailable.
+          }
+        }
+        products = products.map((product) => assignedSupplierNames[product.sku] ? { ...product, supplierName: preferredDefaultSupplierName } : product);
+        Object.assign(supplierNames, assignedSupplierNames);
+      }
+      const shouldApplyExistingMarginFloor = typeof window !== "undefined" && window.localStorage.getItem(existingMarginFloorMigrationKey) !== "true";
+      const adjustedProducts = products.map((product) => ({
+        ...product,
+        price: shouldApplyExistingMarginFloor
+          ? normalizeSellingPriceForMargin(product.cost, product.price)
+          : normalizeWholeSellingPrice(product.price),
+      }));
+      const priceUpdates = new Map(
+        adjustedProducts
+          .filter((product, index) => parseMoney(String(product.price)) !== parseMoney(String(products[index]?.price)))
+          .map((product) => [product.sku, product.price]),
+      );
+      if (shouldApplyExistingMarginFloor && priceUpdates.size && typeof window !== "undefined") {
+        try {
+          const storedCatalog = JSON.parse(window.localStorage.getItem("fanzzy-products") || "[]") as Array<Record<string, unknown>>;
+          if (Array.isArray(storedCatalog)) {
+            const updatedCatalog = storedCatalog.map((product) => {
+              const sku = String(product.sku || product.id || "");
+              return priceUpdates.has(sku) ? { ...product, price: priceUpdates.get(sku) } : product;
+            });
+            window.localStorage.setItem("fanzzy-products", JSON.stringify(updatedCatalog));
+            window.dispatchEvent(new Event("fanzzy-products-updated"));
+          }
+        } catch {
+          // The shared catalog update below remains available when local storage is unavailable.
+        }
+      }
+      if (shouldApplyExistingMarginFloor && priceUpdates.size && catalogRemote.data) {
+        await Promise.all(catalogRemote.data.filter((product) => priceUpdates.has(product.sku)).map((product) => saveCatalogProduct({ ...product, price: parseMoney(String(priceUpdates.get(product.sku))) })));
+      }
+      if (shouldApplyExistingMarginFloor && typeof window !== "undefined") window.localStorage.setItem(existingMarginFloorMigrationKey, "true");
+      products = adjustedProducts;
+      const storedSuppliers = suppliersRemote.value || (typeof window !== "undefined" ? window.localStorage.getItem(localSuppliersKey) : null);
+      const suppliers = ensurePreferredSupplier(parseSupplierRecords(storedSuppliers)).suppliers;
+      const summaryMap = new Map<string, SupplierBillSummary>();
+      suppliers.forEach((supplier) => summaryMap.set(supplier.name.toLowerCase(), { name: supplier.name, entries: 0, units: 0, total: 0, products: [] }));
+      let unassigned: SupplierBillSummary | null = null;
+      products.forEach((product) => {
+        const supplierName = (product.supplierName || supplierNames[product.sku] || "").trim();
+        const key = supplierName.toLowerCase();
+        const summary = key ? summaryMap.get(key) : undefined;
+        const target = summary || (unassigned ||= { name: "Unassigned", entries: 0, units: 0, total: 0, products: [], isUnassigned: true });
+        target.entries += 1;
+        target.units += Math.max(0, product.stock);
+        target.total += parseMoney(String(product.cost)) * Math.max(0, product.stock);
+        target.products.push({ name: product.name, sku: product.sku, createdAt: product.createdAt });
+      });
+      const next = [...summaryMap.values()];
+      if (unassigned) next.push(unassigned);
+      if (active) {
+        setSummaries(next);
+        setLoading(false);
+      }
+    };
+    void load();
+    const refresh = () => void load();
+    window.addEventListener("fanzzy-suppliers-updated", refresh);
+    window.addEventListener("fanzzy-products-updated", refresh);
+    window.addEventListener("storage", refresh);
+    return () => {
+      active = false;
+      window.removeEventListener("fanzzy-suppliers-updated", refresh);
+      window.removeEventListener("fanzzy-products-updated", refresh);
+      window.removeEventListener("storage", refresh);
+    };
+  }, []);
+
+  const totalEntries = summaries.reduce((sum, summary) => sum + summary.entries, 0);
+  const totalUnits = summaries.reduce((sum, summary) => sum + summary.units, 0);
+  const totalValue = summaries.reduce((sum, summary) => sum + summary.total, 0);
+
+  return (
+    <section className="panel module-workspace supplier-bills-workspace">
+      <div className="module-workspace-head">
+        <div>
+          <p className="eyebrow">PURCHASE CONTROL</p>
+          <h2>Supplier bill summary</h2>
+          <p>See how many product entries belong to each supplier bill and the total purchase value of current stock.</p>
+        </div>
+        <div className="module-summary supplier-bills-total"><span><i className="status-light" />{totalEntries} entries · {totalUnits} units</span><strong>{formatAdminCurrency(totalValue)}</strong></div>
+      </div>
+      <div className="supplier-bill-summary-list">
+        <div className="supplier-bill-summary-heading"><span>SUPPLIER BILL</span><span>ENTRIES</span><span>UNITS</span><span>TOTAL PURCHASE VALUE</span></div>
+        {loading ? <div className="supplier-bill-empty">Loading supplier bill totals…</div> : summaries.map((summary) => <article className={`supplier-bill-summary-row${summary.isUnassigned ? " is-unassigned" : ""}`} key={summary.name}><div><strong>{summary.name}</strong><small>{summary.isUnassigned ? "Assign this product to a supplier bill from Products" : "Current catalog allocation"}</small></div><b>{summary.entries}</b><b>{summary.units}</b><strong>{formatAdminCurrency(summary.total)}</strong></article>)}
+        {!loading && !summaries.length && <div className="supplier-bill-empty">No supplier bills or products found yet.</div>}
+        {!loading && summaries.filter((summary) => summary.isUnassigned).map((summary) => <div className="supplier-bill-unassigned-details" key={`${summary.name}-details`}><p className="eyebrow">UNASSIGNED PRODUCTS · SELECT A SUPPLIER BILL FROM PRODUCTS</p><div>{summary.products.map((product) => <span key={product.sku}><strong>{product.name}</strong><small>{product.sku} · Created {product.createdAt ? new Date(product.createdAt).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "Date unavailable"}</small></span>)}</div></div>)}
+      </div>
+    </section>
+  );
+}
+
 const moduleContent: Record<
   string,
   {
@@ -1760,6 +2103,8 @@ function ModuleWorkspace({
   if (module === "Customers") return <CustomersWorkspace onNotify={onNotify} />;
   if (module === "Settings") return <SettingsWorkspace onNotify={onNotify} />;
   if (module === "Vendors") return <AdminVendorsWorkspace onNotify={onNotify} />;
+  if (module === "Suppliers") return <SuppliersWorkspace onNotify={onNotify} />;
+  if (module === "Supplier Bills") return <SupplierBillsWorkspace />;
   const content = moduleContent[module] ?? {
     eyebrow: "WORKSPACE",
     title: module,
@@ -5751,6 +6096,7 @@ function ProductLibraryWorkspace({
   scannerOnly?: boolean;
 }) {
   const [products, setProducts] = useState(adminProducts);
+  const [suppliers, setSuppliers] = useState<SupplierRecord[]>([]);
   const [promotionOffers, setPromotionOffers] = useState<PromotionOffer[]>([]);
   const [productDamages, setProductDamages] = useState<ProductDamageMap>({});
   const [selectedProduct, setSelectedProduct] = useState<AdminProduct | null>(
@@ -5766,6 +6112,7 @@ function ProductLibraryWorkspace({
   const [productSearch, setProductSearch] = useState("");
   const [productCategoryFilter, setProductCategoryFilter] = useState("all");
   const [productVariantFilter, setProductVariantFilter] = useState("all");
+  const [productSupplierFilter, setProductSupplierFilter] = useState("all");
   const [catalogCategories, setCatalogCategories] = useState<Array<{ name: string; pieces: number; image?: string }>>([]);
   const [scannerOpen, setScannerOpen] = useState(false);
   const [editValues, setEditValues] = useState({
@@ -5840,6 +6187,40 @@ function ProductLibraryWorkspace({
   useEffect(() => {
     if (productScannerRequest > 0) setScannerOpen(true);
   }, [productScannerRequest]);
+  useEffect(() => {
+    let active = true;
+    const loadSuppliers = async () => {
+      const remote = await fetchStoreSetting("suppliers");
+      const stored = remote.value || window.localStorage.getItem(localSuppliersKey);
+      const parsedSuppliers = parseSupplierRecords(stored);
+      const ensured = ensurePreferredSupplier(parsedSuppliers);
+      const next = ensured.suppliers;
+      if (!active) return;
+      setSuppliers(next);
+      const defaultSupplierName = next.find((supplier) => supplier.isDefault)?.name || "";
+      if (defaultSupplierName) {
+        setNewProduct((current) => current.supplierName ? current : { ...current, supplierName: defaultSupplierName });
+      }
+      if (remote.value || ensured.changed) {
+        if (ensured.changed) await saveStoreSetting("suppliers", JSON.stringify(next));
+        persistSuppliers(next);
+      }
+    };
+    const syncSuppliers = () => {
+      const next = ensurePreferredSupplier(parseSupplierRecords(window.localStorage.getItem(localSuppliersKey))).suppliers;
+      setSuppliers(next);
+      const defaultSupplierName = next.find((supplier) => supplier.isDefault)?.name || "";
+      if (defaultSupplierName) setNewProduct((current) => current.supplierName ? current : { ...current, supplierName: defaultSupplierName });
+    };
+    void loadSuppliers();
+    window.addEventListener("fanzzy-suppliers-updated", syncSuppliers);
+    window.addEventListener("storage", syncSuppliers);
+    return () => {
+      active = false;
+      window.removeEventListener("fanzzy-suppliers-updated", syncSuppliers);
+      window.removeEventListener("storage", syncSuppliers);
+    };
+  }, []);
   useEffect(() => {
     let active = true;
     const readLocalCategories = () => {
@@ -6019,6 +6400,7 @@ function ProductLibraryWorkspace({
           supplierNameMap = {};
         }
       }
+      const shouldBackfillSupplierNames = Object.keys(supplierNameMap).length === 0;
       if (pricingRemote.value) {
         try {
           const parsed = JSON.parse(pricingRemote.value) as Record<string, { gstRate?: number; markup?: number }>;
@@ -6117,7 +6499,7 @@ function ProductLibraryWorkspace({
             : Object.fromEntries(variants.filter((variant) => variant.size && variant.stock !== undefined).map((variant) => [variant.size!, variant.stock!]));
           return {
           name: product.name,
-          price: `₹${product.price.toLocaleString("en-IN")}`,
+          price: normalizeWholeSellingPrice(product.price),
            cost: `₹${(product.cost ?? 0).toLocaleString("en-IN")}`,
            compareAt: product.compareAt,
           sku: product.sku,
@@ -6130,7 +6512,7 @@ function ProductLibraryWorkspace({
           barcode: barcodeMap[product.sku] || product.barcode || "",
           hsnCode: hsnCodeMap[product.sku] || "",
           billName: billNameMap[product.sku] || "",
-          supplierName: supplierNameMap[product.sku] || "",
+          supplierName: supplierNameMap[product.sku] || (shouldBackfillSupplierNames ? preferredDefaultSupplierName : ""),
           gstRate: pricingMap[product.sku]?.gstRate || 0,
           markup: pricingMap[product.sku]?.markup || 0,
           costWithGst: calculatePricing(`₹${(product.cost ?? 0).toLocaleString("en-IN")}`, String(pricingMap[product.sku]?.gstRate || 0), String(pricingMap[product.sku]?.markup || 0)).costWithGst,
@@ -6150,6 +6532,7 @@ function ProductLibraryWorkspace({
         // by an older localStorage snapshot on another device.
         setProducts(mapped);
         persistCatalog(mapped);
+        if (shouldBackfillSupplierNames && mapped.length) void saveProductSupplierNames(mapped);
         return;
       }
       const stored = window.localStorage.getItem("fanzzy-products");
@@ -6163,8 +6546,7 @@ function ProductLibraryWorkspace({
           }
         >;
         if (active && Array.isArray(parsed) && parsed.length) {
-          setProducts(
-            parsed
+          const mapped = parsed
               .filter(
                 (product) =>
                   typeof product.name === "string" && product.name.trim() && !isDemoProduct(product),
@@ -6181,10 +6563,7 @@ function ProductLibraryWorkspace({
                 const localSizeStock = product.sizeStock || sizeStockMap[sku] || Object.fromEntries(localVariants.filter((variant) => variant.size && variant.stock !== undefined).map((variant) => [variant.size!, variant.stock!]));
                 return {
                   name: product.name!.trim(),
-                  price:
-                    typeof rawPrice === "number"
-                      ? `₹${rawPrice.toLocaleString("en-IN")}`
-                      : rawPrice || "₹0",
+                  price: normalizeWholeSellingPrice(rawPrice ?? "₹0"),
                   cost:
                     typeof rawCost === "number"
                       ? `₹${rawCost.toLocaleString("en-IN")}`
@@ -6202,7 +6581,7 @@ function ProductLibraryWorkspace({
                   barcode: product.barcode || barcodeMap[sku] || "",
                   hsnCode: product.hsnCode || hsnCodeMap[sku] || "",
                   billName: product.billName || billNameMap[sku] || "",
-                  supplierName: product.supplierName || supplierNameMap[sku] || "",
+                  supplierName: product.supplierName || supplierNameMap[sku] || (shouldBackfillSupplierNames ? preferredDefaultSupplierName : ""),
                   gstRate: product.gstRate ?? pricingMap[sku]?.gstRate ?? 0,
                   markup: product.markup ?? pricingMap[sku]?.markup ?? 0,
                   costWithGst: product.costWithGst || calculatePricing(String(rawCost ?? "₹0"), String(product.gstRate ?? pricingMap[sku]?.gstRate ?? 0), String(product.markup ?? pricingMap[sku]?.markup ?? 0)).costWithGst,
@@ -6211,8 +6590,10 @@ function ProductLibraryWorkspace({
            variantType: product.variantType || variantTypeMap[sku] || (localSizes.length ? "size" : "normal"),
            variants: localVariants,
                 };
-              }),
-          );
+              });
+          setProducts(mapped);
+          persistCatalog(mapped);
+          if (shouldBackfillSupplierNames && mapped.length) void saveProductSupplierNames(mapped);
         }
       } catch {
         window.localStorage.removeItem("fanzzy-products");
@@ -6234,9 +6615,12 @@ function ProductLibraryWorkspace({
     ].filter(Boolean))).sort((a, b) => a.localeCompare(b)),
     [catalogCategories, productCategories],
   );
-  const productVariants = useMemo(
-    () => Array.from(new Set(products.flatMap((product) => product.variants?.map((variant) => variant.name.trim()).filter(Boolean) || []))).sort((a, b) => a.localeCompare(b)),
-    [products],
+  const productSuppliers = useMemo(
+    () => Array.from(new Set([
+      ...suppliers.map((supplier) => supplier.name),
+      ...products.map((product) => product.supplierName || ""),
+    ].map((name) => name.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
+    [products, suppliers],
   );
   const filteredProducts = useMemo(() => {
     const query = productSearch.trim().toLowerCase();
@@ -6252,10 +6636,12 @@ function ProductLibraryWorkspace({
       ].some((value) => String(value || "").toLowerCase().includes(query));
       const matchesCategory = productCategoryFilter === "all" || product.category.trim().toLowerCase() === productCategoryFilter.trim().toLowerCase();
       const matchesVariant = productVariantFilter === "all"
-        || (productVariantFilter === "with-variants" ? variants.length > 0 : variants.some((variant) => variant.name.trim().toLowerCase() === productVariantFilter.trim().toLowerCase()));
-      return matchesSearch && matchesCategory && matchesVariant;
+        || (productVariantFilter === "with-variants" && variants.length > 0);
+      const matchesSupplier = productSupplierFilter === "all"
+        || product.supplierName?.trim().toLowerCase() === productSupplierFilter.trim().toLowerCase();
+      return matchesSearch && matchesCategory && matchesVariant && matchesSupplier;
     });
-  }, [productCategoryFilter, productSearch, productVariantFilter, products]);
+  }, [productCategoryFilter, productSearch, productSupplierFilter, productVariantFilter, products]);
   const damageOptions = useMemo(() => {
     if (!selectedProduct) return [];
     const variants = selectedProduct.variants || [];
@@ -6410,6 +6796,7 @@ function ProductLibraryWorkspace({
     const sizeStock = Object.fromEntries(sizes.map((size) => [size, current.sizeStock[size] ?? ""]));
     return { ...current, sizes: value, sizeStock };
   });
+  const defaultSupplierName = suppliers.find((supplier) => supplier.isDefault)?.name || "";
   const openAddProduct = (scannedFile?: File, scannedPreview?: string) => {
     setNewProduct({
       name: "",
@@ -6421,7 +6808,7 @@ function ProductLibraryWorkspace({
       barcode: "",
       hsnCode: "",
       billName: "",
-      supplierName: "",
+      supplierName: defaultSupplierName,
       markup: "",
       gstRate: "",
       costWithGst: "₹",
@@ -6449,6 +6836,7 @@ function ProductLibraryWorkspace({
   };
   const saveProduct = async () => {
     if (!newProduct.name.trim()) return onNotify("Add a product name");
+    if (!newProduct.supplierName.trim()) return onNotify("Select a supplier bill before saving the product");
     const productSku =
       newProduct.sku.trim() ||
       createSku(newProduct.name, newProduct.category, products);
@@ -6492,9 +6880,10 @@ function ProductLibraryWorkspace({
     const product: AdminProduct = {
       name: newProduct.name.trim(),
       sku: productSku,
+      createdAt: new Date().toISOString(),
       category: newProduct.category,
       stock: Number(newProduct.stock) || 0,
-      price: newProduct.price.trim() || "₹0",
+      price: normalizeWholeSellingPrice(newProduct.price.trim() || "₹0"),
       cost: newProduct.cost.trim() || "₹0",
        status: hasSellableStock(newProduct.stock, newProduct.variantType, newProductSizes, newProductSizeStock, newProduct.variants) ? "Published" : "Draft",
       image: productImage,
@@ -6794,7 +7183,7 @@ function ProductLibraryWorkspace({
       ...selectedProduct,
       name: editValues.name.trim(),
       category: editValues.category,
-      price: editValues.price.trim() || "₹0",
+      price: normalizeWholeSellingPrice(editValues.price.trim() || "₹0"),
       cost: editValues.cost.trim() || "₹0",
       stock: Number(editValues.stock) || 0,
       sku: editValues.sku.trim() || selectedProduct.sku,
@@ -6892,7 +7281,7 @@ function ProductLibraryWorkspace({
     const barcodeColumn = findColumn(["barcode", "bar code", "ean", "upc"]);
     const hsnCodeColumn = findColumn(["hsn", "hsn code", "hsncode"]);
     const billNameColumn = findColumn(["bill name", "invoice name", "billing name"]);
-    const supplierNameColumn = findColumn(["supplier name", "supplier", "vendor name"]);
+    const supplierNameColumn = findColumn(["supplier bill", "supplier name", "supplier", "vendor name"]);
     const sizesColumn = findColumn(["sizes", "size", "available sizes"]);
     const imported = rows
       .map((row, index): AdminProduct | null => {
@@ -6961,7 +7350,7 @@ function ProductLibraryWorkspace({
     event.target.value = "";
   };
   const exportCsv = () => {
-    const headers = ["name", "billName", "supplierName", "sku", "barcode", "hsnCode", "category", "sizes", "stock", "price", "cost", "status", "image", "hoverImage"];
+    const headers = ["name", "billName", "supplierBill", "sku", "barcode", "hsnCode", "category", "sizes", "stock", "price", "cost", "status", "image", "hoverImage"];
     const escapeCsv = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
     const rows = products.map((product) => [
       product.name,
@@ -7212,12 +7601,12 @@ function ProductLibraryWorkspace({
                 />
               </label>
               <label>
-                Supplier name
-                <input
-                  value={newProduct.supplierName}
-                  onChange={(event) => updateField("supplierName", event.target.value)}
-                  placeholder="Supplier shown on the bill"
-                />
+                Supplier bill
+                <select value={newProduct.supplierName} onChange={(event) => updateField("supplierName", event.target.value)}>
+                  <option value="">Select supplier bill</option>
+                  {Array.from(new Set([newProduct.supplierName, ...suppliers.map((supplier) => supplier.name)].filter(Boolean))).map((name) => <option key={name} value={name}>{name}</option>)}
+                </select>
+                {!suppliers.length && <small className="field-help">Create supplier bills from the Suppliers sidebar first.</small>}
               </label>
               <label>
                 SKU
@@ -7372,12 +7761,18 @@ function ProductLibraryWorkspace({
         <label>
           <span>Variant</span>
           <select value={productVariantFilter} onChange={(event) => setProductVariantFilter(event.target.value)} aria-label="Filter by variant">
-            <option value="all">All variants</option>
-            <option value="with-variants">Variant items only</option>
-            {productVariants.map((variant) => <option key={variant} value={variant}>{variant}</option>)}
+            <option value="all">All products</option>
+            <option value="with-variants">Variant products only</option>
           </select>
         </label>
-        {(productSearch || productCategoryFilter !== "all" || productVariantFilter !== "all") && (
+        <label>
+          <span>Supplier bill</span>
+          <select value={productSupplierFilter} onChange={(event) => setProductSupplierFilter(event.target.value)} aria-label="Filter by supplier bill">
+            <option value="all">All supplier bills</option>
+            {productSuppliers.map((supplier) => <option key={supplier} value={supplier}>{supplier}</option>)}
+          </select>
+        </label>
+        {(productSearch || productCategoryFilter !== "all" || productVariantFilter !== "all" || productSupplierFilter !== "all") && (
           <button
             className="product-library-filter-reset"
             type="button"
@@ -7385,6 +7780,7 @@ function ProductLibraryWorkspace({
               setProductSearch("");
               setProductCategoryFilter("all");
               setProductVariantFilter("all");
+              setProductSupplierFilter("all");
             }}
           >
             Clear
@@ -7629,17 +8025,11 @@ function ProductLibraryWorkspace({
               />
             </label>
             <label>
-              Supplier name
-              <input
-                value={editValues.supplierName}
-                onChange={(event) =>
-                  setEditValues((current) => ({
-                    ...current,
-                    supplierName: event.target.value,
-                  }))
-                }
-                placeholder="Supplier shown on the bill"
-              />
+              Supplier bill
+              <select value={editValues.supplierName} onChange={(event) => updateEditField("supplierName", event.target.value)}>
+                <option value="">Select supplier bill</option>
+                {Array.from(new Set([editValues.supplierName, ...suppliers.map((supplier) => supplier.name)].filter(Boolean))).map((name) => <option key={name} value={name}>{name}</option>)}
+              </select>
             </label>
             <label>
               SKU
@@ -7834,8 +8224,8 @@ function ProductLibraryWorkspace({
                 <strong>{selectedProduct.billName || selectedProduct.name}</strong>
               </span>
               <span>
-                <small>Supplier name</small>
-                <strong>{selectedProduct.supplierName || "Not added"}</strong>
+                <small>Supplier bill</small>
+                <strong>{selectedProduct.supplierName || "Not selected"}</strong>
               </span>
               <span>
                 <small>Available sizes</small>
