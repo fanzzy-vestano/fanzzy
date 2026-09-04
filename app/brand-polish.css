@@ -54,6 +54,10 @@
   }
 }
 
+.category-section-grids {
+  display: contents;
+}
+
 .vendor-strip-section {
   background: var(--cream);
   padding-top: 0;

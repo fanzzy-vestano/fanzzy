@@ -23,8 +23,12 @@ create table if not exists public.categories (
   pieces integer not null default 0,
   image text,
   sort_order integer not null default 0,
+  section text not null default 'normal' check (section in ('normal', 'luxury')),
   created_at timestamptz not null default now()
 );
+
+-- Safe upgrade for categories created before Normal/Luxury sections were added.
+alter table public.categories add column if not exists section text not null default 'normal';
 
 create table if not exists public.store_settings (
   key text primary key,

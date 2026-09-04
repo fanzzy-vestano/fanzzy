@@ -2,6 +2,7 @@ import { supabase } from "./client";
 
 export type CatalogStatus = "Published" | "Draft" | "Low stock";
 export type ProductVariantType = "normal" | "size";
+export type CatalogCategorySection = "normal" | "luxury";
 
 export type CatalogProduct = {
   name: string;
@@ -33,6 +34,44 @@ export type CatalogCategory = {
   pieces: number;
   image?: string;
   sortOrder?: number;
+  section?: CatalogCategorySection;
+};
+
+export type CatalogAgent = {
+  id: string;
+  name: string;
+  phone: string;
+  couponCode: string;
+  discountPercent: number;
+  status: "Active" | "Paused";
+  createdAt?: string;
+};
+
+export const countCatalogProductsByCategory = (products: Array<Pick<CatalogProduct, "category">>) => products.reduce<Record<string, number>>((counts, product) => {
+  const key = product.category.trim().toLowerCase();
+  if (key) counts[key] = (counts[key] || 0) + 1;
+  return counts;
+}, {});
+
+// Older category tables do not have the section column. Keep the existing
+// Luxury categories visible until those records are saved with an explicit
+// section, while keeping the standard Earrings category in Everyday.
+export const inferLegacyCategorySections = <T extends { name: string; section?: CatalogCategorySection }>(categories: T[]) => {
+  const normalizedCategories = categories.map((category) =>
+    category.name.trim().toLowerCase() === "earrings" ? { ...category, section: "normal" as const } : category,
+  );
+  if (normalizedCategories.some((category) => category.section === "luxury")) return normalizedCategories;
+  const luxuryNames = new Set(
+    normalizedCategories
+      .filter((category) => /luxur|premium/i.test(category.name.trim()))
+      .slice(0, 2)
+      .map((category) => category.name.trim().toLowerCase()),
+  );
+  if (!luxuryNames.size) return normalizedCategories;
+  return normalizedCategories.map((category) => ({
+    ...category,
+    section: luxuryNames.has(category.name.trim().toLowerCase()) ? "luxury" as const : category.section || "normal" as const,
+  }));
 };
 
 const settingKeys = {
@@ -44,6 +83,7 @@ const settingKeys = {
   pickupHubs: "pickup_hubs",
   orders: "orders",
   marketingRecords: "marketing_records",
+  agents: "agents",
   collections: "collections",
   customers: "customers",
   newsletterSubscribers: "newsletter_subscribers",
@@ -95,6 +135,7 @@ const asCategory = (row: Record<string, unknown>): CatalogCategory => ({
   pieces: Number(row.pieces ?? 0),
   image: typeof row.image === "string" ? row.image : undefined,
   sortOrder: Number(row.sort_order ?? 0),
+  section: row.section === "luxury" || row.section === "normal" ? row.section : undefined,
 });
 
 export async function fetchCatalogProducts() {
@@ -190,6 +231,7 @@ export async function saveCatalogCategory(category: CatalogCategory) {
     pieces: category.pieces,
     image: category.image ?? null,
     sort_order: category.sortOrder ?? 0,
+    section: category.section ?? "normal",
   }, { onConflict: "name" });
   return error;
 }
@@ -206,6 +248,7 @@ export async function renameCatalogCategory(previousName: string, category: Cata
   if (category.pieces !== undefined) updates.pieces = category.pieces;
   if (category.image !== undefined) updates.image = category.image;
   if (category.sortOrder !== undefined) updates.sort_order = category.sortOrder;
+  if (category.section !== undefined) updates.section = category.section;
   const { error } = await supabase.from("categories").update(updates).eq("name", previousName);
   return error;
 }

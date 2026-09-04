@@ -6,9 +6,12 @@ import {
   fetchCatalogProducts,
   fetchStoreOrders,
   fetchStoreSetting,
+  inferLegacyCategorySections,
   saveStoreOrders,
   saveStoreSetting,
   subscribeToStoreSetting,
+  type CatalogAgent,
+  type CatalogCategorySection,
   type ProductVariantType,
 } from "../lib/supabase/catalog";
 import { printOrderBill } from "../lib/order-bill";
@@ -154,7 +157,8 @@ const readOverlayProduct = (): Product | null => {
 };
 
 const defaultProducts: Product[] = [];
-const defaultCategories: Array<{ name: string; count: string; image: string }> = [];
+type StorefrontCategory = { name: string; count: string; image: string; section: CatalogCategorySection };
+const defaultCategories: StorefrontCategory[] = [];
 const categoryImageFallbacks: Record<string, string> = {
   anklet: "https://images.unsplash.com/photo-1611652022419-a9419f74343d?auto=format&fit=crop&w=900&q=85",
   anklets: "https://images.unsplash.com/photo-1611652022419-a9419f74343d?auto=format&fit=crop&w=900&q=85",
@@ -360,6 +364,26 @@ const productTones = ["#d9c4bc", "#dad7ce", "#d0c2b0", "#e5ddd1"];
 const formatOrderDate = (value: string) => new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", year: "numeric" }).format(new Date(`${value}T00:00:00`));
 const formatOrderTime = (value?: string) => value ? new Intl.DateTimeFormat("en-IN", { hour: "2-digit", minute: "2-digit" }).format(new Date(value)) : "";
 const normalizeCouponCode = (value?: string) => String(value || "").trim().replace(/\s+/g, "").toUpperCase();
+const parseAgentCoupons = (stored: string | null): MarketingRecord[] => {
+  if (!stored) return [];
+  try {
+    const parsed = JSON.parse(stored) as Array<Partial<CatalogAgent>>;
+    return Array.isArray(parsed)
+      ? parsed
+          .filter((agent) => agent?.status !== "Paused" && agent?.name && agent?.couponCode)
+          .map((agent) => ({
+            kind: "Coupon" as const,
+            name: `${String(agent.name).trim()} agent coupon`,
+            detail: `Agent referral discount for ${String(agent.name).trim()}`,
+            status: "Active" as const,
+            code: normalizeCouponCode(agent.couponCode),
+            discount: `${Math.min(100, Math.max(1, Number(agent.discountPercent) || 1))}% off`,
+          }))
+      : [];
+  } catch {
+    return [];
+  }
+};
 const getCouponDiscount = (coupon: MarketingRecord, subtotal: number) => {
   const base = Math.max(0, Number.isFinite(subtotal) ? subtotal : 0);
   const discount = String(coupon.discount || "").replace(/,/g, "").trim();
@@ -544,6 +568,7 @@ export default function Home() {
   const [categories, setCategories] = useState(defaultCategories);
   const [vendors, setVendors] = useState<StorefrontVendor[]>([]);
   const [activeCategory, setActiveCategory] = useState("All pieces");
+  const [activeCategorySection, setActiveCategorySection] = useState<CatalogCategorySection | "all">("all");
   const [productSort, setProductSort] = useState("featured");
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -593,6 +618,7 @@ export default function Home() {
   const [couponInput, setCouponInput] = useState("");
   const [appliedCoupon, setAppliedCoupon] = useState<MarketingRecord | null>(null);
   const [marketingRecords, setMarketingRecords] = useState<MarketingRecord[]>([]);
+  const [agentCoupons, setAgentCoupons] = useState<MarketingRecord[]>([]);
   const [promotionalOffers, setPromotionalOffers] = useState<PromotionOffer[]>([]);
   const [quickProduct, setQuickProduct] = useState<Product | null>(null);
   const overlayHistoryStack = useRef<string[]>([]);
@@ -685,11 +711,22 @@ export default function Home() {
   }, [activeCategory, cartOpen, search]);
   const selectCategory = useCallback((category: string) => {
     setActiveCategory(category);
+    setActiveCategorySection("all");
     overlayPageState.current = {
       ...overlayPageState.current,
       activeCategory: category,
       scrollY: Math.round(window.scrollY),
     };
+  }, []);
+  const selectCategorySection = useCallback((section: CatalogCategorySection) => {
+    setActiveCategory("All pieces");
+    setActiveCategorySection(section);
+    overlayPageState.current = {
+      ...overlayPageState.current,
+      activeCategory: "All pieces",
+      scrollY: Math.round(window.scrollY),
+    };
+    window.requestAnimationFrame(() => document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }));
   }, []);
 
   useEffect(() => {
@@ -991,27 +1028,36 @@ export default function Home() {
   useEffect(() => {
     let active = true;
     const syncCategories = async () => {
+      const stored = window.localStorage.getItem("fanzzy-categories");
+      let localCategories: StorefrontCategory[] = [];
+      if (stored) {
+        try {
+          const parsed = JSON.parse(stored) as Array<{ name?: string; pieces?: number; image?: string; section?: CatalogCategorySection }>;
+          localCategories = parsed.filter((category) => category.name).map((category, index) => ({
+            name: category.name!,
+            count: `${category.pieces ?? 0} pieces`,
+            image: category.image || categoryImageFallback(category.name!, index),
+            section: category.section || "normal",
+          }));
+        } catch {
+          window.localStorage.removeItem("fanzzy-categories");
+        }
+      }
       const remote = await fetchCatalogCategories();
       if (active && !remote.error && remote.data && remote.data.length) {
-        setCategories(remote.data.map((category, index) => ({
+        const localCategoryByName = new Map(localCategories.map((category) => [category.name.trim().toLowerCase(), category]));
+        const remoteCategories = remote.data.map((category, index) => ({
           name: category.name,
           count: `${category.pieces} pieces`,
           image: category.image || categoryImageFallback(category.name, index),
-        })));
+          section: localCategoryByName.get(category.name.trim().toLowerCase())?.section || category.section || "normal",
+        }));
+        const remoteNames = new Set(remoteCategories.map((category) => category.name.trim().toLowerCase()));
+        const localOnlyCategories = localCategories.filter((category) => !remoteNames.has(category.name.trim().toLowerCase()));
+        setCategories(inferLegacyCategorySections([...remoteCategories, ...localOnlyCategories]));
         return;
       }
-      const stored = window.localStorage.getItem("fanzzy-categories");
-      if (!active || !stored) return;
-      try {
-        const parsed = JSON.parse(stored) as Array<{ name?: string; pieces?: number; image?: string }>;
-        setCategories(parsed.filter((category) => category.name).map((category, index) => ({
-          name: category.name!,
-          count: `${category.pieces ?? 0} pieces`,
-          image: category.image || categoryImageFallback(category.name!, index),
-        })));
-      } catch {
-        window.localStorage.removeItem("fanzzy-categories");
-      }
+      if (active && localCategories.length) setCategories(localCategories);
     };
     const runSyncCategories = () => { void syncCategories().catch(() => undefined); };
     runSyncCategories();
@@ -1021,6 +1067,24 @@ export default function Home() {
       active = false;
       window.removeEventListener("storage", runSyncCategories);
       window.removeEventListener("fanzzy-categories-updated", runSyncCategories);
+    };
+  }, []);
+
+  useEffect(() => {
+    const syncAgentCoupons = async () => {
+      const remote = await fetchStoreSetting("agents");
+      const stored = remote.value || window.localStorage.getItem("fanzzy-agents");
+      setAgentCoupons(parseAgentCoupons(stored));
+    };
+    const runSyncAgentCoupons = () => { void syncAgentCoupons().catch(() => setAgentCoupons([])); };
+    const unsubscribeFromAgentCoupons = subscribeToStoreSetting("agents", runSyncAgentCoupons);
+    runSyncAgentCoupons();
+    window.addEventListener("storage", runSyncAgentCoupons);
+    window.addEventListener("fanzzy-agents-updated", runSyncAgentCoupons);
+    return () => {
+      unsubscribeFromAgentCoupons();
+      window.removeEventListener("storage", runSyncAgentCoupons);
+      window.removeEventListener("fanzzy-agents-updated", runSyncAgentCoupons);
     };
   }, []);
 
@@ -1134,8 +1198,9 @@ export default function Home() {
     return products
       .filter((product) => {
         const categoryMatch = activeCategory === "All pieces" || product.category === activeCategory;
+        const categorySectionMatch = activeCategorySection === "all" || categories.some((category) => category.section === activeCategorySection && category.name.trim().toLowerCase() === product.category.trim().toLowerCase());
         const searchMatch = !query || `${product.name} ${product.category} ${product.vendorName || ""}`.toLowerCase().includes(query);
-        return categoryMatch && searchMatch;
+        return categoryMatch && categorySectionMatch && searchMatch;
       })
       .sort((left, right) => {
         // Keep available pieces before sold-out pieces for every sort mode.
@@ -1155,7 +1220,7 @@ export default function Home() {
             return 0;
         }
       });
-  }, [activeCategory, productSort, products, search]);
+  }, [activeCategory, activeCategorySection, categories, productSort, products, search]);
 
   const offersForProduct = useCallback((product: Product) => promotionalOffers.filter((offer) => {
     const paidScope = offer.eligiblePaid;
@@ -2033,11 +2098,19 @@ export default function Home() {
     setAuthMessage("Sign in with a one-time SMS code to view your orders.");
     setAuthOpen(true);
   };
-  const applyCoupon = () => {
+  const applyCoupon = async () => {
     const code = normalizeCouponCode(couponInput);
     if (!code) return announce("Enter a coupon code");
-    const source = marketingRecords;
-    const coupon = source.find((record) => String(record.kind || "").toLowerCase() === "coupon" && String(record.status || "").toLowerCase() === "active" && normalizeCouponCode(record.code) === code);
+    const findCoupon = (source: MarketingRecord[]) => source.find((record) => String(record.kind || "").toLowerCase() === "coupon" && String(record.status || "").toLowerCase() === "active" && normalizeCouponCode(record.code) === code);
+    let coupon = findCoupon([...agentCoupons, ...marketingRecords]);
+    if (!coupon) {
+      const remote = await fetchStoreSetting("agents");
+      const freshAgentCoupons = parseAgentCoupons(remote.value || window.localStorage.getItem("fanzzy-agents"));
+      if (freshAgentCoupons.length) {
+        setAgentCoupons(freshAgentCoupons);
+        coupon = findCoupon([...freshAgentCoupons, ...marketingRecords]);
+      }
+    }
     if (!coupon) {
       setAppliedCoupon(null);
       return announce("That coupon is not active or does not exist");
@@ -2501,6 +2574,10 @@ export default function Home() {
       selectionKey(item) === selectionKey(selection) || (!item.variantName && !item.size)
     ));
   };
+  const categoryGroups = (["normal", "luxury"] as CatalogCategorySection[]).map((section) => ({
+    section,
+    categories: categories.filter((category) => category.section === section).slice(0, 2),
+  }));
 
   return (
     <main className="site-shell" id="top">
@@ -2537,12 +2614,12 @@ export default function Home() {
 
       {heroSlides.length > 0 && <section className="hero hero-background" id="top"><div className="hero-slide-layer" key={heroSlides[heroSlideIndex]}><img src={heroSlides[heroSlideIndex]} alt="Fanzzy collection highlight" /></div></section>}
 
-      <section className="section-block" id="categories"><div className="category-showcase"><div className="category-intro"><h2>Find your <em>signature.</em></h2><div><a className="text-link" href={`${siteBasePath}/collections`}>View all categories <span>↗</span></a></div></div><div className="category-grid">{categories.slice(0, 4).map((category, index) => <button className={`category-card category-${index + 1}`} key={category.name} onClick={() => { selectCategory(category.name); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}><img src={category.image || categoryImageFallback(category.name, index)} alt={category.name} /><span className="category-overlay" /><span className="category-info"><strong>{category.name}</strong></span></button>)}</div></div></section>
+      <section className="section-block" id="categories"><div className="category-showcase"><div className="category-intro"><h2>Find your <em>signature.</em></h2></div><div className="category-section-grids">{categoryGroups.map(({ section, categories: sectionCategories }) => sectionCategories.length ? <div className={`category-display-group ${section === "luxury" ? "luxury-category-group" : "normal-category-group"}`} key={section}><a className="category-group-heading" href={`${siteBasePath}/collections#${section}`} aria-label={`View all ${section === "luxury" ? "Luxury" : "Everyday Collection"} categories`}><div><h3>{section === "luxury" ? "Luxury Category" : "Everyday Collection"}</h3></div><span className="category-group-link">View <span>↗</span></span></a><div className="category-grid">{sectionCategories.map((category, index) => <button className={`category-card category-${index + 1}`} key={category.name} onClick={() => { selectCategory(category.name); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}><img src={category.image || categoryImageFallback(category.name, index)} alt={category.name} /><span className="category-overlay" /><span className="category-info"><strong>{category.name}</strong></span></button>)}</div></div> : null)}</div></div></section>
       {vendors.length > 0 && <section className="section-block vendor-strip-section" aria-labelledby="vendor-strip-title"><div className="vendor-strip-heading"><div><p className="eyebrow">SHOP BY VENDOR</p><h2 id="vendor-strip-title">Meet the <em>makers.</em></h2></div><a className="text-link" href={`${siteBasePath}/vendors`}>View all vendors <span>↗</span></a></div><div className="vendor-strip" role="list">{vendors.map((vendor) => { const image = vendor.logoUrl || vendor.coverUrl; return <a className="vendor-strip-card" href={`${siteBasePath}/vendors/${vendor.slug}`} key={vendor.id} role="listitem"><span className="vendor-strip-logo">{image ? <img src={image} alt="" /> : <strong>{vendor.businessName.trim().charAt(0).toUpperCase()}</strong>}</span><span className="vendor-strip-copy"><strong>{vendor.businessName}</strong><small>{vendor.featured ? "Featured vendor" : "Explore store"} <span>↗</span></small></span></a>; })}</div></section>}
 
       <section className="manifesto"><p className="eyebrow">THE FANZZY STANDARD</p><h2>Jewellery with a point of view.<br /><em>Made for your everyday extraordinary.</em></h2><p className="manifesto-copy">Fanzzy is a study in contrast — soft and sculptural, familiar and unexpected. Every piece is made in small batches with considered materials and a little bit of magic.</p></section>
 
-      <section className="section-block product-section" id="shop"><div className="section-heading"><div><p className="eyebrow">CURATED FOR YOU</p><h2>Pieces worth <em>keeping.</em></h2></div><a className="text-link" href="#footer">Shop all <span>↗</span></a></div>{promotionalOffers.length > 0 && <div className="storefront-offer-rail"><span className="eyebrow">LIVE OFFERS</span><div className="storefront-offer-list">{promotionalOffers.map((offer) => <button key={offer.id} onClick={() => { const first = products.find((product) => offersForProduct(product).some((item) => item.id === offer.id)); if (first) openQuickProduct(first); }}>{offerTypeLabel(offer)} {offer.freeQuantity > 0 && <span className="offer-free-label">FREE</span>} <b>↗</b></button>)}</div></div>}<div className="filter-row"><div className="filter-pills"><button className={activeCategory === "All pieces" ? "active" : ""} onClick={() => selectCategory("All pieces")}>All pieces</button>{categories.map((category) => <button className={activeCategory === category.name ? "active" : ""} key={category.name} onClick={() => selectCategory(category.name)}>{category.name}</button>)}</div><div className="filter-tools"><label className="product-sort-control"><span>Sort by</span><select value={productSort} onChange={(event) => setProductSort(event.target.value)} aria-label="Sort products"><option value="featured">Featured</option><option value="price-low">Price: low to high</option><option value="price-high">Price: high to low</option><option value="name">Name: A to Z</option><option value="stock">Availability</option></select></label><span className="result-count">{catalogLoading ? "Loading pieces…" : `${filteredProducts.length} pieces`}</span></div></div><div className="product-grid">{catalogLoading ? <p className="muted">Loading all pieces…</p> : filteredProducts.map((product) => { const productPromotions = promotionsByProductId.get(product.id) ?? []; return <ProductCard key={product.id} product={product} promotions={productPromotions} cartQuantity={getProductCartQuantity(product)} wished={wishlist.includes(product.id)} onWishlist={() => toggleWishlist(product.id)} onAdd={() => (getProductVariantType(product) === "normal" && product.variants?.length) || (getProductVariantType(product) === "size" && product.sizes?.length) || productPromotions.length ? openQuickProduct(product) : addToCart(product)} onDecrease={() => decreaseProductCart(product)} onIncrease={() => increaseProductCart(product)} onQuickView={() => openQuickProduct(product)} onImageZoom={() => setZoomedImage({ src: product.image, alt: product.name, adjustments: product.imageAdjustments })} />; })}</div></section>
+      <section className="section-block product-section" id="shop"><div className="section-heading"><div><p className="eyebrow">CURATED FOR YOU</p><h2>Pieces worth <em>keeping.</em></h2></div><a className="text-link" href="#footer">Shop all <span>↗</span></a></div>{promotionalOffers.length > 0 && <div className="storefront-offer-rail"><span className="eyebrow">LIVE OFFERS</span><div className="storefront-offer-list">{promotionalOffers.map((offer) => <button key={offer.id} onClick={() => { const first = products.find((product) => offersForProduct(product).some((item) => item.id === offer.id)); if (first) openQuickProduct(first); }}>{offerTypeLabel(offer)} {offer.freeQuantity > 0 && <span className="offer-free-label">FREE</span>} <b>↗</b></button>)}</div></div>}<div className="filter-row"><div className="filter-pills"><button className={activeCategory === "All pieces" ? "active" : ""} onClick={() => selectCategory("All pieces")}>All pieces</button>{categories.map((category) => <button className={activeCategory === category.name ? "active" : ""} key={category.name} onClick={() => selectCategory(category.name)}>{category.name}{category.section === "luxury" && <span className="category-tier-marker" aria-label="Luxury category"> · Luxury</span>}</button>)}</div><div className="filter-tools"><label className="product-sort-control"><span>Sort by</span><select value={productSort} onChange={(event) => setProductSort(event.target.value)} aria-label="Sort products"><option value="featured">Featured</option><option value="price-low">Price: low to high</option><option value="price-high">Price: high to low</option><option value="name">Name: A to Z</option><option value="stock">Availability</option></select></label><span className="result-count">{catalogLoading ? "Loading pieces…" : `${filteredProducts.length} pieces`}</span></div></div><div className="product-grid">{catalogLoading ? <p className="muted">Loading all pieces…</p> : filteredProducts.map((product) => { const productPromotions = promotionsByProductId.get(product.id) ?? []; return <ProductCard key={product.id} product={product} promotions={productPromotions} cartQuantity={getProductCartQuantity(product)} wished={wishlist.includes(product.id)} onWishlist={() => toggleWishlist(product.id)} onAdd={() => (getProductVariantType(product) === "normal" && product.variants?.length) || (getProductVariantType(product) === "size" && product.sizes?.length) || productPromotions.length ? openQuickProduct(product) : addToCart(product)} onDecrease={() => decreaseProductCart(product)} onIncrease={() => increaseProductCart(product)} onQuickView={() => openQuickProduct(product)} onImageZoom={() => setZoomedImage({ src: product.image, alt: product.name, adjustments: product.imageAdjustments })} />; })}</div></section>
 
       <section className="editorial" id="story"><div className="editorial-image"><img src="https://images.unsplash.com/photo-1515562141207-7a88fb7ce338?auto=format&fit=crop&w=1100&q=85" alt="Close-up of sculptural gold jewelry" /><span>THE ART OF<br /><em>ADORNMENT</em></span></div><div className="editorial-copy"><p className="eyebrow">A NOTE FROM THE STUDIO</p><h2>Less noise.<br /><em>More meaning.</em></h2><p>There is beauty in the in-between. The way a quiet chain layers with your favourite shirt. A ring that becomes part of your hand. Fanzzy is made for these small rituals — the ones that make a day feel like yours.</p><a className="button button-dark" href="#footer">Read our story <span>↗</span></a><div className="editorial-sign">F / 19<br /></div></div></section>
 

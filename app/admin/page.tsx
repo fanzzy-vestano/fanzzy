@@ -6,8 +6,10 @@ import { Eye, Pencil, Trash2 } from "lucide-react";
 import {
   fetchCatalogCategories,
   fetchCatalogProducts,
+  countCatalogProductsByCategory,
   fetchStoreOrders,
   fetchStoreSetting,
+  inferLegacyCategorySections,
   isSupabaseReady,
   removeCatalogCategory,
   removeCatalogProduct,
@@ -17,6 +19,7 @@ import {
   saveStoreOrders,
   saveStoreSetting,
   subscribeToStoreSetting,
+  type CatalogAgent,
   type ProductVariantType,
   uploadStoreImage,
 } from "../../lib/supabase/catalog";
@@ -113,6 +116,7 @@ type AdminPermission =
   | "Collections"
   | "Orders"
   | "Customers"
+  | "Agents"
   | "Marketing"
   | "Buy 1 Get X Free"
   | "Homepage"
@@ -139,6 +143,7 @@ const allAdminPermissions: AdminPermission[] = [
   "Collections",
   "Orders",
   "Customers",
+  "Agents",
   "Marketing",
   "Buy 1 Get X Free",
   "Homepage",
@@ -674,7 +679,7 @@ const saveProductImageAdjustments = async (catalog: AdminProduct[]) => {
   await saveStoreSetting("productImageAdjustments", JSON.stringify(adjustments));
 };
 const persistCategories = (
-  categories: Array<{ name: string; pieces: number; image?: string }>,
+  categories: Array<{ name: string; pieces: number; image?: string; section?: CategorySection }>,
 ) => {
   if (typeof window === "undefined") return;
   window.localStorage.setItem("fanzzy-categories", JSON.stringify(categories));
@@ -684,11 +689,12 @@ const menu = [
   { label: "Overview", icon: "◌" },
   { label: "Products", icon: "◇", count: "24" },
   { label: "Supplier Bills", icon: "▥" },
-  { label: "Product Image Scanner", icon: "⌁" },
+  { label: "Suppliers", icon: "▤" },
   { label: "Categories", icon: "▦" },
   { label: "Collections", icon: "✧" },
   { label: "Orders", icon: "↗" },
   { label: "Customers", icon: "♧" },
+  { label: "Agents", icon: "✦" },
   { label: "Marketing", icon: "◈" },
   { label: "Buy 1 Get X Free", icon: "✦" },
   { label: "Homepage", icon: "⌂" },
@@ -697,7 +703,6 @@ const menu = [
   { label: "Reports", icon: "▥" },
   { label: "Announcement", icon: "▤" },
   { label: "Vendors", icon: "♢" },
-  { label: "Suppliers", icon: "▤" },
 ];
 
 type AdminAuthResponse = { authenticated?: boolean; error?: string; message?: string; resetReady?: boolean };
@@ -1810,6 +1815,23 @@ type SupplierBillSummary = {
   isUnassigned?: boolean;
 };
 const existingMarginFloorMigrationKey = "fanzzy-existing-margin-floor-applied";
+const getSupplierBillUnits = (product: {
+  stock: number;
+  variants?: Array<{ stock?: number }>;
+  sizeStock?: Record<string, number>;
+}) => {
+  const variantStocks = (product.variants || [])
+    .map((variant) => Number(variant.stock))
+    .filter((stock) => Number.isFinite(stock));
+  if (variantStocks.length) return variantStocks.reduce((total, stock) => total + Math.max(0, Math.floor(stock)), 0);
+
+  const sizeStocks = Object.values(product.sizeStock || {})
+    .map((stock) => Number(stock))
+    .filter((stock) => Number.isFinite(stock));
+  if (sizeStocks.length) return sizeStocks.reduce((total, stock) => total + Math.max(0, Math.floor(stock)), 0);
+
+  return Math.max(0, Math.floor(Number(product.stock) || 0));
+};
 function SupplierBillsWorkspace() {
   const [summaries, setSummaries] = useState<SupplierBillSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1818,10 +1840,14 @@ function SupplierBillsWorkspace() {
     let active = true;
     const load = async () => {
       setLoading(true);
-      const [catalogRemote, supplierNamesRemote, suppliersRemote] = await Promise.all([
+      const [catalogRemote, supplierNamesRemote, suppliersRemote, variantsRemote, variantTypeRemote, sizesRemote, sizeStockRemote] = await Promise.all([
         fetchCatalogProducts(),
         fetchStoreSetting("productSupplierNames"),
         fetchStoreSetting("suppliers"),
+        fetchStoreSetting("productVariants"),
+        fetchStoreSetting("productVariantType"),
+        fetchStoreSetting("productSizes"),
+        fetchStoreSetting("productSizeStock"),
       ]);
       const supplierNames = (() => {
         try {
@@ -1833,17 +1859,75 @@ function SupplierBillsWorkspace() {
           return {};
         }
       })();
-      let products: Array<{ name: string; sku: string; cost: string | number; price: string | number; stock: number; supplierName?: string; createdAt?: string }> = [];
+      let variantsMap: Record<string, ProductVariant[]> = {};
+      let variantTypeMap: Record<string, ProductVariantType> = {};
+      let sizesMap: Record<string, string[]> = {};
+      let sizeStockMap: Record<string, Record<string, number>> = {};
+      try {
+        const parsed = JSON.parse(variantsRemote.value || "{}") as Record<string, ProductVariant[]>;
+        if (parsed && typeof parsed === "object") variantsMap = parsed;
+      } catch {
+        variantsMap = {};
+      }
+      try {
+        const parsed = JSON.parse(variantTypeRemote.value || "{}") as Record<string, unknown>;
+        if (parsed && typeof parsed === "object") {
+          variantTypeMap = Object.fromEntries(
+            Object.entries(parsed).filter((entry): entry is [string, ProductVariantType] => entry[1] === "normal" || entry[1] === "size"),
+          );
+        }
+      } catch {
+        variantTypeMap = {};
+      }
+      try {
+        const parsed = JSON.parse(sizesRemote.value || "{}") as Record<string, unknown>;
+        if (parsed && typeof parsed === "object") {
+          sizesMap = Object.fromEntries(
+            Object.entries(parsed).filter((entry): entry is [string, string[]] => Array.isArray(entry[1]) && entry[1].every((size) => typeof size === "string")),
+          );
+        }
+      } catch {
+        sizesMap = {};
+      }
+      try {
+        const parsed = JSON.parse(sizeStockRemote.value || "{}") as Record<string, Record<string, number>>;
+        if (parsed && typeof parsed === "object") sizeStockMap = parsed;
+      } catch {
+        sizeStockMap = {};
+      }
+      let products: Array<{
+        name: string;
+        sku: string;
+        cost: string | number;
+        price: string | number;
+        stock: number;
+        supplierName?: string;
+        createdAt?: string;
+        variants?: ProductVariant[];
+        sizes?: string[];
+        sizeStock?: Record<string, number>;
+        variantType?: ProductVariantType;
+      }> = [];
       if (!catalogRemote.error && catalogRemote.data !== null) {
-        products = catalogRemote.data.map((product) => ({
-          name: product.name,
-          sku: product.sku,
-          createdAt: product.createdAt,
-          cost: product.cost ?? 0,
-          price: product.price,
-          stock: Number(product.stock) || 0,
-          supplierName: (product as typeof product & { supplierName?: string }).supplierName,
-        }));
+        products = catalogRemote.data.map((product) => {
+          const variants = variantsMap[product.sku]?.length ? variantsMap[product.sku] : product.variants || [];
+          const savedSizeStock = sizeStockMap[product.sku] || {};
+          return {
+            name: product.name,
+            sku: product.sku,
+            createdAt: product.createdAt,
+            cost: product.cost ?? 0,
+            price: product.price,
+            stock: Number(product.stock) || 0,
+            supplierName: (product as typeof product & { supplierName?: string }).supplierName,
+            variants,
+            sizes: sizesMap[product.sku] || product.sizes || [],
+            sizeStock: Object.keys(savedSizeStock).length
+              ? savedSizeStock
+              : Object.fromEntries(variants.filter((variant) => variant.size && variant.stock !== undefined).map((variant) => [variant.size!, variant.stock!])),
+            variantType: variantTypeMap[product.sku] || product.variantType,
+          };
+        });
       } else if (typeof window !== "undefined") {
         try {
           const parsed = JSON.parse(window.localStorage.getItem("fanzzy-products") || "[]") as Array<Partial<AdminProduct> & { id?: string; cost?: string | number }>;
@@ -1855,6 +1939,10 @@ function SupplierBillsWorkspace() {
             price: product.price ?? 0,
             stock: Number(product.stock) || 0,
             supplierName: product.supplierName,
+            variants: product.variants,
+            sizes: product.sizes,
+            sizeStock: product.sizeStock,
+            variantType: product.variantType,
           }));
         } catch {
           products = [];
@@ -1923,9 +2011,10 @@ function SupplierBillsWorkspace() {
         const key = supplierName.toLowerCase();
         const summary = key ? summaryMap.get(key) : undefined;
         const target = summary || (unassigned ||= { name: "Unassigned", entries: 0, units: 0, total: 0, products: [], isUnassigned: true });
+        const units = getSupplierBillUnits(product);
         target.entries += 1;
-        target.units += Math.max(0, product.stock);
-        target.total += parseMoney(String(product.cost)) * Math.max(0, product.stock);
+        target.units += units;
+        target.total += parseMoney(String(product.cost)) * units;
         target.products.push({ name: product.name, sku: product.sku, createdAt: product.createdAt });
       });
       const next = [...summaryMap.values()];
@@ -2026,6 +2115,14 @@ const moduleContent: Record<
     secondary: "Export list",
     rows: [],
   },
+  Agents: {
+    eyebrow: "PARTNER SALES",
+    title: "Agent coupons",
+    description: "Create referral coupons for agents and measure the customers and orders they bring in.",
+    primary: "Add agent",
+    secondary: "View performance",
+    rows: [],
+  },
   Marketing: {
     eyebrow: "GROWTH",
     title: "Marketing studio",
@@ -2101,6 +2198,7 @@ function ModuleWorkspace({
   if (module === "Collections")
     return <CollectionsWorkspace onNotify={onNotify} />;
   if (module === "Customers") return <CustomersWorkspace onNotify={onNotify} />;
+  if (module === "Agents") return <AgentsWorkspace onNotify={onNotify} />;
   if (module === "Settings") return <SettingsWorkspace onNotify={onNotify} />;
   if (module === "Vendors") return <AdminVendorsWorkspace onNotify={onNotify} />;
   if (module === "Suppliers") return <SuppliersWorkspace onNotify={onNotify} />;
@@ -3627,6 +3725,56 @@ type CustomerRecord = {
 };
 const defaultCustomers: CustomerRecord[] = [];
 
+const customerIdentity = (customer: Pick<CustomerRecord, "name" | "phone" | "email">) =>
+  customer.phone.replace(/\D/g, "") || customer.email.trim().toLowerCase() || customer.name.trim().toLowerCase();
+
+const customersFromOrders = (orders: OrderRecord[]): CustomerRecord[] => {
+  const grouped = new Map<string, CustomerRecord & { lastOrderValue: number; joinedValue: number }>();
+  orders.filter(hasConfirmedPayment).forEach((order) => {
+    const name = order.customerName?.trim() || "Guest customer";
+    const phone = (order.userPhone || order.phone || "").trim();
+    const email = (order.userEmail || order.email || "").trim();
+    const identity = customerIdentity({ name, phone, email });
+    if (!identity) return;
+    const orderValue = Number.isFinite(new Date(order.createdAt || order.date).getTime())
+      ? new Date(order.createdAt || order.date).getTime()
+      : 0;
+    const current = grouped.get(identity);
+    if (current) {
+      current.orders += 1;
+      current.totalSpent = formatAdminCurrency(parseMoney(current.totalSpent) + parseMoney(order.total));
+      if (orderValue >= current.lastOrderValue) {
+        current.lastOrder = order.date || order.createdAt || current.lastOrder;
+        current.lastOrderValue = orderValue;
+      }
+      if (orderValue > 0 && orderValue < current.joinedValue) {
+        current.joined = order.date || order.createdAt || current.joined;
+        current.joinedValue = orderValue;
+      }
+      if (current.email === "Not provided" && email) current.email = email;
+      if (current.phone === "Not provided" && phone) current.phone = phone;
+      if (current.address === "Not provided" && order.address?.trim()) current.address = order.address.trim();
+      return;
+    }
+    grouped.set(identity, {
+      id: `customer-order-${identity}`,
+      name,
+      phone: phone || "Not provided",
+      email: email || "Not provided",
+      address: order.address?.trim() || "Not provided",
+      orders: 1,
+      totalSpent: formatAdminCurrency(parseMoney(order.total)),
+      lastOrder: order.date || order.createdAt || "Unknown",
+      joined: order.date || order.createdAt || "Unknown",
+      lastOrderValue: orderValue,
+      joinedValue: orderValue,
+    });
+  });
+  return Array.from(grouped.values())
+    .sort((left, right) => right.lastOrderValue - left.lastOrderValue)
+    .map(({ lastOrderValue: _lastOrderValue, joinedValue: _joinedValue, ...customer }) => customer);
+};
+
 function CustomersWorkspace({
   onNotify,
 }: {
@@ -3646,21 +3794,54 @@ function CustomersWorkspace({
   useEffect(() => {
     let active = true;
     const loadCustomers = async () => {
-      const remote = await fetchStoreSetting("customers");
-      const stored =
-        remote.value || window.localStorage.getItem("fanzzy-customers");
-      if (!stored) return;
-      try {
-        const parsed = JSON.parse(stored) as CustomerRecord[];
-        if (active && Array.isArray(parsed) && parsed.length)
-          setCustomers(parsed);
-      } catch {
-        window.localStorage.removeItem("fanzzy-customers");
+      const [remote, ordersRemote] = await Promise.all([
+        fetchStoreSetting("customers"),
+        fetchStoreOrders<OrderRecord>(),
+      ]);
+      const stored = remote.value || window.localStorage.getItem("fanzzy-customers");
+      let savedCustomers: CustomerRecord[] = [];
+      if (stored) {
+        try {
+          const parsed = JSON.parse(stored) as CustomerRecord[];
+          if (Array.isArray(parsed)) savedCustomers = parsed;
+        } catch {
+          window.localStorage.removeItem("fanzzy-customers");
+        }
       }
+      const localOrders: OrderRecord[] = (() => {
+        try {
+          const parsed = JSON.parse(window.localStorage.getItem("fanzzy-orders") || "[]") as OrderRecord[];
+          return Array.isArray(parsed) ? parsed : [];
+        } catch {
+          return [];
+        }
+      })();
+      const remoteOrders = ordersRemote.data || [];
+      const orders = new Map<string, OrderRecord>();
+      [...remoteOrders, ...localOrders].forEach((order) => {
+        if (order?.id && !orders.has(order.id)) orders.set(order.id, order);
+      });
+      const derivedCustomers = customersFromOrders(Array.from(orders.values()));
+      const mergedCustomers = [...savedCustomers];
+      derivedCustomers.forEach((customer) => {
+        const matchIndex = mergedCustomers.findIndex((saved) => customerIdentity(saved) === customerIdentity(customer));
+        if (matchIndex === -1) mergedCustomers.push(customer);
+        else mergedCustomers[matchIndex] = { ...mergedCustomers[matchIndex], ...customer, id: mergedCustomers[matchIndex].id };
+      });
+      if (active) setCustomers(mergedCustomers);
     };
     void loadCustomers();
+    const syncCustomers = () => void loadCustomers();
+    const unsubscribeFromOrders = subscribeToStoreSetting("orders", syncCustomers);
+    window.addEventListener("storage", syncCustomers);
+    window.addEventListener("fanzzy-orders-updated", syncCustomers);
+    window.addEventListener("fanzzy-customers-updated", syncCustomers);
     return () => {
       active = false;
+      unsubscribeFromOrders();
+      window.removeEventListener("storage", syncCustomers);
+      window.removeEventListener("fanzzy-orders-updated", syncCustomers);
+      window.removeEventListener("fanzzy-customers-updated", syncCustomers);
     };
   }, []);
 
@@ -3968,6 +4149,188 @@ function CustomersWorkspace({
           </div>
         </div>
       )}
+    </section>
+  );
+}
+
+function AgentsWorkspace({
+  onNotify,
+}: {
+  onNotify: (message: string) => void;
+}) {
+  const [agents, setAgents] = useState<CatalogAgent[]>([]);
+  const [orders, setOrders] = useState<OrderRecord[]>([]);
+  const [formOpen, setFormOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [couponCodeTouched, setCouponCodeTouched] = useState(false);
+  const [form, setForm] = useState({ name: "", phone: "", couponCode: "", discountPercent: "10" });
+
+  const normalizeCode = (value: string) => value.trim().replace(/\s+/g, "").toUpperCase();
+  const generateAgentCouponCode = () => {
+    const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let candidate = "";
+    do {
+      const bytes = new Uint8Array(6);
+      if (typeof crypto !== "undefined" && crypto.getRandomValues) crypto.getRandomValues(bytes);
+      else bytes.forEach((_, index) => { bytes[index] = Math.floor(Math.random() * 256); });
+      const suffix = Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join("");
+      candidate = `FANZZY-${suffix}`;
+    } while (agents.some((agent) => agent.couponCode === candidate));
+    return candidate;
+  };
+  const parseAgents = (value: string | null) => {
+    if (!value) return [];
+    try {
+      const parsed = JSON.parse(value) as Array<Partial<CatalogAgent>>;
+      return Array.isArray(parsed)
+        ? parsed
+            .filter((agent) => agent?.id && agent?.name && agent?.couponCode)
+            .map((agent) => ({
+              id: String(agent.id),
+              name: String(agent.name).trim(),
+              phone: String(agent.phone || "").trim(),
+              couponCode: normalizeCode(String(agent.couponCode)),
+              discountPercent: Math.min(100, Math.max(1, Number(agent.discountPercent) || 1)),
+              status: agent.status === "Paused" ? "Paused" : "Active",
+              createdAt: agent.createdAt || undefined,
+            }))
+        : [];
+    } catch {
+      return [];
+    }
+  };
+
+  const loadWorkspace = async () => {
+    const [agentsRemote, ordersRemote] = await Promise.all([
+      fetchStoreSetting("agents"),
+      fetchStoreOrders<OrderRecord>(),
+    ]);
+    const storedAgents = agentsRemote.value || window.localStorage.getItem("fanzzy-agents");
+    const nextAgents = parseAgents(storedAgents);
+    setAgents(nextAgents);
+    if (storedAgents && !agentsRemote.value && nextAgents.length) await saveStoreSetting("agents", JSON.stringify(nextAgents));
+
+    const orderMap = new Map<string, OrderRecord>();
+    ordersRemote.data?.forEach((order) => { if (order?.id) orderMap.set(order.id, order); });
+    try {
+      const storedOrders = JSON.parse(window.localStorage.getItem("fanzzy-orders") || "[]") as OrderRecord[];
+      if (Array.isArray(storedOrders)) storedOrders.forEach((order) => { if (order?.id && !orderMap.has(order.id)) orderMap.set(order.id, order); });
+    } catch {
+      // Ignore malformed local order cache.
+    }
+    setOrders(Array.from(orderMap.values()).filter((order) => !isDemoOrder(order) && hasConfirmedPayment(order)));
+  };
+
+  useEffect(() => {
+    void loadWorkspace();
+    window.addEventListener("storage", loadWorkspace);
+    window.addEventListener("fanzzy-agents-updated", loadWorkspace);
+    window.addEventListener("fanzzy-orders-updated", loadWorkspace);
+    return () => {
+      window.removeEventListener("storage", loadWorkspace);
+      window.removeEventListener("fanzzy-agents-updated", loadWorkspace);
+      window.removeEventListener("fanzzy-orders-updated", loadWorkspace);
+    };
+  }, []);
+
+  const persist = async (next: CatalogAgent[], message: string) => {
+    setAgents(next);
+    window.localStorage.setItem("fanzzy-agents", JSON.stringify(next));
+    const remoteError = await saveStoreSetting("agents", JSON.stringify(next));
+    window.dispatchEvent(new Event("fanzzy-agents-updated"));
+    onNotify(remoteError ? `${message} locally; Supabase needs setup` : message);
+  };
+
+  const openNew = () => {
+    setEditingId(null);
+    setCouponCodeTouched(false);
+    setForm({ name: "", phone: "", couponCode: generateAgentCouponCode(), discountPercent: "10" });
+    setFormOpen(true);
+  };
+
+  const openEdit = (agent: CatalogAgent) => {
+    setEditingId(agent.id);
+    setCouponCodeTouched(true);
+    setForm({ name: agent.name, phone: agent.phone, couponCode: agent.couponCode, discountPercent: String(agent.discountPercent) });
+    setFormOpen(true);
+  };
+
+  const saveAgent = async () => {
+    const name = form.name.trim();
+    const phone = form.phone.trim();
+    const couponCode = normalizeCode(form.couponCode);
+    const discountPercent = Number(form.discountPercent);
+    if (!name || !phone || !couponCode) return onNotify("Add the agent name, phone number, and coupon code");
+    if (!/^[A-Z0-9_-]{3,32}$/.test(couponCode)) return onNotify("Coupon code must be 3–32 letters or numbers");
+    if (!Number.isFinite(discountPercent) || discountPercent < 1 || discountPercent > 100) return onNotify("Discount must be between 1% and 100%");
+    if (agents.some((agent) => agent.id !== editingId && agent.couponCode === couponCode)) return onNotify("That coupon code is already assigned to another agent");
+
+    const marketingRemote = await fetchStoreSetting("marketingRecords");
+    const marketingRecords = (() => {
+      try { return JSON.parse(marketingRemote.value || window.localStorage.getItem("fanzzy-marketing-records") || "[]") as MarketingRecord[]; } catch { return []; }
+    })();
+    if (marketingRecords.some((record) => record.kind === "Coupon" && normalizeCode(record.code || "") === couponCode)) return onNotify("That coupon code is already used by Marketing");
+
+    const agent: CatalogAgent = {
+      id: editingId || `agent-${Date.now()}`,
+      name,
+      phone,
+      couponCode,
+      discountPercent: Math.round(discountPercent * 100) / 100,
+      status: editingId ? agents.find((item) => item.id === editingId)?.status || "Active" : "Active",
+      createdAt: editingId ? agents.find((item) => item.id === editingId)?.createdAt : new Date().toISOString(),
+    };
+    const next = editingId ? agents.map((item) => item.id === editingId ? agent : item) : [agent, ...agents];
+    await persist(next, editingId ? "Agent updated" : "Agent created");
+    setFormOpen(false);
+  };
+
+  const removeAgent = async (agent: CatalogAgent) => {
+    if (!window.confirm(`Delete ${agent.name} and stop its coupon?`)) return;
+    await persist(agents.filter((item) => item.id !== agent.id), `${agent.name} deleted`);
+  };
+
+  const toggleAgent = async (agent: CatalogAgent) => {
+    const nextStatus = agent.status === "Active" ? "Paused" : "Active";
+    await persist(agents.map((item) => item.id === agent.id ? { ...item, status: nextStatus } : item), `${agent.name} ${nextStatus === "Active" ? "activated" : "paused"}`);
+  };
+
+  const statsFor = (agent: CatalogAgent) => {
+    const agentOrders = orders.filter((order) => normalizeCode(order.coupon || "") === agent.couponCode);
+    const customers = new Set(agentOrders.map((order) => (order.phone || order.userPhone || order.email || order.customerName || order.id).trim().toLowerCase()));
+    const pieces = agentOrders.reduce((total, order) => total + (order.items || []).reduce((sum, item) => sum + (Number(item.quantity) || 0), 0), 0);
+    return { orders: agentOrders.length, customers: customers.size, pieces };
+  };
+  const totalTrackedOrders = agents.reduce((total, agent) => total + statsFor(agent).orders, 0);
+
+  return (
+    <section className="panel module-workspace agents-workspace">
+      <div className="module-workspace-head">
+        <div>
+          <p className="eyebrow">PARTNER SALES</p>
+          <h2>Agent coupons</h2>
+          <p>Create a unique discount code for each agent and see exactly how many customers, orders, and pieces came through that code.</p>
+        </div>
+        <button className="module-primary" onClick={openNew}>+ Add agent</button>
+      </div>
+      <div className="module-summary"><span><i className="status-light" />{agents.length} agents</span><span>{totalTrackedOrders} tracked orders</span></div>
+      <div className="agent-list">
+        <div className="agent-list-heading"><span>AGENT</span><span>COUPON</span><span>DISCOUNT</span><span>CUSTOMERS</span><span>ORDERS</span><span>PIECES</span><span /></div>
+        {agents.map((agent) => {
+          const stats = statsFor(agent);
+          return <div className="agent-list-row" key={agent.id}>
+            <button className="agent-list-main" onClick={() => openEdit(agent)}><span className="module-row-number">{agent.name.slice(0, 2).toUpperCase()}</span><strong>{agent.name}</strong><small>{agent.phone}</small></button>
+            <span className="agent-code">{agent.couponCode}</span>
+            <span>{agent.discountPercent}% off</span>
+            <b>{stats.customers}</b>
+            <b>{stats.orders}</b>
+            <b>{stats.pieces}</b>
+            <div className="product-row-actions"><button onClick={() => void toggleAgent(agent)}>{agent.status === "Active" ? "Pause" : "Activate"}</button><button onClick={() => openEdit(agent)} aria-label={`Edit ${agent.name}`} title="Edit agent"><Pencil size={15} strokeWidth={1.8} aria-hidden="true" /></button><button className="delete-action" onClick={() => void removeAgent(agent)} aria-label={`Delete ${agent.name}`} title="Delete agent"><Trash2 size={15} strokeWidth={1.8} aria-hidden="true" /></button></div>
+          </div>;
+        })}
+        {!agents.length && <div className="agent-empty"><strong>No agents yet.</strong><span>Add an agent to create a trackable coupon code.</span><button className="module-primary" onClick={openNew}>Create first agent ↗</button></div>}
+      </div>
+      {formOpen && <div className="product-modal-backdrop" onClick={() => setFormOpen(false)}><div className="product-form-card product-modal-card agents-form-modal" role="dialog" aria-modal="true" aria-labelledby="agent-form-title" onClick={(event) => event.stopPropagation()}><button className="product-modal-close" aria-label="Close agent form" onClick={() => setFormOpen(false)}>×</button><p className="eyebrow">{editingId ? "EDIT AGENT" : "NEW AGENT"}</p><h3 id="agent-form-title">{editingId ? "Edit agent coupon" : "Create an agent coupon"}</h3><div className="product-form-grid"><label>Agent name<input value={form.name} onChange={(event) => { const name = event.target.value; setForm((current) => ({ ...current, name, ...(!editingId && !couponCodeTouched ? { couponCode: generateAgentCouponCode() } : {}) })); }} placeholder="e.g. Ananya" /></label><label>Phone number<input value={form.phone} onChange={(event) => setForm((current) => ({ ...current, phone: event.target.value }))} placeholder="e.g. +91 98765 43210" inputMode="tel" /></label><label>Coupon code<input value={form.couponCode} onChange={(event) => { setCouponCodeTouched(true); setForm((current) => ({ ...current, couponCode: event.target.value.toUpperCase() })); }} placeholder="FANZZY-7KQ4M2" /><button type="button" className="agent-generate-code" onClick={() => { setCouponCodeTouched(false); setForm((current) => ({ ...current, couponCode: generateAgentCouponCode() })); }}>Generate FANZZY code ↗</button></label><label>Discount percentage<input type="number" min="1" max="100" step="0.01" value={form.discountPercent} onChange={(event) => setForm((current) => ({ ...current, discountPercent: event.target.value }))} /><small className="field-help">Applied to the customer’s cart subtotal.</small></label></div><div className="product-detail-actions"><button className="module-primary" onClick={() => void saveAgent()}>Save agent</button><button className="module-secondary" onClick={() => setFormOpen(false)}>Cancel</button></div></div></div>}
     </section>
   );
 }
@@ -5681,56 +6044,101 @@ function HomepageWorkspace({
   );
 }
 
+type CategorySection = "normal" | "luxury";
+type AdminCategory = {
+  name: string;
+  pieces: number;
+  image: string;
+  section: CategorySection;
+};
+
+const categorySectionDetails: Array<{
+  key: CategorySection;
+  label: string;
+  description: string;
+}> = [
+  {
+    key: "normal",
+    label: "Normal Category",
+    description: "Everyday collections and core jewellery categories.",
+  },
+  {
+    key: "luxury",
+    label: "Luxury",
+    description: "Premium collections with a more elevated edit.",
+  },
+];
+
 function CategoryWorkspace({
   onNotify,
 }: {
   onNotify: (message: string) => void;
 }) {
-  const [categories, setCategories] = useState<Array<{ name: string; pieces: number; image: string }>>([]);
+  const [categories, setCategories] = useState<AdminCategory[]>([]);
+  const [categoryProductCounts, setCategoryProductCounts] = useState<Record<string, number> | null>(null);
   const [isAdding, setIsAdding] = useState(false);
+  const [addingSection, setAddingSection] = useState<CategorySection>("normal");
   const [name, setName] = useState("");
   const [categoryImage, setCategoryImage] = useState("");
   const [categoryFile, setCategoryFile] = useState<File | null>(null);
-  const [selectedCategory, setSelectedCategory] = useState<{
-    name: string;
-    pieces: number;
-    image?: string;
-  } | null>(null);
+  const [selectedCategory, setSelectedCategory] = useState<AdminCategory | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState("");
   const [editImage, setEditImage] = useState("");
+  const [editSection, setEditSection] = useState<CategorySection>("normal");
   const [editImageFile, setEditImageFile] = useState<File | null>(null);
   useEffect(() => {
     let active = true;
     const loadCategories = async () => {
-      const remote = await fetchCatalogCategories();
+      const [remote, productsRemote] = await Promise.all([fetchCatalogCategories(), fetchCatalogProducts()]);
+      if (active && productsRemote.data) setCategoryProductCounts(countCatalogProductsByCategory(productsRemote.data));
+      let localCategories: AdminCategory[] = [];
+      const stored = window.localStorage.getItem("fanzzy-categories");
+      if (stored) {
+        try {
+          const parsed = JSON.parse(stored) as Array<Partial<AdminCategory>>;
+          if (Array.isArray(parsed)) {
+            localCategories = parsed
+              .filter((category) => typeof category.name === "string" && category.name.trim())
+              .map((category) => ({
+                name: category.name!.trim(),
+                pieces: Number(category.pieces) || 0,
+                section: category.section === "luxury" ? "luxury" : "normal",
+                image: category.image || "",
+              }));
+          }
+        } catch {
+          window.localStorage.removeItem("fanzzy-categories");
+        }
+      }
       if (active && !remote.error && remote.data) {
+        const localCategoryByName = new Map(localCategories.map((category) => [category.name.trim().toLowerCase(), category]));
         const mapped = remote.data.map((category) => ({
           name: category.name,
           pieces: category.pieces,
+          section: localCategoryByName.get(category.name.trim().toLowerCase())?.section || category.section || "normal",
           image:
             category.image ||
             defaultCategoryImages[category.name] ||
             "",
         }));
-        setCategories(mapped);
-        persistCategories(mapped);
+        const remoteNames = new Set(mapped.map((category) => category.name.trim().toLowerCase()));
+        const nextCategories = inferLegacyCategorySections([...mapped, ...localCategories.filter((category) => !remoteNames.has(category.name.trim().toLowerCase()))]);
+        setCategories(nextCategories);
+        persistCategories(nextCategories);
         return;
       }
-      const stored = window.localStorage.getItem("fanzzy-categories");
-      if (active && stored) {
-        try {
-          setCategories(JSON.parse(stored));
-        } catch {
-          window.localStorage.removeItem("fanzzy-categories");
-        }
-      }
+      if (active && localCategories.length) setCategories(localCategories);
     };
     void loadCategories();
     return () => {
       active = false;
-    };
+      };
   }, []);
+  const getCategoryPieceCount = (category: AdminCategory) => {
+    if (!categoryProductCounts) return category.pieces;
+    return categoryProductCounts[category.name.trim().toLowerCase()] || 0;
+  };
   const saveCategory = async () => {
     if (!name.trim()) return onNotify("Category name is required");
     let nextImage = categoryImage;
@@ -5747,10 +6155,16 @@ function CategoryWorkspace({
         else nextImage = upload.url;
       }
     }
-    const category = { name: name.trim(), pieces: 0, image: nextImage };
+    const category: AdminCategory = {
+      name: name.trim(),
+      pieces: 0,
+      image: nextImage,
+      section: addingSection,
+    };
     const remoteError = await saveCatalogCategory(category);
-    setCategories((current) => [...current, category]);
-    persistCategories([...categories, category]);
+    const nextCategories = [...categories, category];
+    setCategories(nextCategories);
+    persistCategories(nextCategories);
     setName("");
     setCategoryImage("");
     setCategoryFile(null);
@@ -5763,20 +6177,12 @@ function CategoryWorkspace({
           : `${category.name} category added`,
     );
   };
-  const openCategory = (category: {
-    name: string;
-    pieces: number;
-    image?: string;
-  }) => {
+  const openCategory = (category: AdminCategory) => {
     setSelectedCategory(category);
     setIsEditing(false);
     onNotify(`${category.name} category selected`);
   };
-  const startEditingCategory = (category: {
-    name: string;
-    pieces: number;
-    image?: string;
-  }) => {
+  const startEditingCategory = (category: AdminCategory) => {
     setSelectedCategory(category);
     setEditName(category.name);
     setEditImage(
@@ -5784,6 +6190,7 @@ function CategoryWorkspace({
         defaultCategoryImages[category.name] ||
         "",
     );
+    setEditSection(category.section || "normal");
     setEditImageFile(null);
     setIsEditing(true);
   };
@@ -5808,21 +6215,17 @@ function CategoryWorkspace({
       ...selectedCategory,
       name: editName.trim(),
       image: nextImage,
+      section: editSection,
     };
     const remoteError = await renameCatalogCategory(
       selectedCategory.name,
       updatedCategory,
     );
-    setCategories((current) =>
-      current.map((category) =>
-        category.name === selectedCategory.name ? updatedCategory : category,
-      ),
+    const nextCategories = categories.map((category) =>
+      category.name === selectedCategory.name ? updatedCategory : category,
     );
-    persistCategories(
-      categories.map((category) =>
-        category.name === selectedCategory.name ? updatedCategory : category,
-      ),
-    );
+    setCategories(nextCategories);
+    persistCategories(nextCategories);
     setSelectedCategory(updatedCategory);
     setEditImageFile(null);
     setIsEditing(false);
@@ -5834,17 +6237,12 @@ function CategoryWorkspace({
           : `${updatedCategory.name} category updated`,
     );
   };
-  const deleteCategory = async (category: {
-    name: string;
-    pieces: number;
-    image?: string;
-  }) => {
+  const deleteCategory = async (category: AdminCategory) => {
     if (!window.confirm(`Delete ${category.name}?`)) return;
     const remoteError = await removeCatalogCategory(category.name);
-    setCategories((current) =>
-      current.filter((item) => item.name !== category.name),
-    );
-    persistCategories(categories.filter((item) => item.name !== category.name));
+    const nextCategories = categories.filter((item) => item.name !== category.name);
+    setCategories(nextCategories);
+    persistCategories(nextCategories);
     if (selectedCategory?.name === category.name) setSelectedCategory(null);
     onNotify(
       remoteError
@@ -5891,9 +6289,6 @@ function CategoryWorkspace({
           >
             Reorder ↗
           </button>
-          <button className="module-primary" onClick={() => setIsAdding(true)}>
-            + Add category
-          </button>
         </div>
       </div>
       {isAdding && (
@@ -5938,6 +6333,17 @@ function CategoryWorkspace({
                   placeholder="e.g. Anklets"
                 />
               </label>
+              <label>
+                Category section
+                <select
+                  value={addingSection}
+                  onChange={(event) => setAddingSection(event.target.value as CategorySection)}
+                >
+                  {categorySectionDetails.map((section) => (
+                    <option key={section.key} value={section.key}>{section.label}</option>
+                  ))}
+                </select>
+              </label>
             </div>
             <div className="product-detail-actions">
               <button className="module-primary" onClick={saveCategory}>
@@ -5960,49 +6366,75 @@ function CategoryWorkspace({
         </span>
         <span>{categories.length} active categories</span>
       </div>
-      <div className="module-list">
-        {categories.map((category, index) => (
-          <div
-            key={`${category.name}-${index}`}
-            className={`category-list-row ${selectedCategory?.name === category.name ? "selected" : ""}`}
-          >
-            <button
-              className="category-list-main"
-              onClick={() => openCategory(category)}
-            >
-              <span className="module-row-number">
-                {String(index + 1).padStart(2, "0")}
-              </span>
-              <strong>{category.name}</strong>
-              <small>{category.pieces} pieces</small>
-              <b>↗</b>
-            </button>
-            <div className="product-row-actions">
-              <button
-                onClick={() => openCategory(category)}
-                aria-label={`View ${category.name}`}
-                title="View category"
-              >
-                <Eye size={15} strokeWidth={1.8} aria-hidden="true" />
-              </button>
-              <button
-                onClick={() => startEditingCategory(category)}
-                aria-label={`Edit ${category.name}`}
-                title="Edit category"
-              >
-                <Pencil size={15} strokeWidth={1.8} aria-hidden="true" />
-              </button>
-              <button
-                className="delete-action"
-                onClick={() => deleteCategory(category)}
-                aria-label={`Delete ${category.name}`}
-                title="Delete category"
-              >
-                <Trash2 size={15} strokeWidth={1.8} aria-hidden="true" />
-              </button>
-            </div>
-          </div>
-        ))}
+      <div className="category-sections">
+        {categorySectionDetails.map((section) => {
+          const sectionCategories = categories.filter((category) => category.section === section.key);
+          return (
+            <section className="category-section" key={section.key} aria-labelledby={`${section.key}-categories-title`}>
+              <div className="category-section-heading">
+                <div>
+                  <p className="eyebrow">{section.key === "normal" ? "CORE COLLECTION" : "PREMIUM COLLECTION"}</p>
+                  <h3 id={`${section.key}-categories-title`}>{section.label}</h3>
+                  <p>{section.description}</p>
+                </div>
+                <button
+                  className="module-primary"
+                  onClick={() => {
+                    setAddingSection(section.key);
+                    setIsAdding(true);
+                  }}
+                >
+                  + Add category
+                </button>
+              </div>
+              <div className="module-list">
+                {sectionCategories.map((category, index) => (
+                  <div
+                    key={`${category.name}-${index}`}
+                    className={`category-list-row ${selectedCategory?.name === category.name ? "selected" : ""}`}
+                  >
+                    <button
+                      className="category-list-main"
+                      onClick={() => openCategory(category)}
+                    >
+                      <span className="module-row-number">
+                        {String(index + 1).padStart(2, "0")}
+                      </span>
+                      <strong>{category.name}</strong>
+                      <small>{getCategoryPieceCount(category)} pieces</small>
+                      <b>↗</b>
+                    </button>
+                    <div className="product-row-actions">
+                      <button
+                        onClick={() => openCategory(category)}
+                        aria-label={`View ${category.name}`}
+                        title="View category"
+                      >
+                        <Eye size={15} strokeWidth={1.8} aria-hidden="true" />
+                      </button>
+                      <button
+                        onClick={() => startEditingCategory(category)}
+                        aria-label={`Edit ${category.name}`}
+                        title="Edit category"
+                      >
+                        <Pencil size={15} strokeWidth={1.8} aria-hidden="true" />
+                      </button>
+                      <button
+                        className="delete-action"
+                        onClick={() => deleteCategory(category)}
+                        aria-label={`Delete ${category.name}`}
+                        title="Delete category"
+                      >
+                        <Trash2 size={15} strokeWidth={1.8} aria-hidden="true" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                {!sectionCategories.length && <p className="category-section-empty">No categories yet. Add the first one to this section.</p>}
+              </div>
+            </section>
+          );
+        })}
       </div>
       {selectedCategory && isEditing && (
         <div className="product-form-card category-edit-card">
@@ -6035,6 +6467,17 @@ function CategoryWorkspace({
                 onChange={(event) => setEditName(event.target.value)}
               />
             </label>
+            <label>
+              Category section
+              <select
+                value={editSection}
+                onChange={(event) => setEditSection(event.target.value as CategorySection)}
+              >
+                {categorySectionDetails.map((section) => (
+                  <option key={section.key} value={section.key}>{section.label}</option>
+                ))}
+              </select>
+            </label>
           </div>
           <div className="product-detail-actions">
             <button className="module-primary" onClick={saveCategoryEdit}>
@@ -6064,7 +6507,7 @@ function CategoryWorkspace({
           <div className="product-detail-copy">
             <p className="eyebrow">CATEGORY DETAILS</p>
             <h3>{selectedCategory.name}</h3>
-            <p className="product-detail-meta">Jewellery category</p>
+            <p className="product-detail-meta">{selectedCategory.section === "luxury" ? "Luxury category" : "Normal category"}</p>
             <div className="product-detail-actions">
               <button
                 className="module-primary"
@@ -6113,7 +6556,7 @@ function ProductLibraryWorkspace({
   const [productCategoryFilter, setProductCategoryFilter] = useState("all");
   const [productVariantFilter, setProductVariantFilter] = useState("all");
   const [productSupplierFilter, setProductSupplierFilter] = useState("all");
-  const [catalogCategories, setCatalogCategories] = useState<Array<{ name: string; pieces: number; image?: string }>>([]);
+  const [catalogCategories, setCatalogCategories] = useState<Array<{ name: string; pieces: number; image?: string; section?: CategorySection }>>([]);
   const [scannerOpen, setScannerOpen] = useState(false);
   const [editValues, setEditValues] = useState({
     name: "",
@@ -6227,7 +6670,7 @@ function ProductLibraryWorkspace({
       const stored = window.localStorage.getItem("fanzzy-categories");
       if (!stored) return;
       try {
-        const parsed = JSON.parse(stored) as Array<{ name?: string; pieces?: number; image?: string }>;
+        const parsed = JSON.parse(stored) as Array<{ name?: string; pieces?: number; image?: string; section?: CategorySection }>;
         if (active && Array.isArray(parsed)) {
           setCatalogCategories(
             parsed
@@ -6236,6 +6679,7 @@ function ProductLibraryWorkspace({
                 name: category.name!.trim(),
                 pieces: Number(category.pieces) || 0,
                 image: category.image || "",
+                section: category.section || "normal",
               })),
           );
         }
@@ -6247,11 +6691,12 @@ function ProductLibraryWorkspace({
       const remote = await fetchCatalogCategories();
       if (!active) return;
       if (!remote.error && remote.data) {
-        const mapped = remote.data.map((category) => ({
+        const mapped = inferLegacyCategorySections(remote.data.map((category) => ({
           name: category.name,
           pieces: category.pieces,
           image: category.image || "",
-        }));
+          section: category.section || "normal",
+        })));
         setCatalogCategories(mapped);
         persistCategories(mapped);
         return;
@@ -7643,7 +8088,7 @@ function ProductLibraryWorkspace({
                   }
                 >
                   {Array.from(new Set([newProduct.category, ...categoryOptions].filter(Boolean))).map((category) => (
-                    <option key={category}>{category}</option>
+                    <option key={category}>{category}{catalogCategories.find((item) => item.name.toLowerCase() === category.toLowerCase())?.section === "luxury" ? "  ·  LX" : ""}</option>
                   ))}
                 </select>
               </label>
@@ -8083,7 +8528,7 @@ function ProductLibraryWorkspace({
                 }
               >
                 {Array.from(new Set([editValues.category, ...categoryOptions].filter(Boolean))).map((category) => (
-                  <option key={category}>{category}</option>
+                  <option key={category}>{category}{catalogCategories.find((item) => item.name.toLowerCase() === category.toLowerCase())?.section === "luxury" ? "  ·  LX" : ""}</option>
                 ))}
               </select>
             </label>
