@@ -4,6 +4,7 @@ export type CustomerAuthUser = { id: string; phone: string };
 const externalCustomerAuthUrl = (process.env.NEXT_PUBLIC_CUSTOMER_AUTH_API_URL ?? "").replace(/\/$/, "");
 const pendingTokenKey = "fanzzy-customer-pending-token";
 const sessionTokenKey = "fanzzy-customer-session-token";
+const rememberedUserKey = "fanzzy-customer-remembered-user";
 
 const readToken = (type: "pending" | "session") => {
   if (typeof window === "undefined") return "";
@@ -26,7 +27,18 @@ const readSessionPayload = (): CustomerAuthUser | null => {
   }
 };
 
-export const readStoredCustomerAuthUser = () => readSessionPayload();
+const readRememberedUser = (): CustomerAuthUser | null => {
+  if (typeof window === "undefined") return null;
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(rememberedUserKey) || "null") as Partial<CustomerAuthUser> | null;
+    if (!stored || typeof stored.id !== "string" || !stored.id || typeof stored.phone !== "string" || !stored.phone) return null;
+    return { id: stored.id, phone: stored.phone };
+  } catch {
+    return null;
+  }
+};
+
+export const readStoredCustomerAuthUser = () => readSessionPayload() || readRememberedUser();
 
 export const isExternalCustomerAuth = Boolean(externalCustomerAuthUrl);
 
@@ -51,10 +63,16 @@ export const saveCustomerAuthTokens = (tokens: { pendingToken?: string; sessionT
   if (tokens.sessionToken) window.localStorage.setItem(sessionTokenKey, tokens.sessionToken);
 };
 
+export const saveCustomerAuthUser = (user: CustomerAuthUser) => {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(rememberedUserKey, JSON.stringify({ id: user.id, phone: user.phone }));
+};
+
 export const clearCustomerAuthTokens = () => {
   if (typeof window === "undefined") return;
   window.localStorage.removeItem(pendingTokenKey);
   window.localStorage.removeItem(sessionTokenKey);
+  window.localStorage.removeItem(rememberedUserKey);
 };
 
 export const clearPendingCustomerAuthToken = () => {

@@ -6,7 +6,6 @@ import { Eye, Pencil, Trash2 } from "lucide-react";
 import {
   fetchCatalogCategories,
   fetchCatalogProducts,
-  countCatalogProductsByCategory,
   fetchStoreOrders,
   fetchStoreSetting,
   inferLegacyCategorySections,
@@ -384,6 +383,7 @@ type OrderRecord = {
   pickupHubName?: string;
   pickupHubPlace?: string;
   coupon?: string;
+  couponDiscount?: number;
   paymentStatus?: "pending" | "paid";
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
@@ -683,6 +683,7 @@ const persistCategories = (
 ) => {
   if (typeof window === "undefined") return;
   window.localStorage.setItem("fanzzy-categories", JSON.stringify(categories));
+  void saveStoreSetting("categoryCatalog", JSON.stringify(categories));
   window.dispatchEvent(new Event("fanzzy-categories-updated"));
 };
 const menu = [
@@ -1038,8 +1039,8 @@ function AdminDashboard() {
           status: product.status,
           image: product.image || adminPlaceholderImage,
           hoverImage: product.hoverImage || product.image || adminPlaceholderImage,
-          compareAt: product.compareAt,
-        })));
+           compareAt: product.compareAt,
+         })));
         return;
       }
       try {
@@ -4299,7 +4300,10 @@ function AgentsWorkspace({
     const agentOrders = orders.filter((order) => normalizeCode(order.coupon || "") === agent.couponCode);
     const customers = new Set(agentOrders.map((order) => (order.phone || order.userPhone || order.email || order.customerName || order.id).trim().toLowerCase()));
     const pieces = agentOrders.reduce((total, order) => total + (order.items || []).reduce((sum, item) => sum + (Number(item.quantity) || 0), 0), 0);
-    return { orders: agentOrders.length, customers: customers.size, pieces };
+    const billAmount = agentOrders.reduce((total, order) => total + parseMoney(order.total), 0);
+    const discountAmount = agentOrders.reduce((total, order) => total + (Number(order.couponDiscount) || 0), 0);
+    const agentPayoutAmount = Math.round(billAmount * 10) / 100;
+    return { orders: agentOrders.length, customers: customers.size, pieces, billAmount, discountAmount, agentPayoutAmount };
   };
   const totalTrackedOrders = agents.reduce((total, agent) => total + statsFor(agent).orders, 0);
 
@@ -4315,13 +4319,16 @@ function AgentsWorkspace({
       </div>
       <div className="module-summary"><span><i className="status-light" />{agents.length} agents</span><span>{totalTrackedOrders} tracked orders</span></div>
       <div className="agent-list">
-        <div className="agent-list-heading"><span>AGENT</span><span>COUPON</span><span>DISCOUNT</span><span>CUSTOMERS</span><span>ORDERS</span><span>PIECES</span><span /></div>
+        <div className="agent-list-heading"><span>AGENT</span><span>COUPON</span><span>DISCOUNT</span><span>TOTAL BILL</span><span>5% AMOUNT</span><span>AGENT PAYABLE · 10%</span><span>CUSTOMERS</span><span>ORDERS</span><span>PIECES</span><span /></div>
         {agents.map((agent) => {
           const stats = statsFor(agent);
           return <div className="agent-list-row" key={agent.id}>
             <button className="agent-list-main" onClick={() => openEdit(agent)}><span className="module-row-number">{agent.name.slice(0, 2).toUpperCase()}</span><strong>{agent.name}</strong><small>{agent.phone}</small></button>
             <span className="agent-code">{agent.couponCode}</span>
             <span>{agent.discountPercent}% off</span>
+            <span className="agent-money">{formatMoney(stats.billAmount)}</span>
+            <span className="agent-money">{formatMoney(stats.discountAmount)}</span>
+            <span className="agent-money agent-payout">{formatMoney(stats.agentPayoutAmount)}</span>
             <b>{stats.customers}</b>
             <b>{stats.orders}</b>
             <b>{stats.pieces}</b>
@@ -6052,6 +6059,19 @@ type AdminCategory = {
   section: CategorySection;
 };
 
+const isLuxuryProductCategory = (category: string) => /\s*·\s*lx\s*$/i.test(category.trim());
+const baseProductCategory = (category: string) => category.replace(/\s*·\s*lx\s*$/i, "").trim();
+const productCategorySection = (productCategory: string, categories: AdminCategory[]) => {
+  if (isLuxuryProductCategory(productCategory)) return "luxury" as const;
+  const categoryName = baseProductCategory(productCategory).toLowerCase();
+  const matchingSections = new Set(
+    categories
+      .filter((category) => baseProductCategory(category.name).toLowerCase() === categoryName)
+      .map((category) => category.section),
+  );
+  return matchingSections.size === 1 && matchingSections.has("luxury") ? "luxury" as const : "normal" as const;
+};
+
 const categorySectionDetails: Array<{
   key: CategorySection;
   label: string;
@@ -6075,7 +6095,7 @@ function CategoryWorkspace({
   onNotify: (message: string) => void;
 }) {
   const [categories, setCategories] = useState<AdminCategory[]>([]);
-  const [categoryProductCounts, setCategoryProductCounts] = useState<Record<string, number> | null>(null);
+  const [categoryProducts, setCategoryProducts] = useState<Array<{ category: string }> | null>(null);
   const [isAdding, setIsAdding] = useState(false);
   const [addingSection, setAddingSection] = useState<CategorySection>("normal");
   const [name, setName] = useState("");
@@ -6091,7 +6111,7 @@ function CategoryWorkspace({
     let active = true;
     const loadCategories = async () => {
       const [remote, productsRemote] = await Promise.all([fetchCatalogCategories(), fetchCatalogProducts()]);
-      if (active && productsRemote.data) setCategoryProductCounts(countCatalogProductsByCategory(productsRemote.data));
+      if (active && productsRemote.data) setCategoryProducts(productsRemote.data);
       let localCategories: AdminCategory[] = [];
       const stored = window.localStorage.getItem("fanzzy-categories");
       if (stored) {
@@ -6112,18 +6132,25 @@ function CategoryWorkspace({
         }
       }
       if (active && !remote.error && remote.data) {
-        const localCategoryByName = new Map(localCategories.map((category) => [category.name.trim().toLowerCase(), category]));
+        const categoryIdentity = (name: string, section: CategorySection = "normal") => `${name.trim()}::${section}`;
+        const localCategoryByIdentity = new Map(localCategories.map((category) => [categoryIdentity(category.name, category.section), category]));
+        const localCategoryByExactName = new Map<string, AdminCategory | null>();
+        localCategories.forEach((category) => {
+          const key = category.name.trim();
+          const previous = localCategoryByExactName.get(key);
+          localCategoryByExactName.set(key, previous && previous.section !== category.section ? null : category);
+        });
         const mapped = remote.data.map((category) => ({
           name: category.name,
           pieces: category.pieces,
-          section: localCategoryByName.get(category.name.trim().toLowerCase())?.section || category.section || "normal",
+          section: localCategoryByIdentity.get(categoryIdentity(category.name, category.section || "normal"))?.section || localCategoryByExactName.get(category.name.trim())?.section || category.section || "normal",
           image:
             category.image ||
             defaultCategoryImages[category.name] ||
             "",
         }));
-        const remoteNames = new Set(mapped.map((category) => category.name.trim().toLowerCase()));
-        const nextCategories = inferLegacyCategorySections([...mapped, ...localCategories.filter((category) => !remoteNames.has(category.name.trim().toLowerCase()))]);
+        const remoteIdentities = new Set(mapped.map((category) => categoryIdentity(category.name, category.section)));
+        const nextCategories = inferLegacyCategorySections([...mapped, ...localCategories.filter((category) => !remoteIdentities.has(categoryIdentity(category.name, category.section)))]);
         setCategories(nextCategories);
         persistCategories(nextCategories);
         return;
@@ -6136,8 +6163,11 @@ function CategoryWorkspace({
       };
   }, []);
   const getCategoryPieceCount = (category: AdminCategory) => {
-    if (!categoryProductCounts) return category.pieces;
-    return categoryProductCounts[category.name.trim().toLowerCase()] || 0;
+    if (!categoryProducts) return category.pieces;
+    return categoryProducts.filter((product) =>
+      baseProductCategory(product.category).toLowerCase() === baseProductCategory(category.name).toLowerCase() &&
+      productCategorySection(product.category, categories) === category.section,
+    ).length;
   };
   const saveCategory = async () => {
     if (!name.trim()) return onNotify("Category name is required");
@@ -6368,7 +6398,7 @@ function CategoryWorkspace({
       </div>
       <div className="category-sections">
         {categorySectionDetails.map((section) => {
-          const sectionCategories = categories.filter((category) => category.section === section.key);
+          const sectionCategories = categories.filter((category) => category.section === section.key && !(section.key === "luxury" && category.name.trim().toLowerCase() === "rings"));
           return (
             <section className="category-section" key={section.key} aria-labelledby={`${section.key}-categories-title`}>
               <div className="category-section-heading">
@@ -6691,14 +6721,46 @@ function ProductLibraryWorkspace({
       const remote = await fetchCatalogCategories();
       if (!active) return;
       if (!remote.error && remote.data) {
-        const mapped = inferLegacyCategorySections(remote.data.map((category) => ({
+        const stored = window.localStorage.getItem("fanzzy-categories");
+        let localCategories: Array<{ name: string; pieces: number; image?: string; section?: CategorySection }> = [];
+        if (stored) {
+          try {
+            const parsed = JSON.parse(stored) as Array<{ name?: string; pieces?: number; image?: string; section?: CategorySection }>;
+            if (Array.isArray(parsed)) {
+              localCategories = parsed
+                .filter((category) => typeof category.name === "string" && category.name.trim())
+                .map((category) => ({
+                  name: category.name!.trim(),
+                  pieces: Number(category.pieces) || 0,
+                  image: category.image || "",
+                  section: category.section === "luxury" ? "luxury" : "normal",
+                }));
+            }
+          } catch {
+            window.localStorage.removeItem("fanzzy-categories");
+          }
+        }
+        const categoryIdentity = (name: string, section: CategorySection = "normal") => `${name.trim()}::${section}`;
+        const localCategoryByIdentity = new Map(localCategories.map((category) => [categoryIdentity(category.name, category.section), category]));
+        const localCategoryByExactName = new Map<string, { name: string; pieces: number; image?: string; section?: CategorySection } | null>();
+        localCategories.forEach((category) => {
+          const key = category.name.trim();
+          const previous = localCategoryByExactName.get(key);
+          localCategoryByExactName.set(key, previous && previous.section !== category.section ? null : category);
+        });
+        const mapped = remote.data.map((category) => ({
           name: category.name,
           pieces: category.pieces,
           image: category.image || "",
-          section: category.section || "normal",
-        })));
-        setCatalogCategories(mapped);
-        persistCategories(mapped);
+          section: localCategoryByIdentity.get(categoryIdentity(category.name, category.section || "normal"))?.section || localCategoryByExactName.get(category.name.trim())?.section || category.section || "normal",
+        }));
+        const remoteIdentities = new Set(mapped.map((category) => categoryIdentity(category.name, category.section)));
+        const nextCategories = inferLegacyCategorySections([
+          ...mapped,
+          ...localCategories.filter((category) => !remoteIdentities.has(categoryIdentity(category.name, category.section))),
+        ]);
+        setCatalogCategories(nextCategories);
+        persistCategories(nextCategories);
         return;
       }
       readLocalCategories();

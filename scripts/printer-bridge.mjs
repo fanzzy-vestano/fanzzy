@@ -33,10 +33,38 @@ const defaultBillDesign = {
 
 const text = (value) => String(value ?? "").replace(/[\r\n]+/g, " ").trim();
 const money = (value) => text(value).replace(/^₹/, "Rs.");
+const parseMoney = (value) => {
+  let normalized = text(value).replace(/[^\d,.-]/g, "");
+  if (!normalized) return Number.NaN;
+  const lastDot = normalized.lastIndexOf(".");
+  const lastComma = normalized.lastIndexOf(",");
+  if (lastDot !== -1 && lastComma !== -1) {
+    const decimalSeparator = lastDot > lastComma ? "." : ",";
+    const thousandsSeparator = decimalSeparator === "." ? "," : ".";
+    normalized = normalized.split(thousandsSeparator).join("").replace(decimalSeparator, ".");
+  } else if (lastComma !== -1) {
+    const fractionDigits = normalized.length - lastComma - 1;
+    normalized = fractionDigits <= 2
+      ? normalized.replace(/\./g, "").replace(",", ".")
+      : normalized.replace(/,/g, "");
+  } else {
+    normalized = normalized.replace(/,/g, "");
+  }
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+};
 
 const makeReceipt = (order, configuredDesign = {}) => {
   const design = { ...defaultBillDesign, ...configuredDesign };
-  const currency = (value) => money(value).replace(/^[^0-9-]+/, "Rs.");
+  const currency = (value) => {
+    const parsed = parseMoney(value);
+    if (!Number.isFinite(parsed)) return money(value).replace(/^[^0-9-]+/, "Rs.");
+    const rounded = Math.round(parsed * 100) / 100;
+    return `Rs.${rounded.toLocaleString("en-IN", {
+      minimumFractionDigits: Number.isInteger(rounded) ? 0 : 2,
+      maximumFractionDigits: 2,
+    })}`;
+  };
   const fit = (value, width) => text(value).slice(0, width);
   const wrap = (value, width) => {
     const clean = text(value);
@@ -67,7 +95,17 @@ const makeReceipt = (order, configuredDesign = {}) => {
   const separator = design.separator === "dashed" ? "------------------------------------------------" : "................................................";
   const solid = "________________________________________________";
   const topRow = (leftText, rightText) => `${fit(leftText, 27).padEnd(27)}${right(rightText, 21)}\r\n`;
-  const itemRow = (name, quantity, unit, amount) => `${fit(name, 27).padEnd(27)}${right(quantity, 5)}${right(unit, 8)}${right(amount, 8)}\r\n`;
+  const itemRow = (name, quantity, unit, amount) => `${fit(name, 20).padEnd(20)} ${right(quantity, 4)} ${right(unit, 9)} ${right(amount, 12)}\r\n`;
+  const itemSubtotal = (Array.isArray(order.items) ? order.items : []).reduce((sum, item) => {
+    const unitValue = parseMoney(item.price);
+    const quantity = Math.max(1, Math.floor(Number(item.quantity) || 1));
+    return sum + (Number.isFinite(unitValue) ? unitValue * quantity : 0);
+  }, 0);
+  const couponDiscount = Math.max(0, Number(order.couponDiscount) || 0);
+  const couponPercent = itemSubtotal > 0 && couponDiscount > 0 ? (couponDiscount / itemSubtotal) * 100 : 0;
+  const formatPercent = (value) => `${Number.isInteger(value) ? value : value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")}%`;
+  const couponApplied = Boolean(order.coupon && couponDiscount > 0);
+  const couponLine = [topRow(`Coupon: ${couponApplied ? `${text(order.coupon)}${couponPercent > 0 ? ` (${formatPercent(couponPercent)})` : ""}` : "Not applied"}`, `${couponApplied ? "-" : ""}${currency(couponDiscount)}`)];
   const lines = [
     reset,
     left,
@@ -86,21 +124,22 @@ const makeReceipt = (order, configuredDesign = {}) => {
     "\r\n",
     ...(design.showAddress ? ["DELIVERY ADDRESS\r\n", ...wrap(order.address || "Address provided at checkout", 48).map((line) => `${line}\r\n`)] : []),
     `${separator}\r\n`,
-    `${"Item".padEnd(27)}${"Qty".padStart(5)}${"Unit".padStart(8)}${"Amount".padStart(8)}\r\n`,
+    `${"Item".padEnd(20)} ${"Qty".padStart(4)} ${"Unit".padStart(9)} ${"Amount".padStart(12)}\r\n`,
     `${separator}\r\n`,
   ];
   for (const item of Array.isArray(order.items) ? order.items : []) {
-    const quantity = Math.max(1, Number(item.quantity) || 1);
+    const quantity = Math.max(1, Math.floor(Number(item.quantity) || 1));
+    const numericPrice = parseMoney(item.price);
     const price = currency(item.price);
-    const numericPrice = Number(price.replace(/[^0-9.-]/g, ""));
-    const amount = Number.isFinite(numericPrice) ? `Rs.${(numericPrice * quantity).toLocaleString("en-IN")}` : price;
-    const itemLines = wrap(item.name, 27);
+    const amount = Number.isFinite(numericPrice) ? currency(numericPrice * quantity) : price;
+    const itemLines = wrap(item.name, 22);
     lines.push(itemRow(itemLines[0], quantity, price, amount));
     itemLines.slice(1).forEach((line) => lines.push(itemRow(line, "", "", "")));
   }
   lines.push(
     "\r\n",
     `${solid}\r\n`,
+    ...couponLine,
     bold,
     `Total amount (incl. tax)${right(currency(order.total), 23)}\r\n`,
     normal,

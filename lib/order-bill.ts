@@ -8,6 +8,7 @@ export type BillOrder = {
   email?: string;
   address?: string;
   coupon?: string;
+  couponDiscount?: number;
   items?: Array<{ name: string; quantity: number; price: string; supplierName?: string }>;
 };
 
@@ -58,6 +59,37 @@ const escapeHtml = (value: unknown) => String(value ?? "")
   .replace(/"/g, "&quot;")
   .replace(/'/g, "&#039;");
 
+const parseBillMoney = (value: unknown) => {
+  let normalized = String(value ?? "").trim().replace(/[^\d,.-]/g, "");
+  if (!normalized) return Number.NaN;
+  const lastDot = normalized.lastIndexOf(".");
+  const lastComma = normalized.lastIndexOf(",");
+  if (lastDot !== -1 && lastComma !== -1) {
+    const decimalSeparator = lastDot > lastComma ? "." : ",";
+    const thousandsSeparator = decimalSeparator === "." ? "," : ".";
+    normalized = normalized.split(thousandsSeparator).join("").replace(decimalSeparator, ".");
+  } else if (lastComma !== -1) {
+    const fractionDigits = normalized.length - lastComma - 1;
+    normalized = fractionDigits <= 2
+      ? normalized.replace(/\./g, "").replace(",", ".")
+      : normalized.replace(/,/g, "");
+  } else {
+    normalized = normalized.replace(/,/g, "");
+  }
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+};
+
+const formatBillMoney = (value: number) => {
+  const rounded = Math.round(value * 100) / 100;
+  return `₹${rounded.toLocaleString("en-IN", {
+    minimumFractionDigits: Number.isInteger(rounded) ? 0 : 2,
+    maximumFractionDigits: 2,
+  })}`;
+};
+
+const formatBillPercent = (value: number) => `${Number.isInteger(value) ? value : value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")}%`;
+
 const printableBillMarkup = (order: BillOrder, design: BillDesignSettings, origin: string) => {
   const logo = design.showLogo
     ? design.logoAsset === "custom" && design.logoDataUrl
@@ -68,7 +100,22 @@ const printableBillMarkup = (order: BillOrder, design: BillDesignSettings, origi
     ? design.qrCodeDataUrl
     : `${origin}/vestano-retail-qr-code.png`;
   const qrCode = qrSource ? `<section class="qr-section"><img class="receipt-qr" src="${escapeHtml(qrSource)}" alt="Vestano QR code" /><div>Powered by <strong>Vestano</strong></div></section>` : "";
-  const items = (order.items || []).map((item) => `<tr><td>${escapeHtml(item.name)}${item.supplierName ? `<small class="supplier">Supplier: ${escapeHtml(item.supplierName)}</small>` : ""}</td><td>${Math.max(1, Number(item.quantity) || 1)}</td><td>${escapeHtml(item.price)}</td></tr>`).join("");
+  const itemSubtotal = (order.items || []).reduce((sum, item) => {
+    const unitValue = parseBillMoney(item.price);
+    const quantity = Math.max(1, Math.floor(Number(item.quantity) || 1));
+    return sum + (Number.isFinite(unitValue) ? unitValue * quantity : 0);
+  }, 0);
+  const couponDiscount = Math.max(0, Number(order.couponDiscount) || 0);
+  const couponPercent = itemSubtotal > 0 && couponDiscount > 0 ? (couponDiscount / itemSubtotal) * 100 : 0;
+  const couponApplied = Boolean(order.coupon && couponDiscount > 0);
+  const couponLine = `<div class="discount-row"><span>Coupon: ${couponApplied ? `${escapeHtml(order.coupon)}${couponPercent > 0 ? ` (${escapeHtml(formatBillPercent(couponPercent))})` : ""}` : "Not applied"}</span><strong>${couponApplied ? "−" : ""}${escapeHtml(formatBillMoney(couponDiscount))}</strong></div>`;
+  const items = (order.items || []).map((item) => {
+    const quantity = Math.max(1, Math.floor(Number(item.quantity) || 1));
+    const unitValue = parseBillMoney(item.price);
+    const unit = Number.isFinite(unitValue) ? formatBillMoney(unitValue) : String(item.price ?? "");
+    const amount = Number.isFinite(unitValue) ? formatBillMoney(unitValue * quantity) : unit;
+    return `<tr><td>${escapeHtml(item.name)}${item.supplierName ? `<small class="supplier">Supplier: ${escapeHtml(item.supplierName)}</small>` : ""}</td><td>${quantity}</td><td>${escapeHtml(unit)}</td><td>${escapeHtml(amount)}</td></tr>`;
+  }).join("");
   const separator = design.separator === "dashed" ? "dashed" : "dotted";
   return `<!doctype html><html><head><meta charset="utf-8" /><title>${escapeHtml(order.id)} · Fanzzy bill</title><style>
     @page { margin: 0; size: 80mm auto; }
@@ -91,6 +138,7 @@ const printableBillMarkup = (order: BillOrder, design: BillDesignSettings, origi
     td { border-top: 1px solid #eadfd9; padding: 2.5mm 0; vertical-align: top; }
     td:first-child { max-width: 42mm; overflow-wrap: anywhere; }
     .supplier { color: #775f66; display: block; font-size: 8px; margin-top: 1mm; }
+    .discount-row { display: flex; justify-content: space-between; padding: 2mm 0; }
     .total { color: #551a2d; display: flex; font-size: 16px; font-weight: 700; justify-content: space-between; padding: 4mm 0; }
     .qr-section { border-top: 1px dotted #9b8589; margin-top: 4mm; padding-top: 4mm; text-align: center; }
     .qr-section img { display: block; height: 28mm; margin: 0 auto 2mm; width: 28mm; }
@@ -105,7 +153,8 @@ const printableBillMarkup = (order: BillOrder, design: BillDesignSettings, origi
     ${design.showStatus ? `<div class="muted">Status: ${escapeHtml(order.status)}</div>` : ""}
     <section class="bill-section"><div class="eyebrow">Billed to</div><p><strong>${escapeHtml(order.customerName)}</strong></p>${design.showPhone ? `<p>${escapeHtml(order.phone)}</p>${order.email ? `<p>${escapeHtml(order.email)}</p>` : ""}` : ""}</section>
     ${design.showAddress ? `<section class="bill-section"><div class="eyebrow">Delivery address</div><p>${escapeHtml(order.address || "Address provided at checkout")}</p></section>` : ""}
-    <table><thead><tr><th>Item</th><th>Qty</th><th>Price</th></tr></thead><tbody>${items}</tbody></table>
+    <table><thead><tr><th>Item</th><th>Qty</th><th>Unit</th><th>Amount</th></tr></thead><tbody>${items}</tbody></table>
+    ${couponLine}
     <div class="total"><span>Total</span><span>${escapeHtml(order.total)}</span></div>
     ${qrCode}
     <div class="thanks">${escapeHtml(design.thankYouText)}</div>

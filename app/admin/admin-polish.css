@@ -3864,3 +3864,30 @@
   .agent-list-heading, .agent-list-row { min-width: 820px; }
   .agents-form-modal { max-height: calc(100vh - 20px); overflow-y: auto; padding: 22px 16px; }
 }
+
+/* Keep the financial columns readable while allowing the agent table to scroll on smaller screens. */
+.agent-list-heading,
+.agent-list-row {
+  grid-template-columns: minmax(220px, 1.7fr) minmax(120px, 1fr) 90px minmax(120px, 1fr) minmax(110px, 1fr) minmax(145px, 1.1fr) 68px 68px 68px auto;
+  min-width: 1180px;
+}
+
+.agent-list-row > span,
+.agent-list-row > b {
+  text-align: center;
+}
+
+.agent-list-heading > span:not(:first-child):not(:last-child) {
+  text-align: center;
+}
+
+.agent-list-row .agent-money {
+  color: var(--wine);
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.agent-list-row .agent-payout {
+  color: #668963;
+}

@@ -92,6 +92,7 @@ const settingKeys = {
   productBillNames: "product_bill_names",
   productSupplierNames: "product_supplier_names",
   suppliers: "suppliers",
+  categoryCatalog: "category_catalog",
   productPricing: "product_pricing",
   productVariants: "product_variants",
   productVariantType: "product_variant_type",
@@ -226,13 +227,26 @@ export async function fetchCatalogCategories() {
 
 export async function saveCatalogCategory(category: CatalogCategory) {
   if (!supabase) return new Error("Supabase is not configured");
-  const { error } = await supabase.from("categories").upsert({
+  const payload = {
     name: category.name,
     pieces: category.pieces,
     image: category.image ?? null,
     sort_order: category.sortOrder ?? 0,
     section: category.section ?? "normal",
-  }, { onConflict: "name" });
+  };
+  const { error } = await supabase.from("categories").upsert(payload, { onConflict: "name" });
+  if (error && /section|column/i.test(error.message || "")) {
+    // Older production schemas do not have the section column yet. Save the
+    // category row without it; the admin/store setting keeps the section
+    // metadata until the schema migration is applied.
+    const legacyResult = await supabase.from("categories").upsert({
+      name: category.name,
+      pieces: category.pieces,
+      image: category.image ?? null,
+      sort_order: category.sortOrder ?? 0,
+    }, { onConflict: "name" });
+    return legacyResult.error;
+  }
   return error;
 }
 
@@ -250,6 +264,11 @@ export async function renameCatalogCategory(previousName: string, category: Cata
   if (category.sortOrder !== undefined) updates.sort_order = category.sortOrder;
   if (category.section !== undefined) updates.section = category.section;
   const { error } = await supabase.from("categories").update(updates).eq("name", previousName);
+  if (error && /section|column/i.test(error.message || "")) {
+    delete updates.section;
+    const legacyResult = await supabase.from("categories").update(updates).eq("name", previousName);
+    return legacyResult.error;
+  }
   return error;
 }
 

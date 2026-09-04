@@ -21,6 +21,7 @@ import {
   customerAuthRequest,
   readStoredCustomerAuthUser,
   saveCustomerAuthTokens,
+  saveCustomerAuthUser,
 } from "../lib/customer-auth-client";
 import {
   allocateBundlePrices,
@@ -173,6 +174,43 @@ const categoryImageFallbacks: Record<string, string> = {
 };
 const categoryImageFallback = (name: string, index: number) =>
   categoryImageFallbacks[name.trim().toLowerCase()] || Object.values(categoryImageFallbacks)[index % 4];
+const categoryFilterKey = (name: string) => name.trim().toLowerCase().replace(/\b(luxury|luxurious|premium)\b/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+const categoryIdentityKey = (category: Pick<StorefrontCategory, "name" | "section">) => `${categoryFilterKey(category.name) || category.name.trim().toLowerCase()}::${category.section}`;
+const dedupeStorefrontCategories = (categories: StorefrontCategory[]) => {
+  const seen = new Set<string>();
+  return categories.filter((category) => {
+    const key = categoryIdentityKey(category);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+const isTestCategory = (name: string) => name.trim().toLowerCase() === "test";
+const isRingsCategory = (name: string) => {
+  const key = categoryFilterKey(name);
+  return key === "ring" || key === "rings";
+};
+const isLuxuryProductCategory = (category: string) => /\s*·\s*lx\s*$/i.test(category.trim());
+const baseProductCategory = (category: string) => category.replace(/\s*·\s*lx\s*$/i, "").trim();
+const productCatalogSection = (productCategory: string, categories: StorefrontCategory[]) => {
+  if (isLuxuryProductCategory(productCategory)) return "luxury" as const;
+  const categoryName = baseProductCategory(productCategory).toLowerCase();
+  const matchingSections = new Set(
+    categories
+      .filter((category) => baseProductCategory(category.name).toLowerCase() === categoryName)
+      .map((category) => category.section),
+  );
+  return matchingSections.size === 1 && matchingSections.has("luxury") ? "luxury" as const : "normal" as const;
+};
+const matchesCatalogCategory = (
+  productCategory: string,
+  selectedCategory: string,
+  section: CatalogCategorySection | "all" = "all",
+  categories: StorefrontCategory[] = [],
+) => {
+  if (section !== "all" && productCatalogSection(productCategory, categories) !== section) return false;
+  return baseProductCategory(productCategory).toLowerCase() === baseProductCategory(selectedCategory).toLowerCase();
+};
 const persistStorefrontProductCache = (catalog: Product[]) => {
   if (typeof window === "undefined") return;
   try {
@@ -507,7 +545,7 @@ const isProductOutOfStock = (product: Product) => getProductVariantType(product)
     ? getProductSizes(product).every((size) => getSizeStock(product, size) <= 0)
     : product.stock <= 0;
 
-const ProductCard = memo(function ProductCard({ product, wished, promotions, cartQuantity, onWishlist, onAdd, onDecrease, onIncrease, onQuickView, onImageZoom }: { product: Product; wished: boolean; promotions: PromotionOffer[]; cartQuantity: number; onWishlist: () => void; onAdd: () => void; onDecrease: () => void; onIncrease: () => void; onQuickView: () => void; onImageZoom: () => void }) {
+const ProductCard = memo(function ProductCard({ product, wished, promotions, cartQuantity, isLuxury, onWishlist, onAdd, onDecrease, onIncrease, onQuickView, onImageZoom }: { product: Product; wished: boolean; promotions: PromotionOffer[]; cartQuantity: number; isLuxury?: boolean; onWishlist: () => void; onAdd: () => void; onDecrease: () => void; onIncrease: () => void; onQuickView: () => void; onImageZoom: () => void }) {
   const isOutOfStock = isProductOutOfStock(product);
   const discountPercent = getProductDiscountPercent(product);
   const [touchImageRevealed, setTouchImageRevealed] = useState(false);
@@ -531,13 +569,14 @@ const ProductCard = memo(function ProductCard({ product, wished, promotions, car
     onImageZoom();
   }, [onImageZoom]);
   return (
-    <article className="product-card">
+    <article className={`product-card${isLuxury ? " luxury-product-card" : ""}`}>
       <div className="product-media" style={{ backgroundColor: product.tone }}>
         <div className={`product-image-surface ${touchImageRevealed ? "is-touch-revealed" : ""}`} onPointerDown={handleImageSurfacePointerDown} onPointerUp={handleImageSurfacePointerEnd} onPointerCancel={handleImageSurfacePointerEnd} onClick={handleImageSurfaceClick}>
           <img className={`product-image product-image-zoom primary-image ${isOutOfStock ? "stock-out-image" : ""}`} src={product.image} alt={product.name} style={imageAdjustmentStyle(product.imageAdjustments)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onImageZoom(); }} role="button" tabIndex={0} title="Click to zoom" />
           <img className={`product-image product-image-zoom hover-image ${isOutOfStock ? "stock-out-image" : ""}`} src={product.hoverImage} alt="" aria-hidden="true" />
         </div>
         <span className="product-discount-badge">{discountPercent}% off</span>
+        {isLuxury && <span className="luxury-product-label">Premium edit</span>}
         {product.tag && <span className="product-tag with-discount">{product.tag}</span>}
         {promotions.slice(0, 1).map((offer) => <span className="promotion-badge" key={offer.id}>{offerTypeLabel(offer)}</span>)}
         {product.stock === 1 && <span className={`low-stock-badge ${product.tag ? "with-tag" : ""} with-discount`}>Only 1 available</span>}
@@ -560,6 +599,7 @@ const ProductCard = memo(function ProductCard({ product, wished, promotions, car
 }, (previous, next) => previous.product === next.product
   && previous.wished === next.wished
   && previous.promotions === next.promotions
+  && previous.isLuxury === next.isLuxury
   && previous.cartQuantity === next.cartQuantity);
 
 export default function Home() {
@@ -623,7 +663,6 @@ export default function Home() {
   const [quickProduct, setQuickProduct] = useState<Product | null>(null);
   const overlayHistoryStack = useRef<string[]>([]);
   const overlayPageState = useRef<StorefrontPageHistoryState>({ activeCategory: "All pieces", search: "", scrollY: 0 });
-  const pendingPageScrollY = useRef<number | null>(null);
   const overlayScrollY = useRef<number | null>(null);
   const overlayHistoryCleanup = useRef(false);
   const overlayClosedFromBack = useRef(false);
@@ -709,9 +748,9 @@ export default function Home() {
 
     setCartOpen(true);
   }, [activeCategory, cartOpen, search]);
-  const selectCategory = useCallback((category: string) => {
+  const selectCategory = useCallback((category: string, section: CatalogCategorySection | "all" = "all") => {
     setActiveCategory(category);
-    setActiveCategorySection("all");
+    setActiveCategorySection(section);
     overlayPageState.current = {
       ...overlayPageState.current,
       activeCategory: category,
@@ -1043,21 +1082,51 @@ export default function Home() {
           window.localStorage.removeItem("fanzzy-categories");
         }
       }
-      const remote = await fetchCatalogCategories();
+      const [remote, shared] = await Promise.all([
+        fetchCatalogCategories(),
+        fetchStoreSetting("categoryCatalog"),
+      ]);
+      let sharedCategories: StorefrontCategory[] = [];
+      if (shared.value) {
+        try {
+          const parsed = JSON.parse(shared.value) as Array<{ name?: string; pieces?: number; image?: string; section?: CatalogCategorySection }>;
+          if (Array.isArray(parsed)) {
+            sharedCategories = parsed.filter((category) => category.name).map((category, index) => ({
+              name: category.name!,
+              count: `${category.pieces ?? 0} pieces`,
+              image: category.image || categoryImageFallback(category.name!, index),
+              section: category.section || "normal",
+            }));
+          }
+        } catch {
+          // Ignore an invalid shared category snapshot and use the catalog table.
+        }
+      }
       if (active && !remote.error && remote.data && remote.data.length) {
-        const localCategoryByName = new Map(localCategories.map((category) => [category.name.trim().toLowerCase(), category]));
+        const categoryIdentity = (name: string, section: CatalogCategorySection = "normal") => `${name.trim()}::${section}`;
+        const knownCategories = [...sharedCategories, ...localCategories];
+        const localCategoryByIdentity = new Map(knownCategories.map((category) => [categoryIdentity(category.name, category.section), category]));
+        const categoryByExactName = new Map<string, StorefrontCategory | null>();
+        knownCategories.forEach((category) => {
+          const key = category.name.trim();
+          const previous = categoryByExactName.get(key);
+          categoryByExactName.set(key, previous && previous.section !== category.section ? null : category);
+        });
         const remoteCategories = remote.data.map((category, index) => ({
           name: category.name,
           count: `${category.pieces} pieces`,
           image: category.image || categoryImageFallback(category.name, index),
-          section: localCategoryByName.get(category.name.trim().toLowerCase())?.section || category.section || "normal",
+          section: localCategoryByIdentity.get(categoryIdentity(category.name, category.section || "normal"))?.section || categoryByExactName.get(category.name.trim())?.section || category.section || "normal",
         }));
-        const remoteNames = new Set(remoteCategories.map((category) => category.name.trim().toLowerCase()));
-        const localOnlyCategories = localCategories.filter((category) => !remoteNames.has(category.name.trim().toLowerCase()));
-        setCategories(inferLegacyCategorySections([...remoteCategories, ...localOnlyCategories]));
+        const remoteIdentities = new Set(remoteCategories.map((category) => categoryIdentity(category.name, category.section)));
+        const localOnlyCategories = knownCategories.filter((category) => !remoteIdentities.has(categoryIdentity(category.name, category.section)));
+        setCategories(dedupeStorefrontCategories(inferLegacyCategorySections([...remoteCategories, ...localOnlyCategories])));
         return;
       }
-      if (active && localCategories.length) setCategories(localCategories);
+      if (active && (sharedCategories.length || localCategories.length)) {
+        const merged = [...sharedCategories, ...localCategories];
+        setCategories(dedupeStorefrontCategories(inferLegacyCategorySections(merged)));
+      }
     };
     const runSyncCategories = () => { void syncCategories().catch(() => undefined); };
     runSyncCategories();
@@ -1113,12 +1182,6 @@ export default function Home() {
     const syncOrders = async (recoverCapturedPayments = false) => {
       if (syncInFlight) return;
       syncInFlight = true;
-      // Recover captured payments on the initial load only. Live order updates
-      // should read the shared order record directly without waiting on the
-      // payment provider.
-      if (recoverCapturedPayments) {
-        await fetch("/api/razorpay/sync-payments", { method: "POST" }).catch(() => undefined);
-      }
       const userId = authUser?.id;
       if (!userId) {
         setOrders([]);
@@ -1126,38 +1189,42 @@ export default function Home() {
         return;
       }
       try {
+        const localOnlyOrders: CustomerOrder[] = [];
+        const cachedOrders = new Map<string, CustomerOrder>();
+        const addCachedOrders = (value: unknown) => {
+          if (!Array.isArray(value)) return;
+          value.forEach((order) => {
+            if (order?.id && isCustomerOrder(order as CustomerOrder, authUser) && !cachedOrders.has(order.id)) {
+              const localOrder = order as CustomerOrder;
+              cachedOrders.set(localOrder.id, localOrder);
+              localOnlyOrders.push(localOrder);
+            }
+          });
+        };
+        try {
+          addCachedOrders(JSON.parse(window.localStorage.getItem(`fanzzy-orders:${userId}`) || "[]"));
+          addCachedOrders(JSON.parse(window.localStorage.getItem("fanzzy-orders") || "[]"));
+        } catch {
+          window.localStorage.removeItem(`fanzzy-orders:${userId}`);
+        }
+        if (cachedOrders.size) setOrders(Array.from(cachedOrders.values()));
+
+        // Recover captured payments on the initial load in the background so it
+        // cannot delay the customer’s already available order list.
+        if (recoverCapturedPayments) {
+          void fetch("/api/razorpay/sync-payments", { method: "POST" }).catch(() => undefined);
+        }
+
         const remote = await fetchStoreOrders<CustomerOrder>();
         const merged = new Map<string, CustomerOrder>();
-        const localOnlyOrders: CustomerOrder[] = [];
         remote.data?.forEach((order) => {
           if (order?.id && isCustomerOrder(order, authUser)) {
             merged.set(order.id, order);
           }
         });
-        try {
-          const stored = window.localStorage.getItem(`fanzzy-orders:${userId}`);
-          const parsed = stored ? JSON.parse(stored) : [];
-          if (Array.isArray(parsed)) {
-            parsed.forEach((order) => {
-              if (order?.id && isCustomerOrder(order as CustomerOrder, authUser) && !merged.has(order.id)) {
-                const localOrder = order as CustomerOrder;
-                merged.set(localOrder.id, localOrder);
-                localOnlyOrders.push(localOrder);
-              }
-            });
-          }
-          const sharedStored = window.localStorage.getItem("fanzzy-orders");
-          const sharedParsed = sharedStored ? JSON.parse(sharedStored) : [];
-          if (Array.isArray(sharedParsed)) sharedParsed.forEach((order) => {
-            if (order?.id && isCustomerOrder(order as CustomerOrder, authUser) && !merged.has(order.id)) {
-              const localOrder = order as CustomerOrder;
-              merged.set(localOrder.id, localOrder);
-              localOnlyOrders.push(localOrder);
-            }
-          });
-        } catch {
-          window.localStorage.removeItem(`fanzzy-orders:${userId}`);
-        }
+        cachedOrders.forEach((order) => {
+          if (!merged.has(order.id)) merged.set(order.id, order);
+        });
         // A completed payment can be preserved locally while the shared order
         // store is offline. As soon as it comes back, add only the missing
         // customer records to the full remote collection without overwriting
@@ -1167,7 +1234,7 @@ export default function Home() {
           remote.data?.forEach((order) => { if (order?.id) allOrders.set(order.id, order); });
           localOnlyOrders.forEach((order) => allOrders.set(order.id, order));
           if (allOrders.size > (remote.data?.length || 0)) {
-            await saveStoreOrders(Array.from(allOrders.values()));
+            void saveStoreOrders(Array.from(allOrders.values())).catch(() => undefined);
           }
         }
         setOrders(Array.from(merged.values()));
@@ -1197,10 +1264,11 @@ export default function Home() {
     const query = search.trim().toLowerCase();
     return products
       .filter((product) => {
-        const categoryMatch = activeCategory === "All pieces" || product.category === activeCategory;
-        const categorySectionMatch = activeCategorySection === "all" || categories.some((category) => category.section === activeCategorySection && category.name.trim().toLowerCase() === product.category.trim().toLowerCase());
+        const categoryMatch = activeCategory === "All pieces"
+          ? activeCategorySection === "all" || productCatalogSection(product.category, categories) === activeCategorySection
+          : matchesCatalogCategory(product.category, activeCategory, activeCategorySection, categories);
         const searchMatch = !query || `${product.name} ${product.category} ${product.vendorName || ""}`.toLowerCase().includes(query);
-        return categoryMatch && categorySectionMatch && searchMatch;
+        return categoryMatch && searchMatch;
       })
       .sort((left, right) => {
         // Keep available pieces before sold-out pieces for every sort mode.
@@ -1221,6 +1289,37 @@ export default function Home() {
         }
       });
   }, [activeCategory, activeCategorySection, categories, productSort, products, search]);
+
+  const mixedFilterCategories = useMemo(() => {
+    const normal = categories.filter((category) => !isTestCategory(category.name) && category.section !== "luxury");
+    const luxury = categories.filter((category) => !isTestCategory(category.name) && !isRingsCategory(category.name) && category.section === "luxury");
+    const mixed: StorefrontCategory[] = [];
+
+    while (normal.length || luxury.length) {
+      const nextNormal = normal.shift();
+      if (nextNormal) {
+        mixed.push(nextNormal);
+        const matchingLuxuryIndex = luxury.findIndex((category) => categoryFilterKey(category.name) === categoryFilterKey(nextNormal.name));
+        const nextLuxuryIndex = matchingLuxuryIndex >= 0 ? matchingLuxuryIndex : -1;
+        if (nextLuxuryIndex >= 0) mixed.push(luxury.splice(nextLuxuryIndex, 1)[0]);
+      } else {
+        mixed.push(...luxury.splice(0));
+      }
+    }
+
+    return dedupeStorefrontCategories(mixed);
+  }, [categories]);
+  const duplicateFilterCategoryKeys = useMemo(() => {
+    const sectionsByCategory = new Map<string, Set<CatalogCategorySection>>();
+    categories.forEach((category) => {
+      const key = categoryFilterKey(category.name);
+      if (!key) return;
+      const sections = sectionsByCategory.get(key) || new Set<CatalogCategorySection>();
+      sections.add(category.section);
+      sectionsByCategory.set(key, sections);
+    });
+    return new Set(Array.from(sectionsByCategory.entries()).filter(([, sections]) => sections.size > 1).map(([key]) => key));
+  }, [categories]);
 
   const offersForProduct = useCallback((product: Product) => promotionalOffers.filter((offer) => {
     const paidScope = offer.eligiblePaid;
@@ -1345,9 +1444,9 @@ export default function Home() {
       try {
         const response = await customerAuthRequest("session", { cache: "no-store" });
         if (!response.ok) {
-          if ([401, 403, 410].includes(response.status)) {
-            clearCustomerAuthTokens();
-            if (active) setAuthUser(null);
+          if (active && storedUser) {
+            setAuthUser(storedUser);
+            setCheckoutForm((current) => ({ ...current, phone: current.phone || storedUser.phone }));
           }
           return;
         }
@@ -1363,11 +1462,11 @@ export default function Home() {
             setCheckoutForm((current) => ({ ...current, phone: current.phone || storedUser.phone }));
             return;
           }
-          clearCustomerAuthTokens();
           setAuthUser(null);
           return;
         }
         setAuthUser(user);
+        saveCustomerAuthUser(user);
         if (user) setCheckoutForm((current) => ({ ...current, phone: current.phone || user.phone }));
       } catch {
         // Keep a locally restorable session through temporary network/CORS failures.
@@ -1384,7 +1483,10 @@ export default function Home() {
   useEffect(() => {
     if (!authUser) return;
     const timeout = window.setTimeout(() => {
-      if (authJustVerified) setAuthJustVerified(false);
+      if (authJustVerified) {
+        setAuthJustVerified(false);
+        setAuthOpen(false);
+      }
       if (window.localStorage.getItem(checkoutAfterAuthKey) === "1" && cartItems.length) {
         window.localStorage.removeItem(checkoutAfterAuthKey);
         setAuthOpen(false);
@@ -1744,7 +1846,9 @@ export default function Home() {
 
   useEffect(() => {
     const savedPageState = window.history.state?.fanzzyPage as Partial<StorefrontPageHistoryState> | undefined;
-    if (!savedPageState) return;
+    const urlParams = new URLSearchParams(window.location.search);
+    const restoringOverlay = Boolean(window.history.state?.fanzzyOverlay || urlParams.get("fanzzy-overlay") || urlParams.get("fanzzy-product"));
+    if (!savedPageState || !restoringOverlay) return;
     const restoredPageState: StorefrontPageHistoryState = {
       activeCategory: savedPageState.activeCategory || "All pieces",
       search: typeof savedPageState.search === "string" ? savedPageState.search : "",
@@ -1753,20 +1857,7 @@ export default function Home() {
     overlayPageState.current = restoredPageState;
     if (savedPageState.activeCategory) setActiveCategory(restoredPageState.activeCategory);
     if (typeof savedPageState.search === "string") setSearch(restoredPageState.search);
-    if (restoredPageState.scrollY > 0) {
-      pendingPageScrollY.current = restoredPageState.scrollY;
-      const restoreScroll = () => window.scrollTo({ top: restoredPageState.scrollY, behavior: "auto" });
-      [50, 200, 600].forEach((delay) => window.setTimeout(restoreScroll, delay));
-    }
   }, []);
-
-  useEffect(() => {
-    const savedScrollY = pendingPageScrollY.current;
-    if (savedScrollY === null || products.length === 0) return;
-    pendingPageScrollY.current = null;
-    const restoreScroll = () => window.scrollTo({ top: savedScrollY, behavior: "auto" });
-    [0, 100, 400].forEach((delay) => window.setTimeout(restoreScroll, delay));
-  }, [products.length]);
 
   useLayoutEffect(() => {
     const previousLayers = overlayHistoryStack.current;
@@ -1933,14 +2024,6 @@ export default function Home() {
       overlayClosedFromBack.current = true;
       overlayHistoryStack.current = activeOverlayLayers.slice(0, -1);
 
-      const savedScrollY = Number(pageHistoryState?.scrollY);
-      if (Number.isFinite(savedScrollY)) {
-        const restorePageScroll = () => window.scrollTo({ top: Math.max(0, savedScrollY), behavior: "auto" });
-        restorePageScroll();
-        window.requestAnimationFrame(restorePageScroll);
-        window.setTimeout(restorePageScroll, 80);
-      }
-
       if (pageHistoryState?.activeCategory) setActiveCategory(pageHistoryState.activeCategory);
       if (typeof pageHistoryState?.search === "string") setSearch(pageHistoryState.search);
 
@@ -2042,13 +2125,14 @@ export default function Home() {
       }
       saveCustomerAuthTokens(result);
       clearPendingCustomerAuthToken();
+      saveCustomerAuthUser(result.user);
       setAuthUser(result.user);
       setCheckoutForm((current) => ({ ...current, phone: current.phone || result.user!.phone }));
       setAuthOtp("");
       setOtpSent(false);
       setOtpCooldown(0);
       setAuthJustVerified(true);
-      setAuthMessage("OTP verified successfully");
+      setAuthMessage("Verification successful");
     } catch {
       setAuthMessage("Please try again");
     } finally {
@@ -2576,11 +2660,14 @@ export default function Home() {
   };
   const categoryGroups = (["normal", "luxury"] as CatalogCategorySection[]).map((section) => ({
     section,
-    categories: categories.filter((category) => category.section === section).slice(0, 2),
+    categories: categories.filter((category) => !isTestCategory(category.name) && (section !== "luxury" || !isRingsCategory(category.name)) && category.section === section).slice(0, 2),
   }));
+  const getCategoryPieceCount = (category: StorefrontCategory) => products.length
+    ? products.filter((product) => matchesCatalogCategory(product.category, category.name, category.section, categories)).length
+    : Number.parseInt(category.count, 10) || 0;
 
   return (
-    <main className="site-shell" id="top">
+    <main className={`site-shell${activeCategorySection === "luxury" ? " luxury-filter-active" : ""}`} id="top">
       <div className="announcement"><div className="announcement-promo"><strong>{announcementText}</strong><button onClick={() => { const shop = document.getElementById("shop"); if (shop) shop.scrollIntoView({ behavior: "smooth" }); else window.location.assign(`${siteBasePath}/#shop`); }}>Explore now&nbsp; ↗</button></div><span className="announcement-powered">Driven by Excellence. Powered by Vestano Retail</span></div>
 
       <header className="site-header">
@@ -2614,12 +2701,12 @@ export default function Home() {
 
       {heroSlides.length > 0 && <section className="hero hero-background" id="top"><div className="hero-slide-layer" key={heroSlides[heroSlideIndex]}><img src={heroSlides[heroSlideIndex]} alt="Fanzzy collection highlight" /></div></section>}
 
-      <section className="section-block" id="categories"><div className="category-showcase"><div className="category-intro"><h2>Find your <em>signature.</em></h2></div><div className="category-section-grids">{categoryGroups.map(({ section, categories: sectionCategories }) => sectionCategories.length ? <div className={`category-display-group ${section === "luxury" ? "luxury-category-group" : "normal-category-group"}`} key={section}><a className="category-group-heading" href={`${siteBasePath}/collections#${section}`} aria-label={`View all ${section === "luxury" ? "Luxury" : "Everyday Collection"} categories`}><div><h3>{section === "luxury" ? "Luxury Category" : "Everyday Collection"}</h3></div><span className="category-group-link">View <span>↗</span></span></a><div className="category-grid">{sectionCategories.map((category, index) => <button className={`category-card category-${index + 1}`} key={category.name} onClick={() => { selectCategory(category.name); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}><img src={category.image || categoryImageFallback(category.name, index)} alt={category.name} /><span className="category-overlay" /><span className="category-info"><strong>{category.name}</strong></span></button>)}</div></div> : null)}</div></div></section>
+      <section className="section-block" id="categories"><div className="category-showcase"><div className="category-intro"><h2>Find your <em>signature.</em></h2></div><div className="category-section-grids">{categoryGroups.map(({ section, categories: sectionCategories }) => sectionCategories.length ? <div className={`category-display-group ${section === "luxury" ? "luxury-category-group" : "normal-category-group"}`} key={section}><a className="category-group-heading" href={`${siteBasePath}/collections#${section}`} aria-label={`View all ${section === "luxury" ? "Luxury" : "Everyday Collection"} categories`}><div><h3>{section === "luxury" ? "Luxury Category" : "Everyday Collection"}</h3></div><span className="category-group-link">View <span>↗</span></span></a><div className="category-grid">{sectionCategories.map((category, index) => <button className={`category-card category-${index + 1}`} key={category.name} onClick={() => { selectCategory(category.name, section); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}><img src={category.image || categoryImageFallback(category.name, index)} alt={category.name} /><span className="category-overlay" /><span className="category-info"><strong>{category.name}</strong><small>{getCategoryPieceCount(category)} pieces</small></span></button>)}</div></div> : null)}</div></div></section>
       {vendors.length > 0 && <section className="section-block vendor-strip-section" aria-labelledby="vendor-strip-title"><div className="vendor-strip-heading"><div><p className="eyebrow">SHOP BY VENDOR</p><h2 id="vendor-strip-title">Meet the <em>makers.</em></h2></div><a className="text-link" href={`${siteBasePath}/vendors`}>View all vendors <span>↗</span></a></div><div className="vendor-strip" role="list">{vendors.map((vendor) => { const image = vendor.logoUrl || vendor.coverUrl; return <a className="vendor-strip-card" href={`${siteBasePath}/vendors/${vendor.slug}`} key={vendor.id} role="listitem"><span className="vendor-strip-logo">{image ? <img src={image} alt="" /> : <strong>{vendor.businessName.trim().charAt(0).toUpperCase()}</strong>}</span><span className="vendor-strip-copy"><strong>{vendor.businessName}</strong><small>{vendor.featured ? "Featured vendor" : "Explore store"} <span>↗</span></small></span></a>; })}</div></section>}
 
       <section className="manifesto"><p className="eyebrow">THE FANZZY STANDARD</p><h2>Jewellery with a point of view.<br /><em>Made for your everyday extraordinary.</em></h2><p className="manifesto-copy">Fanzzy is a study in contrast — soft and sculptural, familiar and unexpected. Every piece is made in small batches with considered materials and a little bit of magic.</p></section>
 
-      <section className="section-block product-section" id="shop"><div className="section-heading"><div><p className="eyebrow">CURATED FOR YOU</p><h2>Pieces worth <em>keeping.</em></h2></div><a className="text-link" href="#footer">Shop all <span>↗</span></a></div>{promotionalOffers.length > 0 && <div className="storefront-offer-rail"><span className="eyebrow">LIVE OFFERS</span><div className="storefront-offer-list">{promotionalOffers.map((offer) => <button key={offer.id} onClick={() => { const first = products.find((product) => offersForProduct(product).some((item) => item.id === offer.id)); if (first) openQuickProduct(first); }}>{offerTypeLabel(offer)} {offer.freeQuantity > 0 && <span className="offer-free-label">FREE</span>} <b>↗</b></button>)}</div></div>}<div className="filter-row"><div className="filter-pills"><button className={activeCategory === "All pieces" ? "active" : ""} onClick={() => selectCategory("All pieces")}>All pieces</button>{categories.map((category) => <button className={activeCategory === category.name ? "active" : ""} key={category.name} onClick={() => selectCategory(category.name)}>{category.name}{category.section === "luxury" && <span className="category-tier-marker" aria-label="Luxury category"> · Luxury</span>}</button>)}</div><div className="filter-tools"><label className="product-sort-control"><span>Sort by</span><select value={productSort} onChange={(event) => setProductSort(event.target.value)} aria-label="Sort products"><option value="featured">Featured</option><option value="price-low">Price: low to high</option><option value="price-high">Price: high to low</option><option value="name">Name: A to Z</option><option value="stock">Availability</option></select></label><span className="result-count">{catalogLoading ? "Loading pieces…" : `${filteredProducts.length} pieces`}</span></div></div><div className="product-grid">{catalogLoading ? <p className="muted">Loading all pieces…</p> : filteredProducts.map((product) => { const productPromotions = promotionsByProductId.get(product.id) ?? []; return <ProductCard key={product.id} product={product} promotions={productPromotions} cartQuantity={getProductCartQuantity(product)} wished={wishlist.includes(product.id)} onWishlist={() => toggleWishlist(product.id)} onAdd={() => (getProductVariantType(product) === "normal" && product.variants?.length) || (getProductVariantType(product) === "size" && product.sizes?.length) || productPromotions.length ? openQuickProduct(product) : addToCart(product)} onDecrease={() => decreaseProductCart(product)} onIncrease={() => increaseProductCart(product)} onQuickView={() => openQuickProduct(product)} onImageZoom={() => setZoomedImage({ src: product.image, alt: product.name, adjustments: product.imageAdjustments })} />; })}</div></section>
+      <section className={`section-block product-section${activeCategorySection === "luxury" ? " luxury-product-section" : ""}`} id="shop"><div className="section-heading"><div><p className="eyebrow">CURATED FOR YOU</p><h2>Pieces worth <em>keeping.</em></h2></div><a className="text-link" href="#footer">Shop all <span>↗</span></a></div>{promotionalOffers.length > 0 && <div className="storefront-offer-rail"><span className="eyebrow">LIVE OFFERS</span><div className="storefront-offer-list">{promotionalOffers.map((offer) => <button key={offer.id} onClick={() => { const first = products.find((product) => offersForProduct(product).some((item) => item.id === offer.id)); if (first) openQuickProduct(first); }}>{offerTypeLabel(offer)} {offer.freeQuantity > 0 && <span className="offer-free-label">FREE</span>} <b>↗</b></button>)}</div></div>}<div className="filter-row"><div className="filter-pills"><button className={activeCategory === "All pieces" ? "active" : ""} onClick={() => selectCategory("All pieces")}>All pieces</button>{mixedFilterCategories.map((category) => <button className={`${activeCategory === category.name && (activeCategorySection === "all" || activeCategorySection === category.section) ? "active " : ""}${category.section === "luxury" ? "luxury-category-filter" : ""}`} key={`${category.section}-${category.name}`} onClick={() => selectCategory(category.name, category.section)}>{category.name}{duplicateFilterCategoryKeys.has(categoryFilterKey(category.name)) && <span className={`category-section-marker${category.section === "luxury" ? " is-luxury" : ""}`}> · {category.section === "luxury" ? "Luxury" : "Normal"}</span>}</button>)}</div><div className="filter-tools"><label className="product-sort-control"><span>Sort by</span><select value={productSort} onChange={(event) => setProductSort(event.target.value)} aria-label="Sort products"><option value="featured">Featured</option><option value="price-low">Price: low to high</option><option value="price-high">Price: high to low</option><option value="name">Name: A to Z</option><option value="stock">Availability</option></select></label><span className="result-count">{catalogLoading ? "Loading pieces…" : `${filteredProducts.length} pieces`}</span></div></div><div className="product-grid">{catalogLoading ? <p className="muted">Loading all pieces…</p> : filteredProducts.map((product) => { const productPromotions = promotionsByProductId.get(product.id) ?? []; const productIsLuxury = productCatalogSection(product.category, categories) === "luxury"; return <ProductCard key={product.id} product={product} isLuxury={productIsLuxury} promotions={productPromotions} cartQuantity={getProductCartQuantity(product)} wished={wishlist.includes(product.id)} onWishlist={() => toggleWishlist(product.id)} onAdd={() => (getProductVariantType(product) === "normal" && product.variants?.length) || (getProductVariantType(product) === "size" && product.sizes?.length) || productPromotions.length ? openQuickProduct(product) : addToCart(product)} onDecrease={() => decreaseProductCart(product)} onIncrease={() => increaseProductCart(product)} onQuickView={() => openQuickProduct(product)} onImageZoom={() => setZoomedImage({ src: product.image, alt: product.name, adjustments: product.imageAdjustments })} />; })}</div></section>
 
       <section className="editorial" id="story"><div className="editorial-image"><img src="https://images.unsplash.com/photo-1515562141207-7a88fb7ce338?auto=format&fit=crop&w=1100&q=85" alt="Close-up of sculptural gold jewelry" /><span>THE ART OF<br /><em>ADORNMENT</em></span></div><div className="editorial-copy"><p className="eyebrow">A NOTE FROM THE STUDIO</p><h2>Less noise.<br /><em>More meaning.</em></h2><p>There is beauty in the in-between. The way a quiet chain layers with your favourite shirt. A ring that becomes part of your hand. Fanzzy is made for these small rituals — the ones that make a day feel like yours.</p><a className="button button-dark" href="#footer">Read our story <span>↗</span></a><div className="editorial-sign">F / 19<br /></div></div></section>
 
