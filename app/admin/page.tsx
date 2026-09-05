@@ -3242,6 +3242,7 @@ function SettingsWorkspace({
     window.localStorage.setItem("fanzzy-shipping-rules", JSON.stringify(shipping));
     window.localStorage.setItem("fanzzy-payment-methods", JSON.stringify(payments));
     void saveStoreSetting("paymentMethods", JSON.stringify(payments));
+    window.dispatchEvent(new Event("fanzzy-payment-methods-updated"));
     window.localStorage.setItem("fanzzy-printer-name", printerName);
     void saveStoreSetting("printerName", printerName);
     window.localStorage.setItem("fanzzy-bill-design", JSON.stringify(billDesign));

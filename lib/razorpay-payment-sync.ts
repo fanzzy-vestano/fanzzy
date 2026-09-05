@@ -535,6 +535,7 @@ export async function confirmCashOnDeliveryOrder(orderId: string, identity?: { i
 
     const paymentMethods = await readJsonSetting<Record<string, unknown>>("payment_methods", {});
     if (paymentMethods.cod === false) throw new Error("Cash on delivery is currently unavailable.");
+    if (order.paymentMethod !== "cod") throw new Error("This order was not created with COD selected.");
     if (order.paymentStatus === "cod_pending") {
       await syncVendorOrderForPaidOrder(order).catch(() => undefined);
       if (order.fulfillmentMethod !== "pickup") await ensureDelhiveryShipment(orders, order);
