@@ -143,7 +143,7 @@ const delhiveryFailureMessage = (error: unknown) => {
 };
 
 async function ensureDelhiveryShipment(orders: StoredOrder[], order: StoredOrder) {
-  if (order.fulfillmentMethod === "pickup" || order.delhiveryAwb || order.delhiveryShipmentStatus === "pending" || order.delhiveryShipmentStatus === "failed") return;
+  if (order.fulfillmentMethod === "pickup" || order.delhiveryAwb || order.delhiveryShipmentStatus === "pending") return;
   order.delhiveryShipmentStatus = "pending";
   order.delhiveryShipmentRequestedAt = new Date().toISOString();
   await writeOrders(orders);
