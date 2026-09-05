@@ -108,6 +108,51 @@ async function readOrders() {
   }
 }
 
+const publicTrackingPhone = (value: string) => String(value || "").replace(/\D/g, "").slice(-10);
+
+const publicTrackingOrderId = (value: string) => {
+  const normalized = String(value || "").trim().toUpperCase();
+  return normalized.startsWith("#") ? normalized : `#${normalized}`;
+};
+
+/**
+ * Looks up only the non-sensitive shipment fields needed by the public
+ * tracking page. The customer's phone number is required so an order number
+ * alone cannot reveal shipment details.
+ */
+export async function lookupPublicOrderTracking(orderId: string, phone: string) {
+  const orders = await readOrders();
+  const requestedId = publicTrackingOrderId(orderId);
+  const requestedPhone = publicTrackingPhone(phone);
+  const order = orders.find((candidate) =>
+    candidate.id.trim().toUpperCase() === requestedId
+    && [candidate.phone, candidate.userPhone].some((value) => publicTrackingPhone(String(value || "")) === requestedPhone),
+  );
+  if (!order) return null;
+
+  let liveTracking: Awaited<ReturnType<typeof trackDelhiveryShipment>> | undefined;
+  if (order.delhiveryAwb) {
+    try {
+      liveTracking = await trackDelhiveryShipment(order.delhiveryAwb, order.id);
+    } catch {
+      // Keep showing the last saved shipment status if Delhivery is temporarily unavailable.
+    }
+  }
+
+  return {
+    orderId: order.id,
+    placedOn: order.createdAt || order.date,
+    status: liveTracking?.status || order.delhiveryLiveStatus || order.status || "Order received",
+    statusType: liveTracking?.statusType || order.delhiveryLiveStatusType,
+    statusDate: liveTracking?.statusDate || order.delhiveryLiveStatusDate,
+    location: liveTracking?.location || order.delhiveryLiveLocation,
+    waybill: order.delhiveryAwb,
+    trackingUrl: order.delhiveryTrackingUrl,
+    scans: liveTracking?.scans || [],
+    shipmentAvailable: Boolean(order.delhiveryAwb),
+  };
+}
+
 async function writeOrders(orders: StoredOrder[]) {
   const response = await fetch(`${supabaseUrl}/rest/v1/store_settings?on_conflict=key`, {
     method: "POST",

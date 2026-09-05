@@ -2737,7 +2737,7 @@ export default function Home() {
 
       <header className="site-header">
         <a href="#top" className="wordmark" aria-label="fanZZy home"><img src={siteAsset("fanzzy-mark.png")} alt="fanZZy" className="brand-logo" /><span className="navbar-brand-name">fanZZy</span></a>
-        <nav className="desktop-nav" aria-label="Main navigation"><a href="#shop">Shop</a><a href="#categories">Collections</a><a href="#story">The journal</a><a href="#footer">About</a></nav>
+        <nav className="desktop-nav" aria-label="Main navigation"><a href="#shop">Shop</a><a href="#categories">Collections</a><a href="#story">The journal</a><a href={`${siteBasePath}/track-order`}>Track order</a><a href="#footer">About</a></nav>
         <div className="header-actions">
           <label className="navbar-search"><span aria-hidden="true">⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search jewellery" onFocus={openSearch} aria-label="Search jewellery" />{search && <button className="navbar-search-clear" type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => setSearch("")} aria-label="Clear search">×</button>}</label>
           <button className="header-action-with-icon saved-header-action" onClick={() => setSavedOpen(true)} aria-label="View saved pieces"><svg className="header-action-icon" viewBox="0 0 16 16" aria-hidden="true" fill="none"><path d="M8 13.25S2.75 10.15 2.75 6.55A2.55 2.55 0 0 1 8 5.8a2.55 2.55 0 0 1 5.25.75C13.25 10.15 8 13.25 8 13.25Z" /></svg><span className="action-label">Saved</span>{wishlist.length > 0 && <b>{wishlist.length}</b>}</button>
@@ -2753,6 +2753,7 @@ export default function Home() {
           <a href="#shop" onClick={() => setMobileNavOpen(false)}>Shop <span>↗</span></a>
           <a href="#categories" onClick={() => setMobileNavOpen(false)}>Collections <span>↗</span></a>
           <a href="#story" onClick={() => setMobileNavOpen(false)}>The journal <span>↗</span></a>
+          <a href={`${siteBasePath}/track-order`} onClick={() => setMobileNavOpen(false)}>Track order <span>↗</span></a>
           <a href="#footer" onClick={() => setMobileNavOpen(false)}>About <span>↗</span></a>
         </nav>
         <div className="mobile-nav-actions">
