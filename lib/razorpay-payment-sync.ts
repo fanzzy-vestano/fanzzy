@@ -187,8 +187,16 @@ const delhiveryFailureMessage = (error: unknown) => {
   return message.replace(/\s+/g, " ").trim().slice(0, 240);
 };
 
+// Automatic Delhivery booking starts with the current storefront rollout.
+// Older paid orders remain in order history but must never be booked later by
+// a payment-repair/sync run.
+const delhiveryAutomationStartDate = "2026-09-05";
+
 async function ensureDelhiveryShipment(orders: StoredOrder[], order: StoredOrder) {
   if (order.fulfillmentMethod === "pickup" || order.delhiveryAwb || order.delhiveryShipmentStatus === "pending") return;
+  if (order.status === "Delivered" || order.status === "Cancelled") return;
+  const orderDate = String(order.createdAt || order.date || "").slice(0, 10);
+  if (orderDate && orderDate < delhiveryAutomationStartDate) return;
   order.delhiveryShipmentStatus = "pending";
   order.delhiveryShipmentRequestedAt = new Date().toISOString();
   await writeOrders(orders);
