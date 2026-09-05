@@ -763,12 +763,12 @@ img { display: block; width: 100%; }
     border: 1px solid var(--line);
     border-radius: 999px;
     display: flex;
-    left: 20px;
+    left: auto;
     padding: 9px 13px;
     position: absolute;
     right: 20px;
     top: 73px;
-    width: auto;
+    width: 190px;
     z-index: 1;
   }
 
@@ -793,9 +793,10 @@ img { display: block; width: 100%; }
   }
 
   .header-actions .navbar-search {
-    left: 14px;
+    left: auto;
     right: 14px;
     top: 69px;
+    width: 170px;
   }
 
   .mobile-nav-panel {
