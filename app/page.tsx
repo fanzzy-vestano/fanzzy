@@ -42,6 +42,7 @@ type CheckoutErrors = {
   phone?: string;
   email?: string;
   address?: string;
+  pincode?: string;
   pickupHub?: string;
 };
 
@@ -659,12 +660,13 @@ export default function Home() {
   // Browser storage is restored after hydration so the server and the first
   // client render produce identical markup.
   const [authUser, setAuthUser] = useState<CustomerAuthUser | null>(null);
-  const [checkoutForm, setCheckoutForm] = useState({ name: "", phone: "", email: "", address: "" });
+  const [checkoutForm, setCheckoutForm] = useState({ name: "", phone: "", email: "", address: "", pincode: "" });
   const [checkoutErrors, setCheckoutErrors] = useState<CheckoutErrors>({});
   const checkoutNameRef = useRef<HTMLInputElement>(null);
   const checkoutPhoneRef = useRef<HTMLInputElement>(null);
   const checkoutEmailRef = useRef<HTMLInputElement>(null);
   const checkoutAddressRef = useRef<HTMLInputElement>(null);
+  const checkoutPincodeRef = useRef<HTMLInputElement>(null);
   const checkoutPickupHubRef = useRef<HTMLSelectElement>(null);
   const [couponInput, setCouponInput] = useState("");
   const [appliedCoupon, setAppliedCoupon] = useState<MarketingRecord | null>(null);
@@ -2373,6 +2375,7 @@ export default function Home() {
       setCheckoutOpen(false);
       setFulfillmentMethod("delivery");
       setSelectedPickupHubId("");
+      setCheckoutForm({ name: "", phone: "", email: "", address: "", pincode: "" });
       setIsPaying(false);
       announce(`${existingPayment.id} was already confirmed`);
       return;
@@ -2391,7 +2394,7 @@ export default function Home() {
     setCheckoutOpen(false);
     setFulfillmentMethod("delivery");
     setSelectedPickupHubId("");
-    setCheckoutForm({ name: "", phone: "", email: "", address: "" });
+    setCheckoutForm({ name: "", phone: "", email: "", address: "", pincode: "" });
     setCouponInput("");
     setAppliedCoupon(null);
     setIsPaying(false);
@@ -2445,6 +2448,7 @@ export default function Home() {
     const name = checkoutForm.name.trim();
     const digits = checkoutForm.phone.replace(/\D/g, "");
     const email = checkoutForm.email.trim();
+    const pincode = checkoutForm.pincode.replace(/\D/g, "");
     const validationErrors: CheckoutErrors = {};
     if (!name) validationErrors.name = "Enter the customer name for this order.";
     if (!email) validationErrors.email = "Enter an email address for this order.";
@@ -2452,7 +2456,8 @@ export default function Home() {
     if (digits.length < 10) validationErrors.phone = "Enter a valid WhatsApp number with at least 10 digits.";
     if (fulfillmentMethod === "pickup" && !selectedPickupHub) validationErrors.pickupHub = "Select the hub where you will collect this order.";
     if (fulfillmentMethod === "delivery" && !checkoutForm.address.trim()) validationErrors.address = "Enter the complete delivery address.";
-    const firstValidationError = validationErrors.name || validationErrors.email || validationErrors.phone || validationErrors.pickupHub || validationErrors.address;
+    if (fulfillmentMethod === "delivery" && pincode.length !== 6) validationErrors.pincode = "Enter a valid 6-digit delivery pincode.";
+    const firstValidationError = validationErrors.name || validationErrors.email || validationErrors.phone || validationErrors.pickupHub || validationErrors.address || validationErrors.pincode;
     if (firstValidationError) {
       setCheckoutErrors(validationErrors);
       requestAnimationFrame(() => {
@@ -2460,7 +2465,8 @@ export default function Home() {
         else if (validationErrors.email) checkoutEmailRef.current?.focus();
         else if (validationErrors.phone) checkoutPhoneRef.current?.focus();
         else if (validationErrors.pickupHub) checkoutPickupHubRef.current?.focus();
-        else checkoutAddressRef.current?.focus();
+        else if (validationErrors.address) checkoutAddressRef.current?.focus();
+        else checkoutPincodeRef.current?.focus();
       });
       announce(firstValidationError);
       return;
@@ -2468,7 +2474,7 @@ export default function Home() {
     setCheckoutErrors({});
     const orderAddress = fulfillmentMethod === "pickup" && selectedPickupHub
       ? `Pickup from ${selectedPickupHub.name} · ${selectedPickupHub.place}`
-      : checkoutForm.address.trim();
+      : `${checkoutForm.address.trim()}, ${pincode}`;
 
     const orderToken = globalThis.crypto?.randomUUID?.().replace(/-/g, "").slice(-6).toUpperCase() || "000000";
     const orderId = `#FZ-${orderToken}`;
@@ -2825,7 +2831,7 @@ export default function Home() {
             {Object.keys(checkoutErrors).length > 0 && (
               <div className="checkout-validation-summary" role="alert">
                 <strong>Complete the required details</strong>
-                <span>{checkoutErrors.name || checkoutErrors.email || checkoutErrors.phone || checkoutErrors.pickupHub || checkoutErrors.address}</span>
+                <span>{checkoutErrors.name || checkoutErrors.email || checkoutErrors.phone || checkoutErrors.pickupHub || checkoutErrors.address || checkoutErrors.pincode}</span>
               </div>
             )}
             <div className="checkout-grid">
@@ -2886,19 +2892,40 @@ export default function Home() {
                 </label>
               )}
               {fulfillmentMethod === "delivery" && (
-                <label className="checkout-wide">
-                  Delivery address <span className="required-mark">Required</span>
-                  <input
-                    ref={checkoutAddressRef}
-                    value={checkoutForm.address}
-                    onChange={(event) => { setCheckoutForm((current) => ({ ...current, address: event.target.value })); clearCheckoutError("address"); }}
-                    placeholder="House number, street, city, pincode"
-                    aria-invalid={Boolean(checkoutErrors.address)}
-                    aria-describedby={checkoutErrors.address ? "checkout-address-error" : undefined}
-                    required
-                  />
-                  {checkoutErrors.address && <small className="checkout-field-error" id="checkout-address-error">{checkoutErrors.address}</small>}
-                </label>
+                <>
+                  <label className="checkout-wide">
+                    Delivery address <span className="required-mark">Required</span>
+                    <input
+                      ref={checkoutAddressRef}
+                      value={checkoutForm.address}
+                      onChange={(event) => { setCheckoutForm((current) => ({ ...current, address: event.target.value })); clearCheckoutError("address"); }}
+                      placeholder="House number, street, area, city"
+                      autoComplete="street-address"
+                      aria-invalid={Boolean(checkoutErrors.address)}
+                      aria-describedby={checkoutErrors.address ? "checkout-address-error" : undefined}
+                      required
+                    />
+                    {checkoutErrors.address && <small className="checkout-field-error" id="checkout-address-error">{checkoutErrors.address}</small>}
+                  </label>
+                  <label>
+                    Delivery pincode <span className="required-mark">Required</span>
+                    <input
+                      ref={checkoutPincodeRef}
+                      type="text"
+                      inputMode="numeric"
+                      pattern="[0-9]{6}"
+                      maxLength={6}
+                      value={checkoutForm.pincode}
+                      onChange={(event) => { setCheckoutForm((current) => ({ ...current, pincode: event.target.value.replace(/\D/g, "").slice(0, 6) })); clearCheckoutError("pincode"); }}
+                      placeholder="673602"
+                      autoComplete="postal-code"
+                      aria-invalid={Boolean(checkoutErrors.pincode)}
+                      aria-describedby={checkoutErrors.pincode ? "checkout-pincode-error" : undefined}
+                      required
+                    />
+                    {checkoutErrors.pincode && <small className="checkout-field-error" id="checkout-pincode-error">{checkoutErrors.pincode}</small>}
+                  </label>
+                </>
               )}
               <div className="checkout-coupon checkout-wide">
                 <label htmlFor="checkout-coupon-code">Coupon code <span className="optional-mark">Optional</span></label>
