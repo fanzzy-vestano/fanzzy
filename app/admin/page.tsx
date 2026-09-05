@@ -113,8 +113,9 @@ type AdminPermission =
   | "Product Image Scanner"
   | "Categories"
   | "Collections"
-  | "Orders"
-  | "Customers"
+   | "Orders"
+   | "Refund requests"
+   | "Customers"
   | "Agents"
   | "Marketing"
   | "Buy 1 Get X Free"
@@ -141,6 +142,7 @@ const allAdminPermissions: AdminPermission[] = [
   "Categories",
   "Collections",
   "Orders",
+  "Refund requests",
   "Customers",
   "Agents",
   "Marketing",
@@ -177,6 +179,43 @@ const defaultHeroSlideDuration = 5.2;
 const defaultDeliveryCharge = { enabled: false, amount: 99, freeAboveEnabled: false, freeAbove: 999 };
 type PaymentSettings = { online: boolean; cod: boolean; provider: string; codCharge: number };
 const defaultPaymentSettings: PaymentSettings = { online: true, cod: true, provider: "Razorpay", codCharge: 0 };
+type RefundRequestStatus = "Requested" | "Approved" | "Rejected" | "Refunded";
+type RefundRequest = {
+  id: string;
+  orderId: string;
+  userId: string;
+  customerName: string;
+  phone: string;
+  amount: string;
+  status: RefundRequestStatus;
+  reason: string;
+  createdAt: string;
+  updatedAt?: string;
+};
+const parseRefundRequests = (value: string | null | undefined): RefundRequest[] => {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((request): request is Partial<RefundRequest> => Boolean(request && typeof request === "object"))
+      .map((request, index) => ({
+        id: typeof request.id === "string" && request.id ? request.id : `refund-${index + 1}`,
+        orderId: typeof request.orderId === "string" ? request.orderId : "",
+        userId: typeof request.userId === "string" ? request.userId : "",
+        customerName: typeof request.customerName === "string" ? request.customerName : "Customer",
+        phone: typeof request.phone === "string" ? request.phone : "",
+        amount: typeof request.amount === "string" ? request.amount : "₹0",
+        status: request.status === "Approved" || request.status === "Rejected" || request.status === "Refunded" ? request.status : "Requested",
+        reason: typeof request.reason === "string" ? request.reason : "Customer requested a refund",
+        createdAt: typeof request.createdAt === "string" ? request.createdAt : new Date().toISOString(),
+        updatedAt: typeof request.updatedAt === "string" ? request.updatedAt : undefined,
+      }))
+      .filter((request) => request.orderId && request.userId);
+  } catch {
+    return [];
+  }
+};
 const parsePaymentSettings = (value: unknown): PaymentSettings => {
   if (!value || typeof value !== "object") return defaultPaymentSettings;
   const parsed = value as Partial<PaymentSettings>;
@@ -718,6 +757,7 @@ const menu = [
   { label: "Categories", icon: "▦" },
   { label: "Collections", icon: "✧" },
   { label: "Orders", icon: "↗" },
+  { label: "Refund requests", icon: "↩" },
   { label: "Customers", icon: "♧" },
   { label: "Agents", icon: "✦" },
   { label: "Marketing", icon: "◈" },
@@ -2214,6 +2254,7 @@ function ModuleWorkspace({
   if (module === "Announcement") return <AnnouncementPanel onNotify={onNotify} module />;
   if (module === "Categories") return <CategoryWorkspace onNotify={onNotify} />;
   if (module === "Orders") return <OrdersWorkspace onNotify={onNotify} />;
+  if (module === "Refund requests") return <RefundRequestsWorkspace onNotify={onNotify} />;
   if (module === "Homepage") return <HomepageWorkspace onNotify={onNotify} />;
   if (module === "Delivery charge")
     return <DeliveryChargeWorkspace onNotify={onNotify} />;
@@ -5102,6 +5143,73 @@ function PromotionOffersWorkspace({ onNotify }: { onNotify: (message: string) =>
         <div className="promotion-form-section"><div className="promotion-selector-header"><div><h4>Choose one product</h4><p>Variants and sizes stay inside this product. Customers choose the paid option and their free options on the product page.</p></div><strong>{selectedProductId ? "1 product selected" : "Select 1 product"}</strong></div><input className="promotion-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search product or SKU…" /><div className="promotion-selector-list">{visibleCatalog.length ? visibleCatalog.map((product) => { const isSelected = product.id === selectedProductId; const options = productOptions(product); return <div className={`promotion-selector-product${isSelected ? " is-selected" : ""}`} key={product.id}><div className="promotion-product-heading"><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.sku} · {product.stock} in stock · ₹{product.price.toLocaleString("en-IN")}</small></span><button className={isSelected ? "module-secondary" : "module-secondary"} type="button" onClick={() => selectProduct(product)}>{isSelected ? "Deselect" : "Use this product"}</button></div>{isSelected && <><div className="promotion-selection-row"><span className="field-help">Buy 1: customer chooses any available variant or size.</span><span className="field-help">{form.eligibleFree.length ? `${form.eligibleFree.length} free option limit` : "All variants / sizes available free"}</span></div>{options.length ? <div className="promotion-variant-grid">{options.map((selection, index) => { const active = form.eligibleFree.some((item) => JSON.stringify(item) === JSON.stringify(selection)); const optionLabel = selection.size ? `Size ${selection.size}` : selection.variantName || `Option ${index + 1}`; return <div className="promotion-variant-option" key={JSON.stringify(selection)}><span><strong>{optionLabel}</strong><small>{selection.stock ?? product.stock} in stock · ₹{(selection.price || product.price).toLocaleString("en-IN")}</small></span><label title="Limit free item to this option"><input type="checkbox" checked={active} onChange={() => toggleFreeOption(selection)} /> Free option</label></div>; })}</div> : <p className="variant-empty">This product has no variants or sizes. The same product can be added for each free item.</p>}</>}</div>; }) : <p className="variant-empty">No products found. Add products in Products first, then return here.</p>}</div></div>
         <div className="promotion-form-actions"><button className="module-primary" onClick={() => void saveOffer()}>Save offer</button><button className="module-secondary" onClick={() => setFormOpen(false)}>Cancel</button></div>
       </div></div>}
+    </section>
+  );
+}
+
+function RefundRequestsWorkspace({ onNotify }: { onNotify: (message: string) => void }) {
+  const [requests, setRequests] = useState<RefundRequest[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const loadRequests = async () => {
+      const remote = await fetchStoreSetting("refundRequests");
+      const stored = remote.value || window.localStorage.getItem("fanzzy-refund-requests");
+      if (!active) return;
+      setRequests(parseRefundRequests(stored));
+      setLoading(false);
+    };
+    const refresh = () => { void loadRequests().catch(() => { if (active) setLoading(false); }); };
+    void loadRequests().catch(() => { if (active) setLoading(false); });
+    const timer = window.setInterval(refresh, 5000);
+    const unsubscribe = subscribeToStoreSetting("refundRequests", refresh);
+    window.addEventListener("storage", refresh);
+    window.addEventListener("fanzzy-refund-requests-updated", refresh);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      unsubscribe();
+      window.removeEventListener("storage", refresh);
+      window.removeEventListener("fanzzy-refund-requests-updated", refresh);
+    };
+  }, []);
+
+  const updateStatus = async (request: RefundRequest, status: RefundRequestStatus) => {
+    if (busyId) return;
+    setBusyId(request.id);
+    try {
+      const remote = await fetchStoreSetting("refundRequests");
+      const current = parseRefundRequests(remote.value || window.localStorage.getItem("fanzzy-refund-requests"));
+      const next = current.map((item) => item.id === request.id
+        ? { ...item, status, updatedAt: new Date().toISOString() }
+        : item);
+      const error = await saveStoreSetting("refundRequests", JSON.stringify(next));
+      if (error) throw new Error("Refund request could not be updated.");
+      window.localStorage.setItem("fanzzy-refund-requests", JSON.stringify(next));
+      setRequests(next);
+      window.dispatchEvent(new Event("fanzzy-refund-requests-updated"));
+      onNotify(`${request.id} marked ${status.toLowerCase()}`);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "Refund request could not be updated.");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <section className="panel module-workspace refund-requests-workspace">
+      <div className="module-workspace-head">
+        <div>
+          <p className="eyebrow">CUSTOMER CARE</p>
+          <h2>Refund requests</h2>
+          <p>Review refund requests from delivered orders and record the decision here.</p>
+        </div>
+        <div className="module-summary refund-request-summary"><span><i className="status-light" />{requests.filter((request) => request.status === "Requested").length} awaiting review</span><span>{requests.length} total request{requests.length === 1 ? "" : "s"}</span></div>
+      </div>
+      <div className="refund-request-notice"><strong>Manual refund step</strong><span>Approving records your decision only. Complete the actual refund in your payment provider, then mark the request as refunded.</span></div>
+      {loading ? <div className="refund-request-empty">Loading refund requests…</div> : requests.length ? <div className="refund-request-list">{requests.map((request) => <article className="refund-request-card" key={request.id}><div className="refund-request-card-head"><div><strong>{request.orderId}</strong><small>{request.id} · {new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(request.createdAt))}</small></div><span className={`status-pill ${request.status.toLowerCase()}`}>{request.status}</span></div><div className="refund-request-details"><div><small>Customer</small><strong>{request.customerName}</strong><span>{request.phone || "Phone not provided"}</span></div><div><small>Refund amount</small><strong>{request.amount}</strong><span>{request.reason}</span></div></div><div className="refund-request-actions">{request.status === "Requested" && <><button className="module-primary" type="button" disabled={busyId !== null} onClick={() => void updateStatus(request, "Approved")}>Approve</button><button className="module-secondary" type="button" disabled={busyId !== null} onClick={() => void updateStatus(request, "Rejected")}>Reject</button></>}{request.status === "Approved" && <button className="module-primary" type="button" disabled={busyId !== null} onClick={() => void updateStatus(request, "Refunded")}>Mark refunded</button>}{request.status === "Rejected" && <span className="refund-request-closed">No further action</span>}{request.status === "Refunded" && <span className="refund-request-closed">Refund completed</span>}</div></article>)}</div> : <div className="refund-request-empty"><strong>No refund requests yet</strong><span>Requests from delivered customer orders will appear here.</span></div>}
     </section>
   );
 }

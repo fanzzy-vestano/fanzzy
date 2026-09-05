@@ -747,3 +747,6 @@ img { display: block; width: 100%; }
 .product-section > .product-grid {
   order: 4;
 }
+.customer-refund-action { align-items: center; border-top: 1px solid var(--line); display: flex; gap: 12px; justify-content: space-between; margin-top: 16px; padding-top: 14px; }
+.customer-refund-action span { color: var(--muted); font-family: var(--mono); font-size: 8px; letter-spacing: .06em; text-transform: uppercase; }
+.customer-refund-action button { padding: 10px 12px; }

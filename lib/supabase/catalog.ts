@@ -102,6 +102,7 @@ const settingKeys = {
   productImageAdjustments: "product_image_adjustments",
   productDamages: "product_damages",
   promotionalOffers: "promotional_offers",
+  refundRequests: "refund_requests",
   printerName: "printer_name",
   billDesign: "bill_design",
 } as const;
