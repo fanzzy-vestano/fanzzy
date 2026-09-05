@@ -265,6 +265,8 @@ const belongsToCustomer = (order: Pick<CustomerOrder, "userId" | "userPhone" | "
 };
 const isCustomerOrder = (order: CustomerOrder, customer: CustomerAuthUser) =>
   belongsToCustomer(order, customer) && !isDemoOrder(order) && (isPaidOrder(order) || order.paymentStatus == null);
+const ordersHaveSameData = (current: CustomerOrder[], next: CustomerOrder[]) =>
+  current.length === next.length && current.every((order, index) => JSON.stringify(order) === JSON.stringify(next[index]));
 
 const formatINR = (value: number) => `₹${(Number.isFinite(value) ? value : 0).toLocaleString("en-IN")}`;
 const normalizeProductKey = (value?: string) => String(value || "").trim().replace(/[^a-z0-9]/gi, "").toLowerCase();
@@ -1193,12 +1195,15 @@ export default function Home() {
 
   useEffect(() => {
     let syncInFlight = false;
+    const updateOrdersIfChanged = (next: CustomerOrder[]) => {
+      setOrders((current) => ordersHaveSameData(current, next) ? current : next);
+    };
     const syncOrders = async (recoverCapturedPayments = false) => {
       if (syncInFlight) return;
       syncInFlight = true;
       const userId = authUser?.id;
       if (!userId) {
-        setOrders([]);
+        updateOrdersIfChanged([]);
         syncInFlight = false;
         return;
       }
@@ -1221,7 +1226,7 @@ export default function Home() {
         } catch {
           window.localStorage.removeItem(`fanzzy-orders:${userId}`);
         }
-        if (cachedOrders.size) setOrders(Array.from(cachedOrders.values()));
+        if (cachedOrders.size) updateOrdersIfChanged(Array.from(cachedOrders.values()));
 
         // Recover captured payments on the initial load in the background so it
         // cannot delay the customer’s already available order list.
@@ -1251,7 +1256,7 @@ export default function Home() {
             void saveStoreOrders(Array.from(allOrders.values())).catch(() => undefined);
           }
         }
-        setOrders(Array.from(merged.values()));
+        updateOrdersIfChanged(Array.from(merged.values()));
       } finally {
         syncInFlight = false;
       }
@@ -1260,7 +1265,7 @@ export default function Home() {
     runSyncOrders(true);
     // Realtime is the fast path; this short polling fallback also works when
     // Supabase replication is delayed or unavailable.
-    const liveOrderTimer = window.setInterval(() => { runSyncOrders(false); }, 2000);
+    const liveOrderTimer = window.setInterval(() => { runSyncOrders(false); }, 5000);
     const unsubscribeFromLiveOrders = subscribeToStoreSetting("orders", () => { runSyncOrders(false); });
     const onStorageOrdersUpdated = () => { runSyncOrders(false); };
     const onLocalOrdersUpdated = () => { runSyncOrders(false); };
