@@ -175,6 +175,18 @@ const defaultCategoryImages: Record<string, string> = {};
 const defaultHeroSlides: string[] = [];
 const defaultHeroSlideDuration = 5.2;
 const defaultDeliveryCharge = { enabled: false, amount: 99, freeAboveEnabled: false, freeAbove: 999 };
+type PaymentSettings = { online: boolean; cod: boolean; provider: string; codCharge: number };
+const defaultPaymentSettings: PaymentSettings = { online: true, cod: true, provider: "Razorpay", codCharge: 0 };
+const parsePaymentSettings = (value: unknown): PaymentSettings => {
+  if (!value || typeof value !== "object") return defaultPaymentSettings;
+  const parsed = value as Partial<PaymentSettings>;
+  return {
+    online: typeof parsed.online === "boolean" ? parsed.online : defaultPaymentSettings.online,
+    cod: typeof parsed.cod === "boolean" ? parsed.cod : defaultPaymentSettings.cod,
+    provider: typeof parsed.provider === "string" && parsed.provider.trim() ? parsed.provider.trim() : defaultPaymentSettings.provider,
+    codCharge: Math.max(0, Number.isFinite(parsed.codCharge) ? Number(parsed.codCharge) : defaultPaymentSettings.codCharge),
+  };
+};
 type PickupHub = { id: string; name: string; place: string };
 const defaultPickupHubs: PickupHub[] = [];
 const localSuppliersKey = "fanzzy-suppliers";
@@ -384,7 +396,9 @@ type OrderRecord = {
   pickupHubPlace?: string;
   coupon?: string;
   couponDiscount?: number;
-  paymentStatus?: "pending" | "paid";
+  paymentStatus?: "pending" | "paid" | "cod_pending" | "cod_collected";
+  paymentMethod?: "online" | "cod";
+  codCharge?: number;
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
   inventoryAdjusted?: boolean;
@@ -404,7 +418,7 @@ const adminOrders: OrderRecord[] = [];
 const isDemoOrder = (order: { id?: string }) => /^#FZ-104[4-8]$/.test(String(order.id ?? ""));
 // Only verified payments belong in the operational Orders and Reports views.
 // Pending checkout records remain stored for payment recovery but stay hidden.
-const hasConfirmedPayment = (order: Pick<OrderRecord, "paymentStatus" | "razorpayPaymentId">) => order.paymentStatus === "paid" || Boolean(order.razorpayPaymentId);
+const hasConfirmedPayment = (order: Pick<OrderRecord, "paymentStatus" | "razorpayPaymentId">) => order.paymentStatus === "paid" || order.paymentStatus === "cod_pending" || order.paymentStatus === "cod_collected" || Boolean(order.razorpayPaymentId);
 const orderListsEqual = (left: OrderRecord[], right: OrderRecord[]) => left.length === right.length && left.every((order, index) => order.id === right[index]?.id && JSON.stringify(order) === JSON.stringify(right[index]));
 const siteBasePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 const siteAsset = (name: string) => `${siteBasePath}/${name}`;
@@ -2961,8 +2975,8 @@ function ReportsWorkspace({
     });
     const dailyRows = Array.from(daily.entries()).map(([date, values]) => ({ date, ...values })).sort((a, b) => b.date.localeCompare(a.date));
     const payments = [
-      { name: "Online", count: filteredOrders.filter((order) => Boolean(order.razorpayPaymentId)).length, revenue: filteredOrders.filter((order) => Boolean(order.razorpayPaymentId)).reduce((sum, order) => sum + parseReportMoney(order.total), 0) },
-      { name: "Cash / other", count: filteredOrders.filter((order) => !order.razorpayPaymentId).length, revenue: filteredOrders.filter((order) => !order.razorpayPaymentId).reduce((sum, order) => sum + parseReportMoney(order.total), 0) },
+      { name: "Online", count: filteredOrders.filter((order) => order.paymentMethod !== "cod" && Boolean(order.razorpayPaymentId)).length, revenue: filteredOrders.filter((order) => order.paymentMethod !== "cod" && Boolean(order.razorpayPaymentId)).reduce((sum, order) => sum + parseReportMoney(order.total), 0) },
+      { name: "COD", count: filteredOrders.filter((order) => order.paymentMethod === "cod").length, revenue: filteredOrders.filter((order) => order.paymentMethod === "cod").reduce((sum, order) => sum + parseReportMoney(order.total), 0) },
     ];
     const fulfilment = [
       { name: "Delivery", count: filteredOrders.filter((order) => order.fulfillmentMethod !== "pickup").length },
@@ -3032,7 +3046,7 @@ function ReportsWorkspace({
       rows = report.inventoryRows.map((row) => [row.product.name, row.product.sku, row.product.category, row.product.status, row.movement, row.product.stock, row.units, formatAdminCurrency(parseReportMoney(row.product.price)), formatAdminCurrency(row.stockValue), formatAdminCurrency(row.costValue)]);
     } else if (view === "orders") {
       headers = ["order_id", "date", "customer", "status", "payment", "fulfilment", "items", "total", "phone", "email"];
-      rows = report.orderRows.map((order) => [order.id, order.date, order.customerName, order.status, order.razorpayPaymentId ? "Online" : "Cash / other", order.fulfillmentMethod === "pickup" ? `Pickup · ${order.pickupHubName || "Hub"}` : "Delivery", order.items?.reduce((sum, item) => sum + Math.max(0, Number(item.quantity) || 0), 0) || 0, order.total, order.userPhone || order.phone, order.userEmail || order.email || ""]);
+      rows = report.orderRows.map((order) => [order.id, order.date, order.customerName, order.status, order.paymentMethod === "cod" ? "COD" : order.razorpayPaymentId ? "Online" : "Cash / other", order.fulfillmentMethod === "pickup" ? `Pickup · ${order.pickupHubName || "Hub"}` : "Delivery", order.items?.reduce((sum, item) => sum + Math.max(0, Number(item.quantity) || 0), 0) || 0, order.total, order.userPhone || order.phone, order.userEmail || order.email || ""]);
     } else if (view === "damaged") {
       headers = ["date", "product", "sku", "category", "quantity", "stock_scope", "reason", "estimated_retail_value", "estimated_cost_value"];
       rows = report.damagedRows.map((row) => [row.createdAt.slice(0, 10), row.productName, row.sku, row.category, row.quantity, row.stockScope, row.reason, formatAdminCurrency(row.retailValue), formatAdminCurrency(row.costValue)]);
@@ -3142,7 +3156,7 @@ function ReportsWorkspace({
         {view === "category" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Every category</strong><span>{report.categoryRows.length} rows</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Category</th><th>Products</th><th>Units sold</th><th>Revenue</th><th>Profit</th><th>Stock units</th><th>Stock value</th><th>Cost value</th></tr></thead><tbody>{report.categoryRows.map((category) => <tr key={category.name}><td>{category.name}</td><td>{category.products}</td><td>{category.units}</td><td>{formatAdminCurrency(category.revenue)}</td><td>{formatAdminCurrency(category.profit)}</td><td>{category.stockUnits}</td><td>{formatAdminCurrency(category.stockValue)}</td><td>{formatAdminCurrency(category.costValue)}</td></tr>)}</tbody></table></div></div>}
         {(view === "item" || view === "top-selling") && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><div><strong>{view === "top-selling" ? "Ranked best sellers" : "Every catalog item"}</strong><span>{view === "top-selling" ? report.topProducts.length : itemReportRows.length} rows</span></div>{view === "item" && <label className="report-table-filter">Filter items<select value={itemMovementFilter} onChange={(event) => setItemMovementFilter(event.target.value as ReportMovementFilter)}><option value="all">All items</option><option value="sales">Sales items</option><option value="slow">Slow moving</option><option value="no-sales">No sales</option><option value="out-of-stock">Out of stock</option></select></label>}</div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>{view === "top-selling" ? "Rank" : "Product"}</th><th>{view === "top-selling" ? "Product" : "SKU"}</th><th>Category</th><th>Units</th><th>Revenue</th><th>Profit</th><th>Stock</th>{view === "item" && <th>Stock details</th>}<th>Stock value</th><th>Cost value</th><th>Movement</th></tr></thead><tbody>{(view === "top-selling" ? report.topProducts : itemReportRows).map((row, index) => <tr key={row.product.sku}><td>{view === "top-selling" ? String(index + 1).padStart(2, "0") : row.product.name}</td><td>{view === "top-selling" ? row.product.name : row.product.sku}</td><td>{row.product.category}</td><td>{row.units}</td><td>{formatAdminCurrency(row.revenue)}</td><td>{formatAdminCurrency(row.profit)}</td><td>{row.stock}</td>{view === "item" && <td>{row.stockDetails}</td>}<td>{formatAdminCurrency(row.stockValue)}</td><td>{formatAdminCurrency(row.costValue)}</td><td><span className={`report-movement ${row.movement.toLowerCase().replace(/\s+/g, "-")}`}>{row.movement}</span></td></tr>)}</tbody></table></div>{view === "item" && <p className="report-help">Stock and cost value include variant or size stock when those quantities are configured. Stock details shows the quantity for each option.</p>}</div>}
         {view === "inventory" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Complete inventory movement</strong><span>{report.inventoryRows.length} products</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Product</th><th>SKU</th><th>Category</th><th>Status</th><th>Movement</th><th>Stock</th><th>Units sold</th><th>Unit price</th><th>Stock value</th><th>Cost value</th></tr></thead><tbody>{report.inventoryRows.map((row) => <tr key={row.product.sku}><td>{row.product.name}</td><td>{row.product.sku}</td><td>{row.product.category}</td><td>{row.product.status}</td><td><span className={`report-movement ${row.movement.toLowerCase().replace(/\s+/g, "-")}`}>{row.movement}</span></td><td>{row.product.stock}</td><td>{row.units}</td><td>{formatAdminCurrency(parseReportMoney(row.product.price))}</td><td>{formatAdminCurrency(row.stockValue)}</td><td>{formatAdminCurrency(row.costValue)}</td></tr>)}</tbody></table></div></div>}
-         {view === "orders" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Every confirmed order</strong><span>{report.orderRows.length} orders</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Order</th><th>Date</th><th>Customer</th><th>Status</th><th>Payment</th><th>Fulfilment</th><th>Items</th><th>Total</th><th>Phone</th></tr></thead><tbody>{report.orderRows.length ? report.orderRows.map((order) => <tr key={order.id}><td>{order.id}</td><td>{order.date}</td><td>{order.customerName}</td><td><span className={`report-order-status ${order.status.toLowerCase()}`}>{order.status}</span></td><td>{order.razorpayPaymentId ? "Online" : "Cash / other"}</td><td>{order.fulfillmentMethod === "pickup" ? `Pickup · ${order.pickupHubName || "Hub"}` : "Delivery"}</td><td>{order.items?.reduce((sum, item) => sum + Math.max(0, Number(item.quantity) || 0), 0) || 0}</td><td>{order.total}</td><td>{order.userPhone || order.phone}</td></tr>) : <tr><td colSpan={9}>No confirmed orders in this period.</td></tr>}</tbody></table></div></div>}
+         {view === "orders" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Every confirmed order</strong><span>{report.orderRows.length} orders</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Order</th><th>Date</th><th>Customer</th><th>Status</th><th>Payment</th><th>Fulfilment</th><th>Items</th><th>Total</th><th>Phone</th></tr></thead><tbody>{report.orderRows.length ? report.orderRows.map((order) => <tr key={order.id}><td>{order.id}</td><td>{order.date}</td><td>{order.customerName}</td><td><span className={`report-order-status ${order.status.toLowerCase()}`}>{order.status}</span></td><td>{order.paymentMethod === "cod" ? "COD" : order.razorpayPaymentId ? "Online" : "Cash / other"}</td><td>{order.fulfillmentMethod === "pickup" ? `Pickup · ${order.pickupHubName || "Hub"}` : "Delivery"}</td><td>{order.items?.reduce((sum, item) => sum + Math.max(0, Number(item.quantity) || 0), 0) || 0}</td><td>{order.total}</td><td>{order.userPhone || order.phone}</td></tr>) : <tr><td colSpan={9}>No confirmed orders in this period.</td></tr>}</tbody></table></div></div>}
          {view === "damaged" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Every damaged item</strong><span>{report.damagedRows.length} records · {report.damagedUnits} units</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Date</th><th>Product</th><th>SKU</th><th>Category</th><th>Quantity</th><th>Scope</th><th>Reason</th><th>Retail value</th><th>Cost value</th></tr></thead><tbody>{report.damagedRows.length ? report.damagedRows.map((row) => <tr key={row.id}><td>{row.createdAt.slice(0, 10)}</td><td>{row.productName}</td><td>{row.sku}</td><td>{row.category}</td><td>{row.quantity}</td><td>{row.stockScope}</td><td>{row.reason}</td><td>{formatAdminCurrency(row.retailValue)}</td><td>{formatAdminCurrency(row.costValue)}</td></tr>) : <tr><td colSpan={9}>No damaged items in this period.</td></tr>}</tbody></table></div></div>}
       </section>
     </section>
@@ -3168,11 +3182,7 @@ function SettingsWorkspace({
     processing: "1–2 business days",
     returns: "7 days",
   });
-  const [payments, setPayments] = useState({
-    online: true,
-    cod: true,
-    provider: "Razorpay",
-  });
+  const [payments, setPayments] = useState<PaymentSettings>(defaultPaymentSettings);
   const [printerName, setPrinterName] = useState("Essae PR-55");
   const [billDesign, setBillDesign] = useState<BillDesignSettings>(defaultBillDesignSettings);
   const [roles, setRoles] = useState<AdminRole[]>(defaultAdminRoles);
@@ -3189,7 +3199,7 @@ function SettingsWorkspace({
     };
     setProfile(read("fanzzy-store-profile", profile));
     setShipping(read("fanzzy-shipping-rules", shipping));
-    setPayments(read("fanzzy-payment-methods", payments));
+    setPayments(parsePaymentSettings(read("fanzzy-payment-methods", defaultPaymentSettings)));
     setPrinterName(window.localStorage.getItem("fanzzy-printer-name")?.replace("Essae PR 55", "Essae PR-55") || "Essae PR-55");
     setBillDesign(read("fanzzy-bill-design", defaultBillDesignSettings));
     void fetchStoreSetting("printerName").then((remote) => {
@@ -3210,6 +3220,17 @@ function SettingsWorkspace({
         }
       }
     });
+    void fetchStoreSetting("paymentMethods").then((remote) => {
+      if (!remote.error && remote.value) {
+        try {
+          const normalizedPayments = parsePaymentSettings(JSON.parse(remote.value) as unknown);
+          setPayments(normalizedPayments);
+          window.localStorage.setItem("fanzzy-payment-methods", JSON.stringify(normalizedPayments));
+        } catch {
+          // Keep the local/default payment settings when the remote value is malformed.
+        }
+      }
+    });
     setRoles(defaultAdminRoles);
     window.localStorage.setItem("fanzzy-admin-roles", JSON.stringify(defaultAdminRoles));
     // These values are only read on mount; the defaults above provide the first render.
@@ -3220,6 +3241,7 @@ function SettingsWorkspace({
     window.localStorage.setItem("fanzzy-store-profile", JSON.stringify(profile));
     window.localStorage.setItem("fanzzy-shipping-rules", JSON.stringify(shipping));
     window.localStorage.setItem("fanzzy-payment-methods", JSON.stringify(payments));
+    void saveStoreSetting("paymentMethods", JSON.stringify(payments));
     window.localStorage.setItem("fanzzy-printer-name", printerName);
     void saveStoreSetting("printerName", printerName);
     window.localStorage.setItem("fanzzy-bill-design", JSON.stringify(billDesign));
@@ -3232,7 +3254,7 @@ function SettingsWorkspace({
   const statusFor = (section: SettingsSection) => {
     if (section === "Store profile") return profile.storeName ? "Configured" : "Needs details";
     if (section === "Shipping rules") return `${Object.values(shipping).filter(Boolean).length} active`;
-    if (section === "Payment methods") return `${payments.online || payments.cod ? payments.provider + " ready" : "No methods active"}`;
+    if (section === "Payment methods") return `${payments.online || payments.cod ? `${payments.provider} · ${payments.cod ? `COD ₹${payments.codCharge}` : "online only"}` : "No methods active"}`;
     if (section === "Printer") return printerName || "Needs selection";
     if (section === "Bill design") return billDesign.logoText ? `${billDesign.logoText} ready` : "Needs design";
     return "1 full access role";
@@ -3288,6 +3310,7 @@ function SettingsWorkspace({
             <label className="settings-check"><input type="checkbox" checked={payments.online} onChange={(event) => setPayments((current) => ({ ...current, online: event.target.checked }))} /><span>Online payments</span><small>Accept payments through your configured gateway.</small></label>
             <label className="settings-check"><input type="checkbox" checked={payments.cod} onChange={(event) => setPayments((current) => ({ ...current, cod: event.target.checked }))} /><span>Cash on delivery</span><small>Let customers choose COD at checkout.</small></label>
             <label>Payment provider<input value={payments.provider} onChange={(event) => setPayments((current) => ({ ...current, provider: event.target.value }))} /></label>
+            <label>COD charge (₹)<input type="number" min="0" value={payments.codCharge} onChange={(event) => setPayments((current) => ({ ...current, codCharge: Math.max(0, Number(event.target.value) || 0) }))} /><small className="settings-upload-name">Added to the customer total when COD is selected.</small></label>
           </div>}
 
           {selectedSection === "Printer" && <div className="settings-form-grid">
@@ -5511,7 +5534,7 @@ function OrdersWorkspace({
               <small>{formatOrderDate(order.date)}{formatOrderTime(order.createdAt) ? ` · ${formatOrderTime(order.createdAt)}` : ""}</small>
               <small className="order-list-products">Customer ID: {order.userId || "Legacy / guest"} · {order.customerName}</small>
               <small className="order-list-products">{order.items?.map((item) => item.name).join(", ") || "No saved item details"}</small>
-              <small className="order-list-products">Payment: {order.paymentStatus === "paid" ? "Paid" : "Awaiting Razorpay confirmation"} · Inventory: {order.inventoryAdjusted === true ? "Updated" : "Pending"}</small>
+              <small className="order-list-products">Payment: {order.paymentMethod === "cod" ? "COD · Pay on delivery" : order.paymentStatus === "paid" ? "Paid online" : "Awaiting online payment"} · Inventory: {order.inventoryAdjusted === true ? "Updated" : "Pending"}</small>
               {order.fulfillmentMethod !== "pickup" && <small className="order-list-products">Delhivery: {order.delhiveryLiveStatus || (order.delhiveryAwb ? "Shipment created" : "Awaiting shipment")}</small>}
             </span>
             <i className={`status-pill ${order.status.toLowerCase()}`}>
@@ -5551,7 +5574,7 @@ function OrdersWorkspace({
                 {selectedOrder.customerName} ·{" "}
                 {formatOrderDate(selectedOrder.date)}{formatOrderTime(selectedOrder.createdAt) ? ` · ${formatOrderTime(selectedOrder.createdAt)}` : ""} · {selectedOrder.total}
               </p>
-              <p className="product-detail-meta">Payment: {selectedOrder.paymentStatus === "paid" ? "Paid" : "Awaiting Razorpay confirmation"}{selectedOrder.razorpayPaymentId ? ` · Razorpay payment ${selectedOrder.razorpayPaymentId}` : selectedOrder.razorpayOrderId ? ` · Razorpay order ${selectedOrder.razorpayOrderId}` : ""}</p>
+              <p className="product-detail-meta">Payment: {selectedOrder.paymentMethod === "cod" ? `Cash on delivery${selectedOrder.codCharge ? ` · COD charge ${formatAdminCurrency(selectedOrder.codCharge)}` : ""}` : selectedOrder.paymentStatus === "paid" ? "Paid online" : "Awaiting online payment"}{selectedOrder.razorpayPaymentId ? ` · Razorpay payment ${selectedOrder.razorpayPaymentId}` : selectedOrder.razorpayOrderId ? ` · Razorpay order ${selectedOrder.razorpayOrderId}` : ""}</p>
               {selectedOrder.fulfillmentMethod !== "pickup" && <section className="admin-customer-details admin-delhivery-details"><p className="eyebrow">DELHIVERY SHIPMENT</p>{selectedOrder.delhiveryAwb ? <dl><div><dt>AWB</dt><dd>{selectedOrder.delhiveryAwb}</dd></div><div><dt>Live status</dt><dd>{selectedOrder.delhiveryLiveStatus || (selectedOrder.delhiveryShipmentStatus === "created" ? "Manifested" : "Available")}</dd></div>{selectedOrder.delhiveryLiveLocation && <div><dt>Location</dt><dd>{selectedOrder.delhiveryLiveLocation}</dd></div>}{selectedOrder.delhiveryLastTrackedAt && <div><dt>Last checked</dt><dd>{formatOrderTime(selectedOrder.delhiveryLastTrackedAt)}</dd></div>}</dl> : <p className="product-detail-meta">{selectedOrder.delhiveryShipmentStatus === "pending" ? "Shipment creation is in progress." : selectedOrder.delhiveryShipmentStatus === "failed" ? "Shipment creation needs attention before tracking can be shown." : "Shipment will be created automatically after payment confirmation."}</p>}{selectedOrder.delhiveryAwb && <a className="module-secondary admin-delhivery-link" href={selectedOrder.delhiveryTrackingUrl || `https://www.delhivery.com/tracking?uniqueIdentifier=${encodeURIComponent(selectedOrder.delhiveryAwb)}`} target="_blank" rel="noreferrer">Open Delhivery tracking ↗</a>}</section>}
               <section className="admin-customer-details"><p className="eyebrow">CUSTOMER &amp; ORDER IDS</p><dl><div><dt>Order ID</dt><dd>{selectedOrder.id}</dd></div><div className="admin-customer-account"><dt>Customer Account ID</dt><dd>{selectedOrder.userId || "Legacy / guest order"}</dd></div><div><dt>Name</dt><dd>{selectedOrder.customerName || "Not provided"}</dd></div><div><dt>Login mobile</dt><dd>{selectedOrder.userPhone || selectedOrder.phone || "Not provided"}</dd></div><div><dt>Email</dt><dd>{selectedOrder.email || selectedOrder.userEmail || "Not provided"}</dd></div><div><dt>WhatsApp</dt><dd>{selectedOrder.phone || "Not provided"}</dd></div><div><dt>Fulfilment</dt><dd>{selectedOrder.fulfillmentMethod === "pickup" ? `Pickup from ${selectedOrder.pickupHubName || "hub"}` : "Delivery"}</dd></div><div className="admin-customer-address"><dt>{selectedOrder.fulfillmentMethod === "pickup" ? "Pickup hub / place" : "Delivery address"}</dt><dd>{selectedOrder.fulfillmentMethod === "pickup" ? `${selectedOrder.pickupHubName || "Hub"} · ${selectedOrder.pickupHubPlace || selectedOrder.address || "Place not saved"}` : selectedOrder.address || "Not provided"}</dd></div></dl>{selectedOrder.razorpayPaymentId && <button className="module-secondary admin-restore-payment-details" type="button" onClick={() => void restoreOrderDetailsFromRazorpay()}>Restore delivery details from Razorpay</button>}</section>
               {selectedOrder.items?.length ? <section className="admin-order-items"><p className="eyebrow">ITEMS IN THIS ORDER · {selectedOrder.items.length} LINES</p><div>{selectedOrder.items.map((item, itemIndex) => { const product = getOrderedProduct(item); const size = item.size || item.name.match(/(?:^| · )Size (.+)$/i)?.[1] || ""; const variant = item.variantName || (item.name.includes(" · ") ? item.name.split(" · ").slice(1).filter((part) => !/^Size /i.test(part)).join(" · ") : ""); const promotion = item.promotion; const promotionRole = promotion?.role === "free" ? "FREE ITEM" : promotion?.role === "bundle" ? "BUNDLE ITEM" : "PAID ITEM"; const selectedVariant = size ? product?.variants.find((candidate) => String(candidate.size || candidate.name).trim().replace(/^size\s+/i, "").toLowerCase() === size.trim().replace(/^size\s+/i, "").toLowerCase()) : variant ? product?.variants.find((candidate) => candidate.name.trim().toLowerCase() === variant.trim().toLowerCase()) : undefined; const selectionStock = selectedVariant?.stock ?? product?.stock; const displayImage = item.variantImage || selectedVariant?.image || item.image || product?.image; const imageAlt = variant ? `${item.name} variant` : item.name; return <article key={`${selectedOrder.id}-${item.productId || item.name}-${variant}-${size}-${promotion?.groupId || "legacy"}-${itemIndex}`}><>{displayImage ? <button className="admin-order-image-button" type="button" onClick={() => setEnlargedOrderImage({ src: displayImage, alt: imageAlt })} aria-label={`Enlarge ${imageAlt}`}><img src={displayImage} alt={imageAlt} /></button> : <span className="admin-order-item-placeholder" aria-hidden="true">✦</span>}</><span><strong>{item.name}</strong>{promotion && <small className={`admin-order-promotion ${promotion.role === "free" ? "is-free" : ""}`}>{promotionRole} · {promotion.label}</small>}{product ? <><small>{product.category} · SKU {product.sku}</small><small>Current {size ? `size ${size}` : variant ? "variant" : "product"} stock: {selectionStock} · {product.status}</small></> : <small>Product no longer in the catalog</small>}{variant && <small>Selected variant: {variant}{displayImage ? " · Variant image shown" : ""}</small>}{size && <small>Selected size: {size}</small>}{promotion && promotion.regularPrice !== promotion.linePrice && <small>Regular value: {formatAdminCurrency(promotion.regularPrice)} · Allocated price: {item.price}</small>}<em>Quantity ordered: {item.quantity}</em></span><b>{item.price}</b></article>; })}</div></section> : <section className="admin-order-items admin-order-item-repair"><p className="eyebrow">ADD MISSING ORDER DETAILS</p><p>This older paid order has no saved product information. Select the product and variant to restore its order record.</p><div className="admin-order-item-repair-fields"><label>Product<select value={orderItemDraft.productId} onChange={(event) => { const product = catalogProducts.find((candidate) => candidate.id === event.target.value); setOrderItemDraft({ productId: event.target.value, variantName: "", quantity: "1", price: product ? `₹${product.price.toLocaleString("en-IN")}` : "" }); }}><option value="">Select product</option>{catalogProducts.map((product) => <option key={product.id} value={product.id}>{product.name} · {product.sku}</option>)}</select></label>{draftProduct?.variants.length ? <label>Variant<select value={orderItemDraft.variantName} onChange={(event) => setOrderItemDraft((current) => ({ ...current, variantName: event.target.value }))}><option value="">Select variant</option>{draftProduct.variants.map((variant, index) => <option key={`${variant.name}-${index}`} value={variant.name}>{variant.name || `Option ${index + 1}`}</option>)}</select></label> : null}<label>Quantity<input type="number" min="1" value={orderItemDraft.quantity} onChange={(event) => setOrderItemDraft((current) => ({ ...current, quantity: event.target.value }))} /></label><label>Price<input value={orderItemDraft.price} onChange={(event) => setOrderItemDraft((current) => ({ ...current, price: event.target.value }))} placeholder="₹0" /></label></div>{draftProduct && <div className="admin-order-item-repair-preview">{orderItemDraft.variantName && draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image ? <img src={draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image} alt="Selected variant preview" /> : draftProduct.image ? <img src={draftProduct.image} alt="Selected product preview" /> : null}<span>{orderItemDraft.variantName ? `Selected variant: ${orderItemDraft.variantName}` : "Select a variant if applicable"}</span></div>}<button className="module-primary" type="button" onClick={addMissingOrderItem}>Add to this order</button></section>}

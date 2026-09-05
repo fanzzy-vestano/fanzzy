@@ -17,7 +17,9 @@ type StoredOrder = {
   pickupHubId?: string;
   pickupHubName?: string;
   pickupHubPlace?: string;
-  paymentStatus?: "pending" | "paid";
+  paymentStatus?: "pending" | "paid" | "cod_pending" | "cod_collected";
+  paymentMethod?: "online" | "cod";
+  codCharge?: number;
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
   inventoryReserved?: boolean;
@@ -519,6 +521,44 @@ export async function finalizeRazorpayPayment(payment: RazorpayPayment, receipt?
   return withInventoryMutationLock(() => finalizeRazorpayPaymentInternal(payment, receipt));
 }
 
+const customerPhoneDigits = (value: string) => String(value || "").replace(/\D/g, "").slice(-10);
+
+export async function confirmCashOnDeliveryOrder(orderId: string, identity?: { id: string; phone: string }) {
+  return withInventoryMutationLock(async () => {
+    const orders = await readOrders();
+    const order = orders.find((candidate) => candidate.id === orderId);
+    if (!order) throw new Error("Order could not be found for COD confirmation.");
+    if (identity) {
+      const sameAccount = order.userId ? order.userId === identity.id : customerPhoneDigits(order.userPhone || order.phone) === customerPhoneDigits(identity.phone);
+      if (!sameAccount) throw new Error("This order does not belong to the signed-in customer.");
+    }
+
+    const paymentMethods = await readJsonSetting<Record<string, unknown>>("payment_methods", {});
+    if (paymentMethods.cod === false) throw new Error("Cash on delivery is currently unavailable.");
+    if (order.paymentStatus === "cod_pending") {
+      await syncVendorOrderForPaidOrder(order).catch(() => undefined);
+      if (order.fulfillmentMethod !== "pickup") await ensureDelhiveryShipment(orders, order);
+      return order;
+    }
+    if (order.paymentStatus !== "pending") throw new Error("This order has already been confirmed or cannot use COD.");
+
+    if (order.inventoryReserved !== true || order.inventoryReleased === true) {
+      const adjustment = await adjustInventory(order, "decrement", true);
+      if (!adjustment.complete) throw new Error(adjustment.reason || "One or more products do not have enough stock.");
+      order.inventoryReserved = true;
+      order.inventoryReservedAt = order.inventoryReservedAt || new Date().toISOString();
+    }
+    order.inventoryReleased = false;
+    order.inventoryAdjusted = true;
+    order.paymentMethod = "cod";
+    order.paymentStatus = "cod_pending";
+    await writeOrders(orders);
+    await syncVendorOrderForPaidOrder(order).catch(() => undefined);
+    if (order.fulfillmentMethod !== "pickup") await ensureDelhiveryShipment(orders, order);
+    return order;
+  });
+}
+
 export async function refreshDelhiveryOrderTracking(orderId: string, waybill: string) {
   return withInventoryMutationLock(async () => {
     const orders = await readOrders();
@@ -542,7 +582,7 @@ export async function reserveOrderInventory(orderId: string) {
     const orders = await readOrders();
     const order = orders.find((candidate) => candidate.id === orderId);
     if (!order) throw new Error("Order could not be found for stock reservation.");
-    if (order.paymentStatus === "paid") return order;
+    if (order.paymentStatus === "paid" || order.paymentStatus === "cod_pending" || order.paymentStatus === "cod_collected") return order;
     if (order.inventoryReserved === true && order.inventoryReleased !== true) return order;
 
     const adjustment = await adjustInventory(order, "decrement", true);
@@ -561,7 +601,7 @@ export async function releaseReservedOrderInventory(orderId: string) {
     const orders = await readOrders();
     const order = orders.find((candidate) => candidate.id === orderId);
     if (!order) throw new Error("Order could not be found for stock release.");
-    if (order.paymentStatus === "paid" || order.inventoryReserved !== true || order.inventoryReleased === true) return order;
+    if (order.paymentStatus === "paid" || order.paymentStatus === "cod_pending" || order.paymentStatus === "cod_collected" || order.inventoryReserved !== true || order.inventoryReleased === true) return order;
 
     const adjustment = await adjustInventory(order, "release");
     if (!adjustment.complete) throw new Error("Reserved stock could not be released.");

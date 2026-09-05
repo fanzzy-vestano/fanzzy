@@ -81,6 +81,7 @@ const settingKeys = {
   heroSlideDuration: "hero_slide_duration",
   deliveryCharge: "delivery_charge",
   pickupHubs: "pickup_hubs",
+  paymentMethods: "payment_methods",
   orders: "orders",
   marketingRecords: "marketing_records",
   agents: "agents",

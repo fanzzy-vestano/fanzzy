@@ -18,6 +18,7 @@ export type DelhiveryOrder = {
   customerName: string;
   phone: string;
   address?: string;
+  paymentMethod?: "online" | "cod";
   items?: DelhiveryOrderItem[];
 };
 
@@ -97,7 +98,7 @@ const parseAddress = (order: DelhiveryOrder): DelhiveryAddress => {
   return { name: String(order.customerName || "Customer").trim().slice(0, 100), address: address.slice(0, 256), phone, pincode };
 };
 
-const getPincodeServiceability = async (pincode: string, token: string) => {
+const getPincodeServiceability = async (pincode: string, token: string, paymentMethod: DelhiveryOrder["paymentMethod"] = "online") => {
   const response = await fetch(`${pincodeEndpoint}?filter_codes=${encodeURIComponent(pincode)}`, {
     headers: { Authorization: `Token ${token}`, Accept: "application/json" },
   });
@@ -113,9 +114,10 @@ const getPincodeServiceability = async (pincode: string, token: string) => {
     postalCodeDetails?.pin ?? postalCodeDetails?.pincode ?? postalCodeDetails?.postal_code ?? "",
   ).trim();
   const prepaid = String(postalCodeDetails?.pre_paid ?? row?.pre_paid ?? "").toUpperCase();
+  const cod = String(postalCodeDetails?.cod ?? row?.cod ?? postalCodeDetails?.cash ?? row?.cash ?? "").toUpperCase();
   const remarks = String(postalCodeDetails?.remarks ?? row?.remarks ?? "");
   if (!row || returnedPincode !== pincode) throw delhiveryError("This delivery pincode is not serviceable by Delhivery.");
-  if (prepaid !== "Y") throw delhiveryError("This delivery pincode is not serviceable for prepaid shipments.");
+  if (paymentMethod === "cod" ? cod === "N" : prepaid !== "Y") throw delhiveryError(`This delivery pincode is not serviceable for ${paymentMethod === "cod" ? "COD" : "prepaid"} shipments.`);
   if (/embargo|not serviceable|nsz/i.test(remarks)) throw delhiveryError("This delivery pincode is currently unavailable for Delhivery shipments.");
 };
 
@@ -156,7 +158,7 @@ export async function manifestDelhiveryShipment(order: DelhiveryOrder): Promise<
   if (!isDelhiveryConfigured()) throw delhiveryError("Delhivery is not fully configured on the server.");
   if (!current.originPin || !/^\d{6}$/.test(current.originPin)) throw delhiveryError("The Delhivery origin pincode is not configured.");
   const consignee = parseAddress(order);
-  await getPincodeServiceability(consignee.pincode, current.token);
+  await getPincodeServiceability(consignee.pincode, current.token, order.paymentMethod);
 
   const items = (order.items || []).filter((item) => Math.max(0, Number(item.quantity) || 0) > 0);
   const quantity = items.reduce((sum, item) => sum + Math.max(0, Math.floor(Number(item.quantity) || 0)), 0) || 1;
@@ -172,9 +174,10 @@ export async function manifestDelhiveryShipment(order: DelhiveryOrder): Promise<
       phone: consignee.phone,
       country: "India",
       order: order.id.replace(/^#/, "").slice(0, 50),
-      payment_mode: "Pre-paid",
+      payment_mode: order.paymentMethod === "cod" ? "COD" : "Pre-paid",
       products_desc: description,
       total_amount: asAmount(order.total),
+      ...(order.paymentMethod === "cod" ? { cod_amount: asAmount(order.total) } : {}),
       quantity,
       weight,
       shipment_length: current.defaultLengthCm,

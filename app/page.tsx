@@ -95,6 +95,8 @@ type StorefrontPageHistoryState = {
 type DeliveryCharge = { enabled: boolean; amount: number; freeAboveEnabled: boolean; freeAbove: number };
 type PickupHub = { id: string; name: string; place: string };
 type FulfillmentMethod = "delivery" | "pickup";
+type PaymentMethod = "online" | "cod";
+type PaymentSettings = { online: boolean; cod: boolean; provider: string; codCharge: number };
 type MarketingRecord = { kind: "Campaign" | "Coupon" | "Newsletter"; name: string; detail: string; status: "Active" | "Scheduled" | "Draft"; code?: string; discount?: string; offerType?: "bogo"; buyQuantity?: number; getQuantity?: number; eligibleProductIds?: string[] };
 type PromotionCartLine = { groupId: string; offerId: string; role: "paid" | "free" | "bundle"; label: string; regularPrice: number; linePrice: number };
 type OrderStatus = "Processing" | "Packed" | "Shipped" | "Delivered" | "Cancelled";
@@ -119,7 +121,9 @@ type CustomerOrder = {
   couponDiscount?: number;
   promotionDiscount?: number;
   shippingTotal?: number;
-  paymentStatus?: "pending" | "paid";
+  paymentStatus?: "pending" | "paid" | "cod_pending" | "cod_collected";
+  paymentMethod?: PaymentMethod;
+  codCharge?: number;
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
   inventoryReserved?: boolean;
@@ -256,7 +260,7 @@ const isDemoProduct = (product: { name?: string; sku?: string }) =>
   demoProductNames.has(String(product.name ?? "").trim().toLowerCase()) ||
   /^LST-(AUR|SOL|MUS|ORB)-\d+$/i.test(String(product.sku ?? ""));
 const isDemoOrder = (order: { id?: string }) => /^#FZ-104[4-8]$/.test(String(order.id ?? ""));
-const isPaidOrder = (order: Pick<CustomerOrder, "paymentStatus" | "razorpayPaymentId">) => order.paymentStatus === "paid" || Boolean(order.razorpayPaymentId);
+const isPaidOrder = (order: Pick<CustomerOrder, "paymentStatus" | "razorpayPaymentId">) => order.paymentStatus === "paid" || order.paymentStatus === "cod_pending" || order.paymentStatus === "cod_collected" || Boolean(order.razorpayPaymentId);
 const normalizePhone = (value?: string) => String(value || "").replace(/\D/g, "").replace(/^0+/, "");
 const belongsToCustomer = (order: Pick<CustomerOrder, "userId" | "userPhone" | "phone">, customer: CustomerAuthUser) => {
   if (order.userId === customer.id) return true;
@@ -378,6 +382,7 @@ const blockedHeroImage = "photo-1599643478518-a784e5dc4c8f";
 const initialHeroSlides: string[] = [];
 const defaultHeroSlideDuration = 5.2;
 const defaultDeliveryCharge: DeliveryCharge = { enabled: false, amount: 99, freeAboveEnabled: false, freeAbove: 999 };
+const defaultPaymentSettings: PaymentSettings = { online: true, cod: true, provider: "Razorpay", codCharge: 0 };
 const defaultPickupHubs: PickupHub[] = [];
 const parseDeliveryCharge = (value: string | null | undefined): DeliveryCharge => {
   if (!value) return defaultDeliveryCharge;
@@ -435,6 +440,20 @@ const parseAgentCoupons = (stored: string | null): MarketingRecord[] => {
       : [];
   } catch {
     return [];
+  }
+};
+const parsePaymentSettings = (value: string | null | undefined): PaymentSettings => {
+  if (!value) return defaultPaymentSettings;
+  try {
+    const parsed = JSON.parse(value) as Partial<PaymentSettings>;
+    return {
+      online: typeof parsed.online === "boolean" ? parsed.online : defaultPaymentSettings.online,
+      cod: typeof parsed.cod === "boolean" ? parsed.cod : defaultPaymentSettings.cod,
+      provider: typeof parsed.provider === "string" && parsed.provider.trim() ? parsed.provider.trim() : defaultPaymentSettings.provider,
+      codCharge: Math.max(0, Number.isFinite(parsed.codCharge) ? Number(parsed.codCharge) : defaultPaymentSettings.codCharge),
+    };
+  } catch {
+    return defaultPaymentSettings;
   }
 };
 const getCouponDiscount = (coupon: MarketingRecord, subtotal: number) => {
@@ -701,9 +720,11 @@ export default function Home() {
   const [privacyOpen, setPrivacyOpen] = useState(false);
   const [announcementText, setAnnouncementText] = useState("Complimentary shipping on orders above ₹500");
   const [deliveryCharge, setDeliveryCharge] = useState<DeliveryCharge>(defaultDeliveryCharge);
+  const [paymentSettings, setPaymentSettings] = useState<PaymentSettings>(defaultPaymentSettings);
   const [pickupHubs, setPickupHubs] = useState<PickupHub[]>(defaultPickupHubs);
   const [fulfillmentMethod, setFulfillmentMethod] = useState<FulfillmentMethod>("delivery");
   const [selectedPickupHubId, setSelectedPickupHubId] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("online");
   const [activeCampaign, setActiveCampaign] = useState<MarketingRecord | null>(null);
   const [heroSlides, setHeroSlides] = useState(initialHeroSlides);
   const [heroSlideIndex, setHeroSlideIndex] = useState(0);
@@ -1156,6 +1177,32 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    let active = true;
+    const loadPaymentSettings = async () => {
+      const remote = await fetchStoreSetting("paymentMethods");
+      const stored = remote.value || window.localStorage.getItem("fanzzy-payment-methods");
+      if (active && stored) setPaymentSettings(parsePaymentSettings(stored));
+    };
+    const refreshPaymentSettings = () => {
+      setPaymentSettings(parsePaymentSettings(window.localStorage.getItem("fanzzy-payment-methods")));
+      void loadPaymentSettings().catch(() => undefined);
+    };
+    void loadPaymentSettings().catch(() => undefined);
+    window.addEventListener("fanzzy-payment-methods-updated", refreshPaymentSettings);
+    window.addEventListener("storage", refreshPaymentSettings);
+    return () => {
+      active = false;
+      window.removeEventListener("fanzzy-payment-methods-updated", refreshPaymentSettings);
+      window.removeEventListener("storage", refreshPaymentSettings);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (paymentMethod === "cod" && !paymentSettings.cod && paymentSettings.online) setPaymentMethod("online");
+    if (paymentMethod === "online" && !paymentSettings.online && paymentSettings.cod) setPaymentMethod("cod");
+  }, [paymentMethod, paymentSettings.cod, paymentSettings.online]);
+
+  useEffect(() => {
     const syncAgentCoupons = async () => {
       const remote = await fetchStoreSetting("agents");
       const stored = remote.value || window.localStorage.getItem("fanzzy-agents");
@@ -1442,7 +1489,8 @@ export default function Home() {
   const thresholdReached = deliveryCharge.freeAboveEnabled && discountedSubtotal >= deliveryCharge.freeAbove;
   const selectedPickupHub = pickupHubs.find((hub) => hub.id === selectedPickupHubId) || null;
   const deliveryTotal = fulfillmentMethod === "pickup" ? 0 : deliveryCharge.enabled && !thresholdReached ? deliveryCharge.amount : 0;
-  const orderTotal = Math.max(0, subtotal - couponDiscount - bogoDiscount + deliveryTotal);
+  const codTotal = paymentMethod === "cod" ? paymentSettings.codCharge : 0;
+  const orderTotal = Math.max(0, subtotal - couponDiscount - bogoDiscount + deliveryTotal + codTotal);
 
   useEffect(() => {
     const userId = authUser?.id;
@@ -2340,7 +2388,7 @@ export default function Home() {
     if (adjustedIds.includes(adjustmentId) || !decrementLocalInventory(order.items || [])) return;
     window.localStorage.setItem(storageKey, JSON.stringify([...adjustedIds, adjustmentId].slice(-250)));
   };
-  const persistPaidOrder = async (newOrder: CustomerOrder) => {
+  const persistConfirmedOrder = async (newOrder: CustomerOrder) => {
     if (!authUser) {
       setIsPaying(false);
       setCheckoutOpen(false);
@@ -2364,17 +2412,17 @@ export default function Home() {
         merged.set(order.id, order as CustomerOrder);
       }
     });
-    const existingPayment = Array.from(merged.values()).find((order) =>
-      order.razorpayPaymentId && order.razorpayPaymentId === newOrder.razorpayPaymentId,
-    );
-    if (existingPayment) {
+    const existingConfirmation = Array.from(merged.values()).find((order) => newOrder.paymentMethod === "cod"
+      ? order.id === newOrder.id && isPaidOrder(order)
+      : Boolean(order.razorpayPaymentId && order.razorpayPaymentId === newOrder.razorpayPaymentId));
+    if (existingConfirmation) {
       const userOrders = Array.from(merged.values()).filter((order) => belongsToCustomer(order, authUser));
       window.localStorage.setItem(`fanzzy-orders:${authUser.id}`, JSON.stringify(userOrders));
       window.localStorage.setItem("fanzzy-orders", JSON.stringify(Array.from(merged.values())));
       window.dispatchEvent(new Event("fanzzy-orders-updated"));
       setOrders(userOrders);
-      setOrderConfirmation(existingPayment);
-      if (existingPayment.inventoryAdjusted === true) decrementLocalInventoryOnce(existingPayment);
+      setOrderConfirmation(existingConfirmation);
+      if (existingConfirmation.inventoryAdjusted === true) decrementLocalInventoryOnce(existingConfirmation);
       setCart({});
       setCartVariants({});
       setCartPromotionLines({});
@@ -2383,7 +2431,7 @@ export default function Home() {
       setSelectedPickupHubId("");
       setCheckoutForm({ name: "", phone: "", email: "", address: "", pincode: "" });
       setIsPaying(false);
-      announce(`${existingPayment.id} was already confirmed`);
+      announce(`${existingConfirmation.id} was already confirmed`);
       return;
     }
     const nextOrders = [newOrder, ...Array.from(merged.values()).filter((order) => order.id !== newOrder.id)];
@@ -2451,6 +2499,9 @@ export default function Home() {
       return;
     }
     if (cartStockIssues.length) return announce(cartHasSoldOutItems ? "Remove sold out items before checkout" : "Reduce item quantities before checkout");
+    if (!paymentSettings.online && !paymentSettings.cod) return announce("No payment method is currently available. Please try again shortly.");
+    if (paymentMethod === "online" && !paymentSettings.online) return announce("Online payment is currently unavailable. Choose COD instead.");
+    if (paymentMethod === "cod" && !paymentSettings.cod) return announce("COD is currently unavailable. Choose online payment instead.");
     const name = checkoutForm.name.trim();
     const digits = checkoutForm.phone.replace(/\D/g, "");
     const email = checkoutForm.email.trim();
@@ -2507,6 +2558,8 @@ export default function Home() {
       couponDiscount,
       promotionDiscount: bogoDiscount,
       shippingTotal: deliveryTotal,
+      paymentMethod,
+      codCharge: codTotal,
       items: cartItems.map((product) => ({ productId: product.id, name: `${product.billName || product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}${product.size ? ` · Size ${product.size}` : ""}`, quantity: product.quantity, price: formatINR(getCartLinePrice(product)), regularPrice: getCustomerPrice(product), image: product.image, variantName: product.variant?.name, variantImage: product.variant?.image, size: product.size || undefined, hsnCode: product.hsnCode || undefined, supplierName: product.supplierName || undefined, vendorId: product.vendorId || null, vendorName: product.vendorName || "Vestano", vendorSlug: product.vendorSlug, promotion: product.promotion || undefined })),
     };
 
@@ -2551,6 +2604,25 @@ export default function Home() {
         inventoryAdjusted: false,
       };
       await persistPendingOrder(reservedPendingOrder);
+      if (paymentMethod === "cod") {
+        const codResponse = await fetch("/api/orders/confirm-cod", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ fanzzyOrderId: orderId }),
+        });
+        const confirmation = await readRazorpayResponse<{ confirmed?: boolean; order?: Partial<CustomerOrder>; error?: string }>(codResponse);
+        if (!codResponse.ok || !confirmation.confirmed) throw new Error(confirmation.error || "COD order confirmation failed");
+        stockReserved = false;
+        const codOrder: CustomerOrder = {
+          ...reservedPendingOrder,
+          ...(confirmation.order || {}),
+          paymentMethod: "cod",
+          paymentStatus: "cod_pending",
+          inventoryAdjusted: confirmation.order?.inventoryAdjusted === true,
+        };
+        await persistConfirmedOrder(codOrder);
+        return;
+      }
       const orderResponse = await fetch(razorpayApiUrl("order"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2589,7 +2661,7 @@ export default function Home() {
               // The verify endpoint has now made the reservation permanent for
               // this paid order. Never release it after this point.
               stockReserved = false;
-              await persistPaidOrder(paidOrder);
+              await persistConfirmedOrder(paidOrder);
             } catch (error) {
               await releaseCheckoutStock();
               setIsPaying(false);
@@ -2808,7 +2880,7 @@ export default function Home() {
 
       {searchOpen && <div className="overlay search-overlay" role="dialog" aria-modal="true" aria-label="Search"><div className="overlay-top"><span className="wordmark"><img src={siteAsset("fanzzy-mark.png")} alt="Fanzzy" className="brand-logo" /></span><button onClick={closeSearch}>Close&nbsp; ×</button></div><div className="search-content"><p className="eyebrow">SEARCH THE COLLECTION</p><div className="large-search"><input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Try “gold hoops”" /><span>⌕</span></div>{search && <div className="search-results">{filteredProducts.length ? filteredProducts.map((product) => <button key={product.id} onClick={() => { openQuickProduct(product) }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(getCustomerPrice(product))}</small></span><b>↗</b></button>) : <p className="muted">No pieces found. Try another search.</p>}</div>}{!search && <div className="search-suggestions"><span>Trending now</span><button onClick={() => setSearch("hoops")}>Hoops</button><button onClick={() => setSearch("pearl")}>Pearls</button><button onClick={() => setSearch("chain")}>Chains</button></div>}</div></div>}
 
-      {orderConfirmation && <div className="drawer-backdrop" onClick={() => setOrderConfirmation(null)}><section className="order-confirmation" role="dialog" aria-modal="true" aria-labelledby="order-confirmation-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close payment confirmation" onClick={() => setOrderConfirmation(null)}>×</button><p className="eyebrow">PAYMENT SUCCESSFUL</p><h2 id="order-confirmation-title">Your payment is complete.</h2><p>We received <strong>{orderConfirmation.total}</strong> for order <strong>{orderConfirmation.id}</strong>. Your order has been confirmed.</p>{orderConfirmation.fulfillmentMethod === "pickup" && <p className="pickup-confirmation"><strong>Pickup from {orderConfirmation.pickupHubName || "hub"}</strong><br />{orderConfirmation.pickupHubPlace || "Pickup place saved with your order."}<br /><small>No delivery charges.</small></p>}{orderConfirmation.razorpayPaymentId && <p className="payment-reference">Payment ID: {orderConfirmation.razorpayPaymentId}</p>}<div className="confirmation-actions"><button className="button button-dark" type="button" disabled={printingBillId !== null} aria-busy={printingBillId === orderConfirmation.id} onClick={() => void downloadBill(orderConfirmation)}>{printingBillId === orderConfirmation.id ? "Printing…" : "Print bill"} <span>↗</span></button><button className="save-text" onClick={() => { setOrderConfirmation(null); setOrdersOpen(true); }}>View my orders</button></div></section></div>}
+      {orderConfirmation && <div className="drawer-backdrop" onClick={() => setOrderConfirmation(null)}><section className="order-confirmation" role="dialog" aria-modal="true" aria-labelledby="order-confirmation-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close order confirmation" onClick={() => setOrderConfirmation(null)}>×</button><p className="eyebrow">{orderConfirmation.paymentMethod === "cod" ? "COD ORDER CONFIRMED" : "PAYMENT SUCCESSFUL"}</p><h2 id="order-confirmation-title">{orderConfirmation.paymentMethod === "cod" ? "Your order is confirmed." : "Your payment is complete."}</h2><p>{orderConfirmation.paymentMethod === "cod" ? <>Please pay <strong>{orderConfirmation.total}</strong> to the delivery partner when order <strong>{orderConfirmation.id}</strong> arrives.</> : <>We received <strong>{orderConfirmation.total}</strong> for order <strong>{orderConfirmation.id}</strong>. Your order has been confirmed.</>}</p>{orderConfirmation.fulfillmentMethod === "pickup" && <p className="pickup-confirmation"><strong>Pickup from {orderConfirmation.pickupHubName || "hub"}</strong><br />{orderConfirmation.pickupHubPlace || "Pickup place saved with your order."}<br /><small>No delivery charges.</small></p>}{orderConfirmation.razorpayPaymentId && <p className="payment-reference">Payment ID: {orderConfirmation.razorpayPaymentId}</p>}<div className="confirmation-actions"><button className="button button-dark" type="button" disabled={printingBillId !== null} aria-busy={printingBillId === orderConfirmation.id} onClick={() => void downloadBill(orderConfirmation)}>{printingBillId === orderConfirmation.id ? "Printing…" : "Print bill"} <span>↗</span></button><button className="save-text" onClick={() => { setOrderConfirmation(null); setOrdersOpen(true); }}>View my orders</button></div></section></div>}
 
       {savedOpen && <div className="drawer-backdrop" onClick={() => setSavedOpen(false)}><aside className="orders-drawer saved-drawer" role="dialog" aria-modal="true" aria-labelledby="saved-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR EDIT</p><h2 id="saved-title">Saved pieces</h2></div><button aria-label="Close saved pieces" onClick={() => setSavedOpen(false)}>×</button></div>{wishlist.length ? <div className="saved-list">{wishlist.map((productId) => { const product = products.find((item) => item.id === productId); return product ? <article className="saved-card" key={product.id}><button className="saved-product" onClick={() => { openQuickProduct(product); setSavedOpen(false); }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(getCustomerPrice(product))}</small></span><b>↗</b></button><div className="saved-card-actions"><button className="module-secondary" onClick={() => { addToCart(product); setSavedOpen(false); }}>Add to cart</button><button className="saved-remove" onClick={() => toggleWishlist(product.id)}>Remove</button></div></article> : null; })}</div> : <div className="orders-empty saved-empty"><div>♡</div><h3>Your edit is waiting.</h3><p>Tap the heart on any piece to keep it close while you decide.</p><button className="button button-dark" onClick={() => { setSavedOpen(false); document.getElementById("shop")?.scrollIntoView({ behavior: "smooth" }); }}>Explore pieces <span>↗</span></button></div>}</aside></div>}
 
@@ -2938,6 +3010,14 @@ export default function Home() {
                   </label>
                 </>
               )}
+              <div className="checkout-payment checkout-wide">
+                <p className="field-label">Payment method</p>
+                <div className="fulfillment-options">
+                  {paymentSettings.online && <label><input type="radio" name="payment-method" checked={paymentMethod === "online"} onChange={() => setPaymentMethod("online")} /> <span>Pay online<small>Secure payment through {paymentSettings.provider}</small></span></label>}
+                  {paymentSettings.cod && <label><input type="radio" name="payment-method" checked={paymentMethod === "cod"} onChange={() => setPaymentMethod("cod")} /> <span>Cash on delivery<small>{codTotal > 0 ? `Pay on arrival · ${formatINR(codTotal)} COD charge` : "Pay when your order arrives"}</small></span></label>}
+                </div>
+                {!paymentSettings.online && !paymentSettings.cod && <small className="checkout-field-error">No payment methods are available right now.</small>}
+              </div>
               <div className="checkout-coupon checkout-wide">
                 <label htmlFor="checkout-coupon-code">Coupon code <span className="optional-mark">Optional</span></label>
                 <div className="coupon-entry"><input id="checkout-coupon-code" value={couponInput} onChange={(event) => { setCouponInput(event.target.value.toUpperCase()); setAppliedCoupon(null); }} placeholder="Enter coupon code" autoCapitalize="characters" /><button className="button button-light" type="button" onClick={applyCoupon}>Apply</button></div>
@@ -2947,12 +3027,13 @@ export default function Home() {
             {bogoDiscount > 0 && <div className="checkout-total coupon-total"><span>{bogoOfferLabel} discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}
             {couponDiscount > 0 && <div className="checkout-total coupon-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}
             <div className="checkout-total"><span>{fulfillmentMethod === "pickup" ? "Pickup" : "Delivery"}</span><strong>{fulfillmentMethod === "pickup" ? "Free" : deliveryTotal > 0 ? formatINR(deliveryTotal) : "Free"}</strong></div>
+            {codTotal > 0 && <div className="checkout-total"><span>COD charge</span><strong>{formatINR(codTotal)}</strong></div>}
             <div className="checkout-total"><span>Order total</span><strong>{formatINR(orderTotal)}</strong></div>
             <div className="checkout-actions">
-              <button className="button button-dark" type="button" onClick={submitCheckout} disabled={isPaying}>{isPaying ? "Opening payment…" : "Place order"} <span>↗</span></button>
+              <button className="button button-dark" type="button" onClick={submitCheckout} disabled={isPaying}>{isPaying ? (paymentMethod === "cod" ? "Confirming COD…" : "Opening payment…") : paymentMethod === "cod" ? "Place COD order" : "Pay securely"} <span>↗</span></button>
               <button className="save-text" type="button" onClick={() => setCheckoutOpen(false)} disabled={isPaying}>Back to cart</button>
             </div>
-            {isPaying && <p className="checkout-payment-status" role="status">Saving your order and opening secure payment…</p>}
+            {isPaying && <p className="checkout-payment-status" role="status">{paymentMethod === "cod" ? "Saving your COD order and preparing the shipment…" : "Saving your order and opening secure payment…"}</p>}
           </section>
         </div>
       )}
