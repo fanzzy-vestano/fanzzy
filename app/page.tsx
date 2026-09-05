@@ -137,6 +137,11 @@ type CustomerOrder = {
   delhiveryShipmentStatus?: "pending" | "created" | "failed" | "skipped";
   delhiveryShipmentError?: string;
   delhiveryShipmentCreatedAt?: string;
+  delhiveryPickupRequestStatus?: "pending" | "created" | "covered" | "failed" | "skipped";
+  delhiveryPickupRequestId?: string;
+  delhiveryPickupRequestDate?: string;
+  delhiveryPickupRequestTime?: string;
+  delhiveryPickupRequestError?: string;
   delhiveryLiveStatus?: string;
   delhiveryLiveStatusType?: string;
   delhiveryLiveStatusDate?: string;

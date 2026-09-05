@@ -28,6 +28,14 @@ export type DelhiveryShipmentResult = {
   trackingUrl: string;
 };
 
+export type DelhiveryPickupRequestResult = {
+  pickupId?: string;
+  pickupDate: string;
+  pickupTime: string;
+  expectedPackageCount: number;
+  status: string;
+};
+
 export type DelhiveryTrackingResult = {
   waybill: string;
   status: string;
@@ -38,6 +46,7 @@ export type DelhiveryTrackingResult = {
 };
 
 const createEndpoint = "https://track.delhivery.com/api/cmu/create.json";
+const pickupRequestEndpoint = "https://track.delhivery.com/fm/request/new/";
 const trackingEndpoint = "https://track.delhivery.com/api/v1/packages/json/";
 const pincodeEndpoint = "https://track.delhivery.com/c/api/pin-codes/json/";
 
@@ -49,6 +58,7 @@ const config = () => ({
   sellerAddress: String(process.env.DELHIVERY_SELLER_ADDRESS || "").trim(),
   sellerGstTin: String(process.env.DELHIVERY_SELLER_GST_TIN || "").trim(),
   originPin: String(process.env.DELHIVERY_ORIGIN_PIN || "").trim(),
+  pickupTime: String(process.env.DELHIVERY_PICKUP_TIME || "11:00:00").trim(),
   defaultHsnCode: String(process.env.DELHIVERY_DEFAULT_HSN_CODE || "7117").trim(),
   defaultWeightGrams: Number(process.env.DELHIVERY_DEFAULT_WEIGHT_GRAMS || 500),
   defaultLengthCm: Number(process.env.DELHIVERY_DEFAULT_LENGTH_CM || 20),
@@ -59,6 +69,11 @@ const config = () => ({
 export const isDelhiveryConfigured = () => {
   const current = config();
   return Boolean(current.token && current.client && current.pickupLocation && current.sellerName && current.sellerAddress && current.sellerGstTin);
+};
+
+export const isDelhiveryPickupConfigured = () => {
+  const current = config();
+  return Boolean(current.token && current.pickupLocation);
 };
 
 const safeJson = async (response: Response) => {
@@ -152,6 +167,86 @@ const responseMessage = (value: unknown, fallback: string) => {
   }
   return fallback;
 };
+
+const pickupRequestId = (value: unknown): string => {
+  if (!value || typeof value !== "object") return "";
+  const record = value as Record<string, unknown>;
+  const direct = [
+    record.pickup_id,
+    record.pickupId,
+    record.pickup_request_id,
+    record.pickup_request,
+    record.PickupId,
+    record.PUR,
+  ].find((item) => typeof item === "string" || typeof item === "number");
+  if (direct !== undefined && String(direct).trim()) return String(direct).trim();
+  for (const key of ["data", "result", "pickup", "request"]) {
+    const found = pickupRequestId(record[key]);
+    if (found) return found;
+  }
+  return "";
+};
+
+const validPickupTime = (value: string) => {
+  const match = value.match(/^(\d{2}):(\d{2}):(\d{2})$/);
+  if (!match) return "11:00:00";
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  const second = Number(match[3]);
+  return hour <= 23 && minute <= 59 && second <= 59 ? value : "11:00:00";
+};
+
+const indiaDateParts = (date: Date) => {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    weekday: "short",
+  }).formatToParts(date);
+  const get = (type: string) => parts.find((part) => part.type === type)?.value || "";
+  return { year: Number(get("year")), month: Number(get("month")), day: Number(get("day")), weekday: get("weekday") };
+};
+
+const nextPickupDate = () => {
+  const current = indiaDateParts(new Date());
+  const date = new Date(Date.UTC(current.year, current.month - 1, current.day));
+  do {
+    date.setUTCDate(date.getUTCDate() + 1);
+    const weekday = new Intl.DateTimeFormat("en-US", { weekday: "short", timeZone: "UTC" }).format(date);
+    if (weekday !== "Sat" && weekday !== "Sun") break;
+  } while (true);
+  return date.toISOString().slice(0, 10);
+};
+
+export const delhiveryPickupSchedule = () => ({ pickupDate: nextPickupDate(), pickupTime: validPickupTime(config().pickupTime) });
+
+export async function createDelhiveryPickupRequest(expectedPackageCount: number): Promise<DelhiveryPickupRequestResult> {
+  const current = config();
+  if (!isDelhiveryPickupConfigured()) throw delhiveryError("Delhivery pickup automation is not fully configured on the server.");
+  const schedule = delhiveryPickupSchedule();
+  const count = Math.max(1, Math.floor(Number(expectedPackageCount) || 0));
+  const body = new URLSearchParams({
+    pickup_time: schedule.pickupTime,
+    pickup_date: schedule.pickupDate,
+    pickup_location: current.pickupLocation,
+    expected_package_count: String(count),
+  });
+  const response = await fetch(pickupRequestEndpoint, {
+    method: "POST",
+    headers: { Authorization: `Token ${current.token}`, "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+    body,
+  });
+  const { value } = await safeJson(response);
+  if (!response.ok) throw delhiveryError(`Delhivery pickup request failed: ${responseMessage(value, "request rejected")}`, response.status);
+  return {
+    pickupId: pickupRequestId(value) || undefined,
+    pickupDate: schedule.pickupDate,
+    pickupTime: schedule.pickupTime,
+    expectedPackageCount: count,
+    status: responseMessage(value, "Scheduled"),
+  };
+}
 
 export async function manifestDelhiveryShipment(order: DelhiveryOrder): Promise<DelhiveryShipmentResult> {
   const current = config();

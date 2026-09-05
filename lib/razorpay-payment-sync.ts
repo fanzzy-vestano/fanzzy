@@ -1,4 +1,4 @@
-import { manifestDelhiveryShipment, trackDelhiveryShipment } from "./delhivery";
+import { createDelhiveryPickupRequest, delhiveryPickupSchedule, manifestDelhiveryShipment, trackDelhiveryShipment } from "./delhivery";
 
 type StoredOrder = {
   id: string;
@@ -32,6 +32,12 @@ type StoredOrder = {
   delhiveryShipmentError?: string;
   delhiveryShipmentCreatedAt?: string;
   delhiveryShipmentRequestedAt?: string;
+  delhiveryPickupRequestStatus?: "pending" | "created" | "covered" | "failed" | "skipped";
+  delhiveryPickupRequestId?: string;
+  delhiveryPickupRequestDate?: string;
+  delhiveryPickupRequestTime?: string;
+  delhiveryPickupExpectedPackageCount?: number;
+  delhiveryPickupRequestError?: string;
   delhiveryLiveStatus?: string;
   delhiveryLiveStatusType?: string;
   delhiveryLiveStatusDate?: string;
@@ -189,16 +195,86 @@ const delhiveryFailureMessage = (error: unknown) => {
   return message.replace(/\s+/g, " ").trim().slice(0, 240);
 };
 
+const delhiveryPickupFailureMessage = (error: unknown) => {
+  const message = error instanceof Error ? error.message : "Delhivery pickup request failed.";
+  return message.replace(/\s+/g, " ").trim().slice(0, 240);
+};
+
 // Automatic Delhivery booking starts with the current storefront rollout.
 // Older paid orders remain in order history but must never be booked later by
 // a payment-repair/sync run.
 const delhiveryAutomationStartDate = "2026-09-05";
 
+const isDeliveryOrderReadyForPickup = (order: StoredOrder) =>
+  order.fulfillmentMethod !== "pickup"
+  && Boolean(order.delhiveryAwb)
+  && order.delhiveryShipmentStatus === "created"
+  && order.status !== "Delivered"
+  && order.status !== "Cancelled";
+
+const pickupRequestAlreadyCoversWarehouse = (error: unknown) =>
+  /already exist|auto pickup/i.test(error instanceof Error ? error.message : String(error || ""));
+
+async function ensureDelhiveryPickupRequest(orders: StoredOrder[], order: StoredOrder) {
+  if (!isDeliveryOrderReadyForPickup(order)) return;
+  if (order.delhiveryPickupRequestStatus === "pending") return;
+
+  const schedule = delhiveryPickupSchedule();
+  if (order.delhiveryPickupRequestStatus === "created" && order.delhiveryPickupRequestDate === schedule.pickupDate) return;
+
+  // Delhivery raises pickup requests against a warehouse, not an individual
+  // AWB. Cover later orders with the request already created for this slot.
+  const existingRequest = orders.find((candidate) =>
+    candidate.id !== order.id
+    && candidate.delhiveryPickupRequestDate === schedule.pickupDate
+    && ["pending", "created", "covered"].includes(candidate.delhiveryPickupRequestStatus || ""),
+  );
+  if (existingRequest) {
+    order.delhiveryPickupRequestStatus = "covered";
+    order.delhiveryPickupRequestId = existingRequest.delhiveryPickupRequestId;
+    order.delhiveryPickupRequestDate = existingRequest.delhiveryPickupRequestDate;
+    order.delhiveryPickupRequestTime = existingRequest.delhiveryPickupRequestTime;
+    order.delhiveryPickupExpectedPackageCount = existingRequest.delhiveryPickupExpectedPackageCount;
+    delete order.delhiveryPickupRequestError;
+    await writeOrders(orders);
+    return;
+  }
+
+  order.delhiveryPickupRequestStatus = "pending";
+  order.delhiveryPickupRequestDate = schedule.pickupDate;
+  order.delhiveryPickupRequestTime = schedule.pickupTime;
+  await writeOrders(orders);
+  try {
+    const expectedPackageCount = orders.filter(isDeliveryOrderReadyForPickup).length;
+    const pickup = await createDelhiveryPickupRequest(expectedPackageCount);
+    order.delhiveryPickupRequestStatus = "created";
+    order.delhiveryPickupRequestId = pickup.pickupId;
+    order.delhiveryPickupRequestDate = pickup.pickupDate;
+    order.delhiveryPickupRequestTime = pickup.pickupTime;
+    order.delhiveryPickupExpectedPackageCount = pickup.expectedPackageCount;
+    delete order.delhiveryPickupRequestError;
+  } catch (error) {
+    if (pickupRequestAlreadyCoversWarehouse(error)) {
+      order.delhiveryPickupRequestStatus = "covered";
+      order.delhiveryPickupRequestError = "An existing Delhivery pickup already covers this warehouse.";
+    } else {
+      order.delhiveryPickupRequestStatus = "failed";
+      order.delhiveryPickupRequestError = delhiveryPickupFailureMessage(error);
+    }
+  }
+  await writeOrders(orders);
+}
+
 async function ensureDelhiveryShipment(orders: StoredOrder[], order: StoredOrder) {
-  if (order.fulfillmentMethod === "pickup" || order.delhiveryAwb || order.delhiveryShipmentStatus === "pending") return;
+  if (order.fulfillmentMethod === "pickup") return;
   if (order.status === "Delivered" || order.status === "Cancelled") return;
   const orderDate = String(order.createdAt || order.date || "").slice(0, 10);
   if (orderDate && orderDate < delhiveryAutomationStartDate) return;
+  if (order.delhiveryAwb) {
+    await ensureDelhiveryPickupRequest(orders, order);
+    return;
+  }
+  if (order.delhiveryShipmentStatus === "pending") return;
   order.delhiveryShipmentStatus = "pending";
   order.delhiveryShipmentRequestedAt = new Date().toISOString();
   await writeOrders(orders);
@@ -215,6 +291,7 @@ async function ensureDelhiveryShipment(orders: StoredOrder[], order: StoredOrder
     order.delhiveryShipmentError = delhiveryFailureMessage(error);
   }
   await writeOrders(orders);
+  await ensureDelhiveryPickupRequest(orders, order);
 }
 
 const normalizeSelection = (value?: string) => String(value || "").trim().replace(/^size\s+/i, "").toLowerCase();
