@@ -393,6 +393,11 @@ type OrderRecord = {
   delhiveryShipmentStatus?: "pending" | "created" | "failed" | "skipped";
   delhiveryShipmentError?: string;
   delhiveryShipmentCreatedAt?: string;
+  delhiveryLiveStatus?: string;
+  delhiveryLiveStatusType?: string;
+  delhiveryLiveStatusDate?: string;
+  delhiveryLiveLocation?: string;
+  delhiveryLastTrackedAt?: string;
   items?: Array<{ name: string; quantity: number; price: string; productId?: string; image?: string; variantName?: string; variantImage?: string; size?: string; promotion?: PromotionCartLine }>;
 };
 const adminOrders: OrderRecord[] = [];
@@ -5184,6 +5189,53 @@ function OrdersWorkspace({
     };
   }, []);
 
+  const delhiveryOrderKey = useMemo(() => orders.filter((order) => order.delhiveryAwb).map((order) => `${order.id}::${order.delhiveryAwb}`).sort().join("|"), [orders]);
+
+  useEffect(() => {
+    if (!delhiveryOrderKey) return;
+    let active = true;
+    const orderWaybills = delhiveryOrderKey.split("|").map((value) => {
+      const [id, waybill] = value.split("::");
+      return { id, waybill };
+    });
+    const refreshTracking = async () => {
+      const updates = await Promise.all(orderWaybills.map(async ({ id, waybill }) => {
+        try {
+          const response = await fetch("/api/delhivery/track", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: id, waybill }), cache: "no-store" });
+          if (!response.ok) return null;
+          const body = await response.json() as { tracking?: { status?: string; statusType?: string; statusDate?: string; location?: string } };
+          return body.tracking ? { id, tracking: body.tracking } : null;
+        } catch {
+          return null;
+        }
+      }));
+      if (!active) return;
+      const byOrder = new Map(updates.filter((update): update is NonNullable<typeof update> => Boolean(update)).map((update) => [update.id, update.tracking]));
+      if (!byOrder.size) return;
+      const trackedAt = new Date().toISOString();
+      setOrders((current) => current.map((order) => {
+        const tracking = byOrder.get(order.id);
+        if (!tracking) return order;
+        return { ...order, delhiveryLiveStatus: tracking.status || order.delhiveryLiveStatus, delhiveryLiveStatusType: tracking.statusType || order.delhiveryLiveStatusType, delhiveryLiveStatusDate: tracking.statusDate || order.delhiveryLiveStatusDate, delhiveryLiveLocation: tracking.location || order.delhiveryLiveLocation, delhiveryLastTrackedAt: trackedAt };
+      }));
+    };
+    void refreshTracking();
+    const trackingTimer = window.setInterval(() => { void refreshTracking(); }, 60_000);
+    return () => {
+      active = false;
+      window.clearInterval(trackingTimer);
+    };
+  }, [delhiveryOrderKey]);
+
+  useEffect(() => {
+    if (!selectedOrder) return;
+    const refreshed = orders.find((order) => order.id === selectedOrder.id);
+    if (!refreshed) return;
+    const selectedTracking = [selectedOrder.delhiveryLiveStatus, selectedOrder.delhiveryLastTrackedAt].join("|");
+    const refreshedTracking = [refreshed.delhiveryLiveStatus, refreshed.delhiveryLastTrackedAt].join("|");
+    if (selectedTracking !== refreshedTracking) setSelectedOrder(refreshed);
+  }, [orders, selectedOrder?.id]);
+
   const persistOrders = async (next: OrderRecord[]) => {
     setOrders(next);
     window.localStorage.setItem("fanzzy-orders", JSON.stringify(next));
@@ -5460,6 +5512,7 @@ function OrdersWorkspace({
               <small className="order-list-products">Customer ID: {order.userId || "Legacy / guest"} · {order.customerName}</small>
               <small className="order-list-products">{order.items?.map((item) => item.name).join(", ") || "No saved item details"}</small>
               <small className="order-list-products">Payment: {order.paymentStatus === "paid" ? "Paid" : "Awaiting Razorpay confirmation"} · Inventory: {order.inventoryAdjusted === true ? "Updated" : "Pending"}</small>
+              {order.fulfillmentMethod !== "pickup" && <small className="order-list-products">Delhivery: {order.delhiveryLiveStatus || (order.delhiveryAwb ? "Shipment created" : "Awaiting shipment")}</small>}
             </span>
             <i className={`status-pill ${order.status.toLowerCase()}`}>
               {order.status}
@@ -5499,7 +5552,7 @@ function OrdersWorkspace({
                 {formatOrderDate(selectedOrder.date)}{formatOrderTime(selectedOrder.createdAt) ? ` · ${formatOrderTime(selectedOrder.createdAt)}` : ""} · {selectedOrder.total}
               </p>
               <p className="product-detail-meta">Payment: {selectedOrder.paymentStatus === "paid" ? "Paid" : "Awaiting Razorpay confirmation"}{selectedOrder.razorpayPaymentId ? ` · Razorpay payment ${selectedOrder.razorpayPaymentId}` : selectedOrder.razorpayOrderId ? ` · Razorpay order ${selectedOrder.razorpayOrderId}` : ""}</p>
-              {selectedOrder.fulfillmentMethod !== "pickup" && <section className="admin-customer-details admin-delhivery-details"><p className="eyebrow">DELHIVERY SHIPMENT</p>{selectedOrder.delhiveryAwb ? <dl><div><dt>AWB</dt><dd>{selectedOrder.delhiveryAwb}</dd></div><div><dt>Status</dt><dd>{selectedOrder.delhiveryShipmentStatus === "created" ? "Manifested" : selectedOrder.delhiveryShipmentStatus || "Available"}</dd></div></dl> : <p className="product-detail-meta">{selectedOrder.delhiveryShipmentStatus === "pending" ? "Shipment creation is in progress." : selectedOrder.delhiveryShipmentStatus === "failed" ? "Shipment creation needs attention before tracking can be shown." : "Shipment will be created automatically after payment confirmation."}</p>}{selectedOrder.delhiveryAwb && <a className="module-secondary admin-delhivery-link" href={selectedOrder.delhiveryTrackingUrl || `https://www.delhivery.com/tracking?uniqueIdentifier=${encodeURIComponent(selectedOrder.delhiveryAwb)}`} target="_blank" rel="noreferrer">Open Delhivery tracking ↗</a>}</section>}
+              {selectedOrder.fulfillmentMethod !== "pickup" && <section className="admin-customer-details admin-delhivery-details"><p className="eyebrow">DELHIVERY SHIPMENT</p>{selectedOrder.delhiveryAwb ? <dl><div><dt>AWB</dt><dd>{selectedOrder.delhiveryAwb}</dd></div><div><dt>Live status</dt><dd>{selectedOrder.delhiveryLiveStatus || (selectedOrder.delhiveryShipmentStatus === "created" ? "Manifested" : "Available")}</dd></div>{selectedOrder.delhiveryLiveLocation && <div><dt>Location</dt><dd>{selectedOrder.delhiveryLiveLocation}</dd></div>}{selectedOrder.delhiveryLastTrackedAt && <div><dt>Last checked</dt><dd>{formatOrderTime(selectedOrder.delhiveryLastTrackedAt)}</dd></div>}</dl> : <p className="product-detail-meta">{selectedOrder.delhiveryShipmentStatus === "pending" ? "Shipment creation is in progress." : selectedOrder.delhiveryShipmentStatus === "failed" ? "Shipment creation needs attention before tracking can be shown." : "Shipment will be created automatically after payment confirmation."}</p>}{selectedOrder.delhiveryAwb && <a className="module-secondary admin-delhivery-link" href={selectedOrder.delhiveryTrackingUrl || `https://www.delhivery.com/tracking?uniqueIdentifier=${encodeURIComponent(selectedOrder.delhiveryAwb)}`} target="_blank" rel="noreferrer">Open Delhivery tracking ↗</a>}</section>}
               <section className="admin-customer-details"><p className="eyebrow">CUSTOMER &amp; ORDER IDS</p><dl><div><dt>Order ID</dt><dd>{selectedOrder.id}</dd></div><div className="admin-customer-account"><dt>Customer Account ID</dt><dd>{selectedOrder.userId || "Legacy / guest order"}</dd></div><div><dt>Name</dt><dd>{selectedOrder.customerName || "Not provided"}</dd></div><div><dt>Login mobile</dt><dd>{selectedOrder.userPhone || selectedOrder.phone || "Not provided"}</dd></div><div><dt>Email</dt><dd>{selectedOrder.email || selectedOrder.userEmail || "Not provided"}</dd></div><div><dt>WhatsApp</dt><dd>{selectedOrder.phone || "Not provided"}</dd></div><div><dt>Fulfilment</dt><dd>{selectedOrder.fulfillmentMethod === "pickup" ? `Pickup from ${selectedOrder.pickupHubName || "hub"}` : "Delivery"}</dd></div><div className="admin-customer-address"><dt>{selectedOrder.fulfillmentMethod === "pickup" ? "Pickup hub / place" : "Delivery address"}</dt><dd>{selectedOrder.fulfillmentMethod === "pickup" ? `${selectedOrder.pickupHubName || "Hub"} · ${selectedOrder.pickupHubPlace || selectedOrder.address || "Place not saved"}` : selectedOrder.address || "Not provided"}</dd></div></dl>{selectedOrder.razorpayPaymentId && <button className="module-secondary admin-restore-payment-details" type="button" onClick={() => void restoreOrderDetailsFromRazorpay()}>Restore delivery details from Razorpay</button>}</section>
               {selectedOrder.items?.length ? <section className="admin-order-items"><p className="eyebrow">ITEMS IN THIS ORDER · {selectedOrder.items.length} LINES</p><div>{selectedOrder.items.map((item, itemIndex) => { const product = getOrderedProduct(item); const size = item.size || item.name.match(/(?:^| · )Size (.+)$/i)?.[1] || ""; const variant = item.variantName || (item.name.includes(" · ") ? item.name.split(" · ").slice(1).filter((part) => !/^Size /i.test(part)).join(" · ") : ""); const promotion = item.promotion; const promotionRole = promotion?.role === "free" ? "FREE ITEM" : promotion?.role === "bundle" ? "BUNDLE ITEM" : "PAID ITEM"; const selectedVariant = size ? product?.variants.find((candidate) => String(candidate.size || candidate.name).trim().replace(/^size\s+/i, "").toLowerCase() === size.trim().replace(/^size\s+/i, "").toLowerCase()) : variant ? product?.variants.find((candidate) => candidate.name.trim().toLowerCase() === variant.trim().toLowerCase()) : undefined; const selectionStock = selectedVariant?.stock ?? product?.stock; const displayImage = item.variantImage || selectedVariant?.image || item.image || product?.image; const imageAlt = variant ? `${item.name} variant` : item.name; return <article key={`${selectedOrder.id}-${item.productId || item.name}-${variant}-${size}-${promotion?.groupId || "legacy"}-${itemIndex}`}><>{displayImage ? <button className="admin-order-image-button" type="button" onClick={() => setEnlargedOrderImage({ src: displayImage, alt: imageAlt })} aria-label={`Enlarge ${imageAlt}`}><img src={displayImage} alt={imageAlt} /></button> : <span className="admin-order-item-placeholder" aria-hidden="true">✦</span>}</><span><strong>{item.name}</strong>{promotion && <small className={`admin-order-promotion ${promotion.role === "free" ? "is-free" : ""}`}>{promotionRole} · {promotion.label}</small>}{product ? <><small>{product.category} · SKU {product.sku}</small><small>Current {size ? `size ${size}` : variant ? "variant" : "product"} stock: {selectionStock} · {product.status}</small></> : <small>Product no longer in the catalog</small>}{variant && <small>Selected variant: {variant}{displayImage ? " · Variant image shown" : ""}</small>}{size && <small>Selected size: {size}</small>}{promotion && promotion.regularPrice !== promotion.linePrice && <small>Regular value: {formatAdminCurrency(promotion.regularPrice)} · Allocated price: {item.price}</small>}<em>Quantity ordered: {item.quantity}</em></span><b>{item.price}</b></article>; })}</div></section> : <section className="admin-order-items admin-order-item-repair"><p className="eyebrow">ADD MISSING ORDER DETAILS</p><p>This older paid order has no saved product information. Select the product and variant to restore its order record.</p><div className="admin-order-item-repair-fields"><label>Product<select value={orderItemDraft.productId} onChange={(event) => { const product = catalogProducts.find((candidate) => candidate.id === event.target.value); setOrderItemDraft({ productId: event.target.value, variantName: "", quantity: "1", price: product ? `₹${product.price.toLocaleString("en-IN")}` : "" }); }}><option value="">Select product</option>{catalogProducts.map((product) => <option key={product.id} value={product.id}>{product.name} · {product.sku}</option>)}</select></label>{draftProduct?.variants.length ? <label>Variant<select value={orderItemDraft.variantName} onChange={(event) => setOrderItemDraft((current) => ({ ...current, variantName: event.target.value }))}><option value="">Select variant</option>{draftProduct.variants.map((variant, index) => <option key={`${variant.name}-${index}`} value={variant.name}>{variant.name || `Option ${index + 1}`}</option>)}</select></label> : null}<label>Quantity<input type="number" min="1" value={orderItemDraft.quantity} onChange={(event) => setOrderItemDraft((current) => ({ ...current, quantity: event.target.value }))} /></label><label>Price<input value={orderItemDraft.price} onChange={(event) => setOrderItemDraft((current) => ({ ...current, price: event.target.value }))} placeholder="₹0" /></label></div>{draftProduct && <div className="admin-order-item-repair-preview">{orderItemDraft.variantName && draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image ? <img src={draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image} alt="Selected variant preview" /> : draftProduct.image ? <img src={draftProduct.image} alt="Selected product preview" /> : null}<span>{orderItemDraft.variantName ? `Selected variant: ${orderItemDraft.variantName}` : "Select a variant if applicable"}</span></div>}<button className="module-primary" type="button" onClick={addMissingOrderItem}>Add to this order</button></section>}
               <div className="order-status-editor">

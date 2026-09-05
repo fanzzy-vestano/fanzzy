@@ -204,11 +204,12 @@ const trackingScans = (value: unknown) => {
   if (!Array.isArray(value)) return [];
   return value.map((scan) => {
     const record = scan && typeof scan === "object" ? scan as Record<string, unknown> : {};
+    const detail = record.ScanDetail && typeof record.ScanDetail === "object" ? record.ScanDetail as Record<string, unknown> : record;
     return {
-      status: String(record.Scan || record.status || record.Status || record.Instructions || "Update").trim(),
-      date: String(record.ScanDateTime || record.StatusDateTime || record.date || "").trim() || undefined,
-      location: String(record.ScannedLocation || record.location || "").trim() || undefined,
-      instructions: String(record.Instructions || record.instruction || "").trim() || undefined,
+      status: String(detail.Scan || detail.status || detail.Status || detail.Instructions || "Update").trim(),
+      date: String(detail.ScanDateTime || detail.StatusDateTime || detail.date || "").trim() || undefined,
+      location: String(detail.ScannedLocation || detail.location || "").trim() || undefined,
+      instructions: String(detail.Instructions || detail.instruction || "").trim() || undefined,
     };
   }).filter((scan) => scan.status);
 };
@@ -225,14 +226,15 @@ export async function trackDelhiveryShipment(waybill: string, refId?: string): P
   if (!response.ok) throw delhiveryError("Delhivery tracking request failed.", response.status);
   const root = value && typeof value === "object" ? value as Record<string, unknown> : {};
   const shipment = Array.isArray(root.ShipmentData) ? root.ShipmentData[0] as Record<string, unknown> | undefined : undefined;
-  const status = shipment?.Shipment && typeof shipment.Shipment === "object" ? shipment.Shipment as Record<string, unknown> : {};
-  const scans = trackingScans(status.Scans || shipment?.Scans);
+  const shipmentDetails = shipment?.Shipment && typeof shipment.Shipment === "object" ? shipment.Shipment as Record<string, unknown> : {};
+  const status = shipmentDetails.Status && typeof shipmentDetails.Status === "object" ? shipmentDetails.Status as Record<string, unknown> : {};
+  const scans = trackingScans(shipmentDetails.Scans || shipment?.Scans);
   return {
     waybill: waybill.trim(),
-    status: String(status.Status || status.status || root.status || (scans[0]?.status || "Tracking available")).trim(),
+    status: String(status.Status || status.status || (typeof shipmentDetails.Status === "string" ? shipmentDetails.Status : "") || root.status || (scans[0]?.status || "Tracking available")).trim(),
     statusType: String(status.StatusType || status.status_type || "").trim() || undefined,
     statusDate: String(status.StatusDateTime || status.status_date || "").trim() || undefined,
-    location: String(status.Destination || status.Origin || "").trim() || undefined,
+    location: String(status.StatusLocation || status.location || shipmentDetails.Destination || shipmentDetails.Origin || "").trim() || undefined,
     scans,
   };
 }

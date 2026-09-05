@@ -1,4 +1,4 @@
-import { manifestDelhiveryShipment } from "./delhivery";
+import { manifestDelhiveryShipment, trackDelhiveryShipment } from "./delhivery";
 
 type StoredOrder = {
   id: string;
@@ -30,6 +30,11 @@ type StoredOrder = {
   delhiveryShipmentError?: string;
   delhiveryShipmentCreatedAt?: string;
   delhiveryShipmentRequestedAt?: string;
+  delhiveryLiveStatus?: string;
+  delhiveryLiveStatusType?: string;
+  delhiveryLiveStatusDate?: string;
+  delhiveryLiveLocation?: string;
+  delhiveryLastTrackedAt?: string;
   couponDiscount?: number;
   promotionDiscount?: number;
   shippingTotal?: number;
@@ -459,6 +464,24 @@ async function finalizeRazorpayPaymentInternal(payment: RazorpayPayment, receipt
 
 export async function finalizeRazorpayPayment(payment: RazorpayPayment, receipt?: string) {
   return withInventoryMutationLock(() => finalizeRazorpayPaymentInternal(payment, receipt));
+}
+
+export async function refreshDelhiveryOrderTracking(orderId: string, waybill: string) {
+  return withInventoryMutationLock(async () => {
+    const orders = await readOrders();
+    const order = orders.find((candidate) => candidate.id === orderId && candidate.delhiveryAwb === waybill);
+    if (!order) throw new Error("The Delhivery shipment could not be matched to this order.");
+    const tracking = await trackDelhiveryShipment(waybill, order.id);
+    order.delhiveryLiveStatus = tracking.status;
+    order.delhiveryLiveStatusType = tracking.statusType;
+    order.delhiveryLiveStatusDate = tracking.statusDate;
+    order.delhiveryLiveLocation = tracking.location;
+    order.delhiveryLastTrackedAt = new Date().toISOString();
+    if (/delivered/i.test(tracking.status)) order.status = "Delivered";
+    else if (/(picked|dispatched|in transit|out for delivery|shipped)/i.test(tracking.status) && order.status === "Processing") order.status = "Shipped";
+    await writeOrders(orders);
+    return tracking;
+  });
 }
 
 export async function reserveOrderInventory(orderId: string) {
