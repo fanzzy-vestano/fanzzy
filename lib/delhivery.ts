@@ -208,6 +208,9 @@ const indiaDateParts = (date: Date) => {
   return { year: Number(get("year")), month: Number(get("month")), day: Number(get("day")), weekday: get("weekday") };
 };
 
+const indiaDateString = (parts: ReturnType<typeof indiaDateParts>) =>
+  `${String(parts.year).padStart(4, "0")}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
+
 const nextPickupDate = () => {
   const current = indiaDateParts(new Date());
   const date = new Date(Date.UTC(current.year, current.month - 1, current.day));
@@ -219,7 +222,11 @@ const nextPickupDate = () => {
   return date.toISOString().slice(0, 10);
 };
 
-export const delhiveryPickupSchedule = () => ({ pickupDate: nextPickupDate(), pickupTime: validPickupTime(config().pickupTime) });
+export const delhiveryPickupSchedule = () => ({
+  pickupDate: nextPickupDate(),
+  pickupTime: validPickupTime(config().pickupTime),
+  currentDate: indiaDateString(indiaDateParts(new Date())),
+});
 
 export async function createDelhiveryPickupRequest(expectedPackageCount: number): Promise<DelhiveryPickupRequestResult> {
   const current = config();

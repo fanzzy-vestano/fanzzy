@@ -220,13 +220,13 @@ async function ensureDelhiveryPickupRequest(orders: StoredOrder[], order: Stored
   if (order.delhiveryPickupRequestStatus === "pending") return;
 
   const schedule = delhiveryPickupSchedule();
-  if (order.delhiveryPickupRequestStatus === "created" && order.delhiveryPickupRequestDate === schedule.pickupDate) return;
+  if (order.delhiveryPickupRequestStatus === "created" && (order.delhiveryPickupRequestDate || "") >= schedule.currentDate) return;
 
   // Delhivery raises pickup requests against a warehouse, not an individual
   // AWB. Cover later orders with the request already created for this slot.
   const existingRequest = orders.find((candidate) =>
     candidate.id !== order.id
-    && candidate.delhiveryPickupRequestDate === schedule.pickupDate
+    && (candidate.delhiveryPickupRequestDate || "") >= schedule.currentDate
     && ["pending", "created", "covered"].includes(candidate.delhiveryPickupRequestStatus || ""),
   );
   if (existingRequest) {
