@@ -104,11 +104,19 @@ const getPincodeServiceability = async (pincode: string, token: string) => {
   const { value } = await safeJson(response);
   if (!response.ok) throw delhiveryError("Delhivery pincode serviceability check failed.", response.status);
   const row = value && typeof value === "object" && Array.isArray((value as { delivery_codes?: unknown[] }).delivery_codes)
-    ? (value as { delivery_codes: Array<{ postal_code?: unknown; pre_paid?: unknown; remarks?: unknown }> }).delivery_codes[0]
+    ? (value as { delivery_codes: Array<Record<string, unknown>> }).delivery_codes[0]
     : undefined;
-  if (!row || String(row.postal_code || "") !== pincode) throw delhiveryError("This delivery pincode is not serviceable by Delhivery.");
-  if (String(row.pre_paid || "").toUpperCase() !== "Y") throw delhiveryError("This delivery pincode is not serviceable for prepaid shipments.");
-  if (/embargo|not serviceable|nsz/i.test(String(row.remarks || ""))) throw delhiveryError("This delivery pincode is currently unavailable for Delhivery shipments.");
+  const postalCodeDetails = row?.postal_code && typeof row.postal_code === "object"
+    ? row.postal_code as Record<string, unknown>
+    : row;
+  const returnedPincode = String(
+    postalCodeDetails?.pin ?? postalCodeDetails?.pincode ?? postalCodeDetails?.postal_code ?? "",
+  ).trim();
+  const prepaid = String(postalCodeDetails?.pre_paid ?? row?.pre_paid ?? "").toUpperCase();
+  const remarks = String(postalCodeDetails?.remarks ?? row?.remarks ?? "");
+  if (!row || returnedPincode !== pincode) throw delhiveryError("This delivery pincode is not serviceable by Delhivery.");
+  if (prepaid !== "Y") throw delhiveryError("This delivery pincode is not serviceable for prepaid shipments.");
+  if (/embargo|not serviceable|nsz/i.test(remarks)) throw delhiveryError("This delivery pincode is currently unavailable for Delhivery shipments.");
 };
 
 const shipmentWaybill = (value: unknown): string => {
