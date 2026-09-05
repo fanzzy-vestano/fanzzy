@@ -1,3 +1,5 @@
+import { manifestDelhiveryShipment } from "./delhivery";
+
 type StoredOrder = {
   id: string;
   userId?: string;
@@ -11,6 +13,10 @@ type StoredOrder = {
   phone: string;
   email?: string;
   address?: string;
+  fulfillmentMethod?: "delivery" | "pickup";
+  pickupHubId?: string;
+  pickupHubName?: string;
+  pickupHubPlace?: string;
   paymentStatus?: "pending" | "paid";
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
@@ -18,10 +24,16 @@ type StoredOrder = {
   inventoryReservedAt?: string;
   inventoryReleased?: boolean;
   inventoryAdjusted?: boolean;
+  delhiveryAwb?: string;
+  delhiveryTrackingUrl?: string;
+  delhiveryShipmentStatus?: "pending" | "created" | "failed" | "skipped";
+  delhiveryShipmentError?: string;
+  delhiveryShipmentCreatedAt?: string;
+  delhiveryShipmentRequestedAt?: string;
   couponDiscount?: number;
   promotionDiscount?: number;
   shippingTotal?: number;
-  items?: Array<{ name: string; quantity: number; price: string; regularPrice?: number; productId?: string; variantName?: string; size?: string; vendorId?: string | null; vendorName?: string; vendorSlug?: string }>;
+  items?: Array<{ name: string; quantity: number; price: string; regularPrice?: number; productId?: string; variantName?: string; size?: string; hsnCode?: string; vendorId?: string | null; vendorName?: string; vendorSlug?: string }>;
 };
 
 import { syncVendorOrderForPaidOrder } from "./vendor-server";
@@ -118,6 +130,31 @@ async function writeJsonSetting(key: string, value: unknown) {
     body: JSON.stringify([{ key, value: JSON.stringify(value), updated_at: new Date().toISOString() }]),
   });
   if (!response.ok) throw new Error(`Could not update ${key}`);
+}
+
+const delhiveryFailureMessage = (error: unknown) => {
+  const message = error instanceof Error ? error.message : "Delhivery shipment creation failed.";
+  return message.replace(/\s+/g, " ").trim().slice(0, 240);
+};
+
+async function ensureDelhiveryShipment(orders: StoredOrder[], order: StoredOrder) {
+  if (order.fulfillmentMethod === "pickup" || order.delhiveryAwb || order.delhiveryShipmentStatus === "pending" || order.delhiveryShipmentStatus === "failed") return;
+  order.delhiveryShipmentStatus = "pending";
+  order.delhiveryShipmentRequestedAt = new Date().toISOString();
+  await writeOrders(orders);
+  try {
+    const shipment = await manifestDelhiveryShipment(order);
+    order.delhiveryAwb = shipment.waybill;
+    order.delhiveryTrackingUrl = shipment.trackingUrl;
+    order.delhiveryShipmentStatus = "created";
+    order.delhiveryShipmentCreatedAt = new Date().toISOString();
+    if (order.status === "Processing") order.status = "Shipped";
+    delete order.delhiveryShipmentError;
+  } catch (error) {
+    order.delhiveryShipmentStatus = "failed";
+    order.delhiveryShipmentError = delhiveryFailureMessage(error);
+  }
+  await writeOrders(orders);
 }
 
 const normalizeSelection = (value?: string) => String(value || "").trim().replace(/^size\s+/i, "").toLowerCase();
@@ -368,6 +405,7 @@ async function finalizeRazorpayPaymentInternal(payment: RazorpayPayment, receipt
     restorePaymentContactDetails(order, payment);
     await writeOrders(orders);
     await syncVendorOrderForPaidOrder(order).catch(() => undefined);
+    await ensureDelhiveryShipment(orders, order);
     return order;
   }
 
@@ -415,6 +453,7 @@ async function finalizeRazorpayPaymentInternal(payment: RazorpayPayment, receipt
   }
   await writeOrders(orders);
   await syncVendorOrderForPaidOrder(order).catch(() => undefined);
+  if (order.fulfillmentMethod !== "pickup") await ensureDelhiveryShipment(orders, order);
   return order;
 }
 
