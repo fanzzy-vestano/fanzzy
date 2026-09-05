@@ -413,6 +413,7 @@ const siteAsset = (name: string) => `${siteBasePath}/${name}`;
 const productTones = ["#d9c4bc", "#dad7ce", "#d0c2b0", "#e5ddd1"];
 const formatOrderDate = (value: string) => new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", year: "numeric" }).format(new Date(`${value}T00:00:00`));
 const formatOrderTime = (value?: string) => value ? new Intl.DateTimeFormat("en-IN", { hour: "2-digit", minute: "2-digit" }).format(new Date(value)) : "";
+const customerShipmentStatus = (status?: string) => /^manifested$/i.test(String(status || "").trim()) ? "Confirmed" : status || "Shipment created";
 const normalizeCouponCode = (value?: string) => String(value || "").trim().replace(/\s+/g, "").toUpperCase();
 const parseAgentCoupons = (stored: string | null): MarketingRecord[] => {
   if (!stored) return [];
@@ -2632,7 +2633,11 @@ export default function Home() {
 
   const visibleOrders = useMemo(() => {
     if (!authUser) return [];
-    return orders.filter((order) => isCustomerOrder(order, authUser));
+    return orders.filter((order) => isCustomerOrder(order, authUser)).map((order) => (
+      /^manifested$/i.test(String(order.delhiveryLiveStatus || "").trim())
+        ? { ...order, delhiveryLiveStatus: customerShipmentStatus(order.delhiveryLiveStatus) }
+        : order
+    ));
   }, [authUser, orders]);
   const assistantReply = (message: string) => {
     const query = message.toLowerCase();
