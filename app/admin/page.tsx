@@ -5487,12 +5487,12 @@ function OrdersWorkspace({
   const downloadBill = async (order: OrderRecord) => {
     if (printingBillId) return;
     setPrintingBillId(order.id);
-    onNotify(`Sending ${order.id} to Essae PR-55…`);
+    onNotify(`Opening print options for ${order.id}…`);
     try {
       const printed = await printOrderBill(order);
-      onNotify(printed ? `Bill ${order.id} sent to Essae PR-55` : "Printing failed: Essae printer is unavailable");
+      onNotify(printed ? `Print window opened for bill ${order.id}` : "Printing failed: allow popups and try again");
     } catch {
-      onNotify("Printing failed: Essae printer is unavailable");
+      onNotify("Printing failed: allow popups and try again");
     } finally {
       setPrintingBillId(null);
     }

@@ -2771,12 +2771,12 @@ export default function Home() {
   const downloadBill = async (order: CustomerOrder) => {
     if (printingBillId) return;
     setPrintingBillId(order.id);
-    announce(`Sending ${order.id} to Essae PR-55…`);
+    announce(`Opening print options for ${order.id}…`);
     try {
       const printed = await printOrderBill(order);
-      announce(printed ? `Bill ${order.id} sent to Essae PR-55` : "Printing failed: Essae printer is unavailable");
+      announce(printed ? `Print window opened for bill ${order.id}` : "Printing failed: allow popups and try again");
     } catch {
-      announce("Printing failed: Essae printer is unavailable");
+      announce("Printing failed: allow popups and try again");
     } finally {
       setPrintingBillId(null);
     }

@@ -161,17 +161,17 @@ const printableBillMarkup = (order: BillOrder, design: BillDesignSettings, origi
   </main></body></html>`;
 };
 
-const waitForReceiptImages = async () => {
-  const receiptElement = document.querySelector<HTMLElement>("[data-receipt-element]");
+const waitForReceiptImages = async (targetDocument: Document) => {
+  const receiptElement = targetDocument.querySelector<HTMLElement>("[data-receipt-element]");
   if (!receiptElement) return;
   await Promise.all(
     Array.from(receiptElement.querySelectorAll("img")).map(
       (img) =>
         img.complete
           ? Promise.resolve()
-          : new Promise<void>((resolve, reject) => {
+          : new Promise<void>((resolve) => {
               img.onload = () => resolve();
-              img.onerror = () => reject(new Error("Receipt image failed to load"));
+              img.onerror = () => resolve();
             })
     )
   );
@@ -179,34 +179,22 @@ const waitForReceiptImages = async () => {
 
 export const printOrderBill = async (order: BillOrder) => {
   if (typeof window === "undefined") return false;
+  // Open immediately while the click still has browser user activation. This
+  // keeps printing available on mobile browsers that block delayed popups.
+  const printWindow = window.open("", "_blank", "popup=yes,width=460,height=760");
+  if (!printWindow) return false;
 
-  await waitForReceiptImages();
-
-  const payload = JSON.stringify({
-    order,
-    printerName: "Essae PR-55",
-    design: billDesignSettings(),
-  });
-  const requests = [
-    () => fetch("http://127.0.0.1:3002/print", {
-      method: "POST",
-      headers: { "Content-Type": "text/plain" },
-      body: payload,
-    }),
-    () => fetch("/api/print-bill", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: payload,
-    }),
-  ];
-
-  for (const request of requests) {
-    try {
-      const response = await request();
-      if (response.ok) return true;
-    } catch {
-      // Try the server-side proxy when the direct local bridge is unavailable.
-    }
+  try {
+    printWindow.document.open();
+    printWindow.document.write(printableBillMarkup(order, billDesignSettings(), window.location.origin));
+    printWindow.document.close();
+    await waitForReceiptImages(printWindow.document);
+    printWindow.focus();
+    printWindow.addEventListener("afterprint", () => printWindow.close(), { once: true });
+    printWindow.print();
+    return true;
+  } catch {
+    printWindow.close();
+    return false;
   }
-  return false;
 };
