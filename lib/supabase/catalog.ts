@@ -301,11 +301,14 @@ export async function saveStoreOrders(orders: unknown[]) {
   return saveStoreSetting("orders", JSON.stringify(orders));
 }
 
+let storeSettingSubscriptionSequence = 0;
+
 export function subscribeToStoreSetting(key: keyof typeof settingKeys, onChange: () => void) {
   const client = supabase;
   if (!client) return () => undefined;
+  storeSettingSubscriptionSequence += 1;
   const channel = client
-    .channel(`fanzzy-${settingKeys[key]}-live`)
+    .channel(`fanzzy-${settingKeys[key]}-live-${storeSettingSubscriptionSequence}`)
     .on("postgres_changes", {
       event: "*",
       schema: "public",
