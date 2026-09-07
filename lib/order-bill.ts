@@ -130,13 +130,14 @@ const printableBillMarkup = (order: BillOrder, design: BillDesignSettings, origi
     .tagline { margin-top: 2mm; }
     .bill-meta { display: flex; justify-content: space-between; margin: 4mm 0; }
     .bill-section { border-bottom: 1px ${separator} #9b8589; padding: 3mm 0; }
-    .billing-section { border-top: 1px ${separator} #9b8589; }
+    .billing-section { border-top: 2px solid #000; }
+    .delivery-section { border-bottom: 2px solid #000; }
     .bill-section p { margin: 1mm 0; }
     .bill-section strong { color: #551a2d; }
     table { border-collapse: collapse; margin: 3mm 0; width: 100%; }
     th { color: #775f66; font-size: 8px; font-weight: 400; text-align: left; text-transform: uppercase; }
     th:not(:first-child), td:not(:first-child) { text-align: right; }
-    td { border-bottom: 1px solid #9b8589; border-top: 1px solid #eadfd9; padding: 2.5mm 0; vertical-align: top; }
+    td { border-bottom: 2px solid #000; border-top: 1px solid #eadfd9; padding: 2.5mm 0; vertical-align: top; }
     td:first-child { max-width: 42mm; overflow-wrap: anywhere; }
     .discount-row { display: flex; justify-content: space-between; padding: 2mm 0; }
     .total { color: #551a2d; display: flex; font-size: 16px; font-weight: 700; justify-content: space-between; padding: 4mm 0; }
@@ -152,7 +153,7 @@ const printableBillMarkup = (order: BillOrder, design: BillDesignSettings, origi
     <div class="bill-meta"><strong>${escapeHtml(order.id)}</strong><span>${escapeHtml(order.date)}</span></div>
     ${design.showStatus ? `<div class="muted">Status: ${escapeHtml(order.status)}</div>` : ""}
     <section class="bill-section billing-section"><div class="eyebrow">Billed to</div><p><strong>${escapeHtml(order.customerName)}</strong></p>${design.showPhone ? `<p>${escapeHtml(order.phone)}</p>${order.email ? `<p>${escapeHtml(order.email)}</p>` : ""}` : ""}</section>
-    ${design.showAddress ? `<section class="bill-section"><div class="eyebrow">Delivery address</div><p>${escapeHtml(order.address || "Address provided at checkout")}</p></section>` : ""}
+    ${design.showAddress ? `<section class="bill-section delivery-section"><div class="eyebrow">Delivery address</div><p>${escapeHtml(order.address || "Address provided at checkout")}</p></section>` : ""}
     <table><thead><tr><th>Item</th><th>Qty</th><th>Unit</th><th>Amount</th></tr></thead><tbody>${items}</tbody></table>
     ${couponLine}
     <div class="total"><span>Total</span><span>${escapeHtml(order.total)}</span></div>
