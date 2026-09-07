@@ -2402,7 +2402,7 @@ function ModuleWorkspace({
   if (module === "Buy 1 Get X Free") return <PromotionOffersWorkspace onNotify={onNotify} />;
   if (module === "Collections")
     return <CollectionsWorkspace onNotify={onNotify} />;
-  if (module === "Customers") return <CustomersWorkspace onNotify={onNotify} />;
+  if (module === "Customers") return <CustomersWorkspaceBoundary onNotify={onNotify} />;
   if (module === "Agents") return <AgentsWorkspace onNotify={onNotify} />;
   if (module === "Settings") return <SettingsWorkspace onNotify={onNotify} />;
   if (module === "Vendors") return <AdminVendorsWorkspace onNotify={onNotify} />;
@@ -3941,14 +3941,42 @@ type CustomerRecord = {
 const defaultCustomers: CustomerRecord[] = [];
 
 const customerIdentity = (customer: Pick<CustomerRecord, "name" | "phone" | "email">) =>
-  customer.phone.replace(/\D/g, "") || customer.email.trim().toLowerCase() || customer.name.trim().toLowerCase();
+  safeOrderString(customer.phone).replace(/\D/g, "") || safeOrderString(customer.email).trim().toLowerCase() || safeOrderString(customer.name).trim().toLowerCase();
+
+const normalizeCustomerRecord = (value: unknown, index: number): CustomerRecord | null => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  const name = safeOrderString(source.name, "Guest customer").trim() || "Guest customer";
+  const phone = safeOrderString(source.phone, "Not provided").trim() || "Not provided";
+  const email = safeOrderString(source.email, "Not provided").trim() || "Not provided";
+  const address = safeOrderString(source.address, "Not provided").trim() || "Not provided";
+  const orders = Math.max(0, Math.trunc(safeOrderNumber(source.orders)));
+  const totalSpent = typeof source.totalSpent === "string"
+    ? source.totalSpent
+    : formatAdminCurrency(safeOrderNumber(source.totalSpent));
+  return {
+    id: safeOrderString(source.id, `customer-saved-${index}`) || `customer-saved-${index}`,
+    name,
+    phone,
+    email,
+    address,
+    orders,
+    totalSpent,
+    lastOrder: safeOrderString(source.lastOrder, "Unknown") || "Unknown",
+    joined: safeOrderString(source.joined, "Unknown") || "Unknown",
+  };
+};
 
 const customersFromOrders = (orders: OrderRecord[]): CustomerRecord[] => {
   const grouped = new Map<string, CustomerRecord & { lastOrderValue: number; joinedValue: number }>();
-  orders.filter(hasConfirmedPayment).forEach((order) => {
-    const name = order.customerName?.trim() || "Guest customer";
-    const phone = (order.userPhone || order.phone || "").trim();
-    const email = (order.userEmail || order.email || "").trim();
+  orders
+    .map(normalizeOrderRecordForDisplay)
+    .filter((order): order is OrderRecord => Boolean(order))
+    .filter(hasConfirmedPayment)
+    .forEach((order) => {
+    const name = safeOrderString(order.customerName, "Guest customer").trim() || "Guest customer";
+    const phone = safeOrderString(order.userPhone || order.phone).trim();
+    const email = safeOrderString(order.userEmail || order.email).trim();
     const identity = customerIdentity({ name, phone, email });
     if (!identity) return;
     const orderValue = Number.isFinite(new Date(order.createdAt || order.date).getTime())
@@ -3968,7 +3996,7 @@ const customersFromOrders = (orders: OrderRecord[]): CustomerRecord[] => {
       }
       if (current.email === "Not provided" && email) current.email = email;
       if (current.phone === "Not provided" && phone) current.phone = phone;
-      if (current.address === "Not provided" && order.address?.trim()) current.address = order.address.trim();
+      if (current.address === "Not provided" && safeOrderString(order.address).trim()) current.address = safeOrderString(order.address).trim();
       return;
     }
     grouped.set(identity, {
@@ -3976,7 +4004,7 @@ const customersFromOrders = (orders: OrderRecord[]): CustomerRecord[] => {
       name,
       phone: phone || "Not provided",
       email: email || "Not provided",
-      address: order.address?.trim() || "Not provided",
+      address: safeOrderString(order.address).trim() || "Not provided",
       orders: 1,
       totalSpent: formatAdminCurrency(parseMoney(order.total)),
       lastOrder: order.date || order.createdAt || "Unknown",
@@ -3989,6 +4017,41 @@ const customersFromOrders = (orders: OrderRecord[]): CustomerRecord[] => {
     .sort((left, right) => right.lastOrderValue - left.lastOrderValue)
     .map(({ lastOrderValue: _lastOrderValue, joinedValue: _joinedValue, ...customer }) => customer);
 };
+
+class CustomersWorkspaceBoundary extends Component<
+  { onNotify: (message: string) => void },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("Customers workspace failed to render", error, info);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <section className="panel module-workspace customers-workspace">
+          <div className="module-workspace-head">
+            <div>
+              <p className="eyebrow">RELATIONSHIPS</p>
+              <h2>Customers</h2>
+              <p>The customer list could not be displayed because a saved record is invalid.</p>
+            </div>
+            <button className="module-primary" onClick={() => this.setState({ hasError: false })}>
+              Retry customer list
+            </button>
+          </div>
+        </section>
+      );
+    }
+    return <CustomersWorkspace onNotify={this.props.onNotify} />;
+  }
+}
 
 function CustomersWorkspace({
   onNotify,
@@ -4017,8 +4080,12 @@ function CustomersWorkspace({
       let savedCustomers: CustomerRecord[] = [];
       if (stored) {
         try {
-          const parsed = JSON.parse(stored) as CustomerRecord[];
-          if (Array.isArray(parsed)) savedCustomers = parsed;
+          const parsed = JSON.parse(stored) as unknown;
+          if (Array.isArray(parsed)) {
+            savedCustomers = parsed
+              .map(normalizeCustomerRecord)
+              .filter((customer): customer is CustomerRecord => Boolean(customer));
+          }
         } catch {
           window.localStorage.removeItem("fanzzy-customers");
         }
@@ -4034,7 +4101,8 @@ function CustomersWorkspace({
       const remoteOrders = ordersRemote.data || [];
       const orders = new Map<string, OrderRecord>();
       [...remoteOrders, ...localOrders].forEach((order) => {
-        if (order?.id && !orders.has(order.id)) orders.set(order.id, order);
+        const normalized = normalizeOrderRecordForDisplay(order);
+        if (normalized?.id && !orders.has(normalized.id)) orders.set(normalized.id, normalized);
       });
       const derivedCustomers = customersFromOrders(Array.from(orders.values()));
       const mergedCustomers = [...savedCustomers];
