@@ -114,7 +114,7 @@ const printableBillMarkup = (order: BillOrder, design: BillDesignSettings, origi
     const unitValue = parseBillMoney(item.price);
     const unit = Number.isFinite(unitValue) ? formatBillMoney(unitValue) : String(item.price ?? "");
     const amount = Number.isFinite(unitValue) ? formatBillMoney(unitValue * quantity) : unit;
-    return `<tr><td>${escapeHtml(item.name)}${item.supplierName ? `<small class="supplier">Supplier: ${escapeHtml(item.supplierName)}</small>` : ""}</td><td>${quantity}</td><td>${escapeHtml(unit)}</td><td>${escapeHtml(amount)}</td></tr>`;
+    return `<tr><td>${escapeHtml(item.name)}</td><td>${quantity}</td><td>${escapeHtml(unit)}</td><td>${escapeHtml(amount)}</td></tr>`;
   }).join("");
   const separator = design.separator === "dashed" ? "dashed" : "dotted";
   return `<!doctype html><html><head><meta charset="utf-8" /><title>${escapeHtml(order.id)} · Fanzzy bill</title><style>
@@ -138,7 +138,6 @@ const printableBillMarkup = (order: BillOrder, design: BillDesignSettings, origi
     th:not(:first-child), td:not(:first-child) { text-align: right; }
     td { border-bottom: 1px solid #9b8589; border-top: 1px solid #eadfd9; padding: 2.5mm 0; vertical-align: top; }
     td:first-child { max-width: 42mm; overflow-wrap: anywhere; }
-    .supplier { color: #775f66; display: block; font-size: 8px; margin-top: 1mm; }
     .discount-row { display: flex; justify-content: space-between; padding: 2mm 0; }
     .total { color: #551a2d; display: flex; font-size: 16px; font-weight: 700; justify-content: space-between; padding: 4mm 0; }
     .qr-section { border-top: 1px dotted #9b8589; margin-top: 4mm; padding-top: 4mm; text-align: center; }
