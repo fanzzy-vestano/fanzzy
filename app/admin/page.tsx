@@ -1,7 +1,7 @@
 ﻿"use client";
 /* eslint-disable @next/next/no-html-link-for-pages */
 
-import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { Component, useEffect, useMemo, useRef, useState, type ChangeEvent, type ErrorInfo } from "react";
 import { Eye, Pencil, Trash2 } from "lucide-react";
 import {
   fetchCatalogCategories,
@@ -2392,7 +2392,7 @@ function ModuleWorkspace({
   if (module === "Reports") return <ReportsWorkspace onNotify={onNotify} view={reportView} />;
   if (module === "Announcement") return <AnnouncementPanel onNotify={onNotify} module />;
   if (module === "Categories") return <CategoryWorkspace onNotify={onNotify} />;
-  if (module === "Orders") return <OrdersWorkspace onNotify={onNotify} />;
+  if (module === "Orders") return <OrdersWorkspaceBoundary onNotify={onNotify} />;
   if (module === "Refund requests") return <RefundRequestsWorkspace onNotify={onNotify} />;
   if (module === "Homepage") return <HomepageWorkspace onNotify={onNotify} />;
   if (module === "Delivery charge")
@@ -5894,6 +5894,68 @@ function OrdersWorkspace({
   );
 }
 
+function OrdersRecoveryWorkspace({
+  onNotify,
+  onRetry,
+}: {
+  onNotify: (message: string) => void;
+  onRetry: () => void;
+}) {
+  const [orders, setOrders] = useState<OrderRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    const loadOrders = async () => {
+      const remote = await fetchStoreOrders<unknown>();
+      if (!active) return;
+      const nextOrders = (remote.data || [])
+        .map(normalizeOrderRecordForDisplay)
+        .filter((order): order is OrderRecord => Boolean(order && !isDemoOrder(order) && hasConfirmedPayment(order)));
+      setOrders(nextOrders);
+      setError(remote.error ? "Live order storage is temporarily unavailable." : "");
+      setLoading(false);
+    };
+    void loadOrders().catch(() => {
+      if (!active) return;
+      setError("Live order storage is temporarily unavailable.");
+      setLoading(false);
+    });
+    return () => { active = false; };
+  }, []);
+
+  return (
+    <section className="panel module-workspace orders-workspace">
+      <div className="module-workspace-head">
+        <div>
+          <p className="eyebrow">OPERATIONS</p>
+          <h2>Orders</h2>
+          <p>Your orders are shown in safe recovery view while the detailed workspace reloads.</p>
+        </div>
+        <div className="module-actions">
+          <button className="module-primary" type="button" onClick={onRetry}>Retry full workspace</button>
+        </div>
+      </div>
+      <div className="orders-recovery-notice" role="status">
+        <span>{error || "The detailed Orders view hit a display problem, so this safe list was opened instead."}</span>
+        <button className="module-secondary" type="button" onClick={() => onNotify("Use Retry full workspace to return to the detailed order controls")}>About this view</button>
+      </div>
+      {loading ? <p className="empty-filter">Loading orders…</p> : orders.length ? <div className="order-list orders-recovery-list">
+        {orders.map((order) => <div key={order.id}>
+          <span>
+            <strong>{order.id}</strong>
+            <small>{order.date} · {order.customerName}</small>
+            <small className="order-list-products">{order.items?.map((item) => item.name).join(", ") || "No saved item details"}</small>
+          </span>
+          <i className={`status-pill ${safeOrderStatus(order.status).toLowerCase()}`}>{safeOrderStatus(order.status)}</i>
+          <b>{order.total}</b>
+        </div>)}
+      </div> : <p className="empty-filter">No confirmed orders found.</p>}
+    </section>
+  );
+}
+
 function HubWorkspace({
   onNotify,
 }: {
@@ -6893,6 +6955,29 @@ function CategoryWorkspace({
       )}
     </section>
   );
+}
+
+class OrdersWorkspaceBoundary extends Component<{
+  onNotify: (message: string) => void;
+}, {
+  hasError: boolean;
+}> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("Orders workspace failed to render", error, info);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return <OrdersRecoveryWorkspace onNotify={this.props.onNotify} onRetry={() => this.setState({ hasError: false })} />;
+    }
+    return <OrdersWorkspace onNotify={this.props.onNotify} />;
+  }
 }
 
 function ProductLibraryWorkspace({

@@ -3782,6 +3782,38 @@
   .report-detail-split { grid-template-columns: 1fr; }
 }
 
+.orders-recovery-notice {
+  align-items: center;
+  background: #f4ebe3;
+  border-left: 2px solid var(--gold);
+  color: var(--admin-muted);
+  display: flex;
+  font-size: 10px;
+  gap: 12px;
+  justify-content: space-between;
+  line-height: 1.5;
+  margin: 18px 0;
+  padding: 12px 14px;
+}
+
+.orders-recovery-notice button {
+  flex: 0 0 auto;
+}
+
+.orders-recovery-list > div {
+  align-items: center;
+  border-bottom: 1px solid #eee9e4;
+  display: grid;
+  gap: 15px;
+  grid-template-columns: 1fr auto auto;
+  padding: 15px 0;
+}
+
+.orders-recovery-list > div > span {
+  display: grid;
+  gap: 4px;
+}
+
 .suppliers-workspace { min-height: 420px; }
 .supplier-count-summary { align-items: end; flex-direction: column; gap: 8px; margin: 0; }
 .supplier-form-card { background: #f6f1eb; display: grid; gap: 20px; margin: 22px 0 24px; padding: 20px; }
