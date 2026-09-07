@@ -43,6 +43,7 @@ type CheckoutErrors = {
   email?: string;
   address?: string;
   pincode?: string;
+  landmark?: string;
   pickupHub?: string;
 };
 
@@ -691,7 +692,7 @@ export default function Home() {
   // Browser storage is restored after hydration so the server and the first
   // client render produce identical markup.
   const [authUser, setAuthUser] = useState<CustomerAuthUser | null>(null);
-  const [checkoutForm, setCheckoutForm] = useState({ name: "", phone: "", email: "", address: "", pincode: "" });
+  const [checkoutForm, setCheckoutForm] = useState({ name: "", phone: "", email: "", address: "", pincode: "", landmark: "" });
   const [checkoutErrors, setCheckoutErrors] = useState<CheckoutErrors>({});
   const checkoutNameRef = useRef<HTMLInputElement>(null);
   const checkoutPhoneRef = useRef<HTMLInputElement>(null);
@@ -2517,7 +2518,7 @@ export default function Home() {
       setCheckoutOpen(false);
       setFulfillmentMethod("delivery");
       setSelectedPickupHubId("");
-      setCheckoutForm({ name: "", phone: "", email: "", address: "", pincode: "" });
+      setCheckoutForm({ name: "", phone: "", email: "", address: "", pincode: "", landmark: "" });
       setIsPaying(false);
       announce(`${existingConfirmation.id} was already confirmed`);
       return;
@@ -2536,7 +2537,7 @@ export default function Home() {
     setCheckoutOpen(false);
     setFulfillmentMethod("delivery");
     setSelectedPickupHubId("");
-    setCheckoutForm({ name: "", phone: "", email: "", address: "", pincode: "" });
+    setCheckoutForm({ name: "", phone: "", email: "", address: "", pincode: "", landmark: "" });
     setCouponInput("");
     setAppliedCoupon(null);
     setIsPaying(false);
@@ -2602,7 +2603,8 @@ export default function Home() {
     if (fulfillmentMethod === "pickup" && !selectedPickupHub) validationErrors.pickupHub = "Select the hub where you will collect this order.";
     if (fulfillmentMethod === "delivery" && !checkoutForm.address.trim()) validationErrors.address = "Enter the complete delivery address.";
     if (fulfillmentMethod === "delivery" && pincode.length !== 6) validationErrors.pincode = "Enter a valid 6-digit delivery pincode.";
-    const firstValidationError = validationErrors.name || validationErrors.email || validationErrors.phone || validationErrors.pickupHub || validationErrors.address || validationErrors.pincode;
+    if (fulfillmentMethod === "delivery" && !checkoutForm.landmark.trim()) validationErrors.landmark = "Enter a nearby landmark for delivery.";
+    const firstValidationError = validationErrors.name || validationErrors.email || validationErrors.phone || validationErrors.pickupHub || validationErrors.address || validationErrors.pincode || validationErrors.landmark;
     if (firstValidationError) {
       setCheckoutErrors(validationErrors);
       requestAnimationFrame(() => {
@@ -2619,7 +2621,7 @@ export default function Home() {
     setCheckoutErrors({});
     const orderAddress = fulfillmentMethod === "pickup" && selectedPickupHub
       ? `Pickup from ${selectedPickupHub.name} · ${selectedPickupHub.place}`
-      : `${checkoutForm.address.trim()}, ${pincode}`;
+      : `${checkoutForm.address.trim()}, Landmark: ${checkoutForm.landmark.trim()}, ${pincode}`;
 
     const orderToken = globalThis.crypto?.randomUUID?.().replace(/-/g, "").slice(-6).toUpperCase() || "000000";
     const orderId = `#FZ-${orderToken}`;
@@ -3077,6 +3079,15 @@ export default function Home() {
                       required
                     />
                     {checkoutErrors.address && <small className="checkout-field-error" id="checkout-address-error">{checkoutErrors.address}</small>}
+                  </label>
+                  <label>
+                    Nearby landmark <span className="required-mark">Required</span>
+                    <input value={checkoutForm.landmark} maxLength={100} required
+                      onChange={(event) => { setCheckoutForm((current) => ({ ...current, landmark: event.target.value })); clearCheckoutError("landmark"); }}
+                      placeholder="Nearby shop, school or building"
+                      aria-invalid={Boolean(checkoutErrors.landmark)}
+                      aria-describedby={checkoutErrors.landmark ? "checkout-landmark-error" : undefined} />
+                    {checkoutErrors.landmark && <small className="checkout-field-error" id="checkout-landmark-error">{checkoutErrors.landmark}</small>}
                   </label>
                   <label>
                     Delivery pincode <span className="required-mark">Required</span>
