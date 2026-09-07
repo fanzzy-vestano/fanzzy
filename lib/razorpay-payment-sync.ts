@@ -648,7 +648,10 @@ export async function refreshDelhiveryOrderTracking(orderId: string, waybill: st
     order.delhiveryLiveStatusDate = tracking.statusDate;
     order.delhiveryLiveLocation = tracking.location;
     order.delhiveryLastTrackedAt = new Date().toISOString();
-    if (/delivered/i.test(tracking.status)) order.status = "Delivered";
+    if (/delivered/i.test(tracking.status)) {
+      order.status = "Delivered";
+      if (order.paymentMethod === "cod") order.paymentStatus = "cod_collected";
+    }
     else if (/(picked|dispatched|in transit|out for delivery|shipped)/i.test(tracking.status) && order.status === "Processing") order.status = "Shipped";
     await writeOrders(orders);
     return tracking;

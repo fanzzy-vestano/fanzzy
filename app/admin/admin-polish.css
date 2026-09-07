@@ -3891,3 +3891,14 @@
 .agent-list-row .agent-payout {
   color: #668963;
 }
+
+/* Overview includes a separate pending-COD card alongside recognised revenue. */
+.admin-content:not(.module-active) .stats-grid {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+@media (max-width: 1100px) {
+  .admin-content:not(.module-active) .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

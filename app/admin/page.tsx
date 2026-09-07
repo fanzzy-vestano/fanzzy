@@ -1159,14 +1159,42 @@ function AdminDashboard() {
       }
       setDashboardOrders(Array.from(merged.values()).filter((order) => order?.date && order?.total && !isDemoOrder(order) && hasConfirmedPayment(order)));
     };
-    syncDashboardOrders();
+    void syncDashboardOrders();
+    const dashboardOrderTimer = window.setInterval(() => { void syncDashboardOrders(); }, 60_000);
+    const unsubscribeFromDashboardOrders = subscribeToStoreSetting("orders", syncDashboardOrders);
     window.addEventListener("storage", syncDashboardOrders);
     window.addEventListener("fanzzy-orders-updated", syncDashboardOrders);
     return () => {
+      window.clearInterval(dashboardOrderTimer);
+      unsubscribeFromDashboardOrders();
       window.removeEventListener("storage", syncDashboardOrders);
       window.removeEventListener("fanzzy-orders-updated", syncDashboardOrders);
     };
   }, []);
+
+  const dashboardDelhiveryOrderKey = useMemo(
+    () => dashboardOrders.filter((order) => order.delhiveryAwb && order.status !== "Delivered" && order.status !== "Cancelled").map((order) => `${order.id}::${order.delhiveryAwb}`).sort().join("|"),
+    [dashboardOrders],
+  );
+
+  useEffect(() => {
+    if (!dashboardDelhiveryOrderKey) return;
+    const orderWaybills = dashboardDelhiveryOrderKey.split("|").map((value) => {
+      const [id, waybill] = value.split("::");
+      return { id, waybill };
+    });
+    const refreshDashboardTracking = async () => {
+      await Promise.all(orderWaybills.map(({ id, waybill }) => fetch("/api/delhivery/track", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ orderId: id, waybill }),
+        cache: "no-store",
+      }).catch(() => undefined)));
+    };
+    void refreshDashboardTracking();
+    const trackingTimer = window.setInterval(() => { void refreshDashboardTracking(); }, 60_000);
+    return () => window.clearInterval(trackingTimer);
+  }, [dashboardDelhiveryOrderKey]);
 
   useEffect(() => {
     const syncRoles = () => {
@@ -1204,12 +1232,17 @@ function AdminDashboard() {
       || (dateRange === "today" && order.date === currentDate)
       || (dateRange === "this-month" && order.date >= monthStart && order.date <= currentDate)
       || (dateRange === "last-month" && order.date >= previousMonthStart && order.date < previousMonthEnd));
-  const periodRevenue = dashboardPeriodOrders.reduce((total, order) => total + (Number(order.total.replace(/[^0-9.]/g, "")) || 0), 0);
+  const isDeliveredOrder = (order: OrderRecord) => order.status === "Delivered" || order.paymentStatus === "cod_collected" || /delivered/i.test(`${order.delhiveryLiveStatus || ""} ${order.delhiveryLiveStatusType || ""}`);
+  const revenueOrders = dashboardPeriodOrders.filter((order) => order.paymentMethod !== "cod" || isDeliveredOrder(order));
+  const pendingCodOrders = dashboardPeriodOrders.filter((order) => order.paymentMethod === "cod" && order.status !== "Cancelled" && !isDeliveredOrder(order));
+  const periodRevenue = revenueOrders.reduce((total, order) => total + (Number(order.total.replace(/[^0-9.]/g, "")) || 0), 0);
+  const pendingCodAmount = pendingCodOrders.reduce((total, order) => total + (Number(order.total.replace(/[^0-9.]/g, "")) || 0), 0);
   const periodCustomers = new Set(dashboardPeriodOrders.map((order) => order.phone || order.customerName || order.id)).size;
   const liveMetrics = {
     revenue: formatAdminCurrency(periodRevenue),
+    codPending: formatAdminCurrency(pendingCodAmount),
     orders: String(dashboardPeriodOrders.length),
-    average: formatAdminCurrency(dashboardPeriodOrders.length ? periodRevenue / dashboardPeriodOrders.length : 0),
+    average: formatAdminCurrency(revenueOrders.length ? periodRevenue / revenueOrders.length : 0),
     customers: String(periodCustomers),
     growth: ["—", "—", "—", "—"],
   };
@@ -1402,6 +1435,12 @@ function AdminDashboard() {
             value={displayedMetrics.revenue}
             change={displayedMetrics.growth[0]}
             note={metricNote}
+          />
+          <Stat
+            label="COD Amount Pending"
+            value={displayedMetrics.codPending}
+            change="—"
+            note={`${pendingCodOrders.length} awaiting delivery`}
           />
           <Stat
             label="Orders"
