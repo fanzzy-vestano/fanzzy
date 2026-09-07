@@ -202,57 +202,101 @@ const indiaDateParts = (date: Date) => {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
     weekday: "short",
   }).formatToParts(date);
   const get = (type: string) => parts.find((part) => part.type === type)?.value || "";
-  return { year: Number(get("year")), month: Number(get("month")), day: Number(get("day")), weekday: get("weekday") };
+  return {
+    year: Number(get("year")),
+    month: Number(get("month")),
+    day: Number(get("day")),
+    hour: Number(get("hour")),
+    minute: Number(get("minute")),
+    weekday: get("weekday"),
+  };
 };
 
 const indiaDateString = (parts: ReturnType<typeof indiaDateParts>) =>
   `${String(parts.year).padStart(4, "0")}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
 
-const nextPickupDate = () => {
-  const current = indiaDateParts(new Date());
-  const date = new Date(Date.UTC(current.year, current.month - 1, current.day));
-  do {
+const businessDate = (year: number, month: number, day: number, daysToAdd: number) => {
+  const date = new Date(Date.UTC(year, month - 1, day));
+  let remaining = daysToAdd;
+  while (remaining > 0) {
     date.setUTCDate(date.getUTCDate() + 1);
     const weekday = new Intl.DateTimeFormat("en-US", { weekday: "short", timeZone: "UTC" }).format(date);
-    if (weekday !== "Sat" && weekday !== "Sun") break;
-  } while (true);
+    if (weekday !== "Sat" && weekday !== "Sun") remaining -= 1;
+  }
   return date.toISOString().slice(0, 10);
 };
 
-export const delhiveryPickupSchedule = () => ({
-  pickupDate: nextPickupDate(),
-  pickupTime: validPickupTime(config().pickupTime),
-  currentDate: indiaDateString(indiaDateParts(new Date())),
-});
+const pickupTimeCandidates = (current: ReturnType<typeof indiaDateParts>) => {
+  const configured = validPickupTime(config().pickupTime);
+  const unique = Array.from(new Set([configured, "14:00:00", "10:00:00"]));
+  const currentMinutes = current.hour * 60 + current.minute;
+  return unique.filter((time) => {
+    const [hour, minute] = time.split(":").map(Number);
+    return hour * 60 + minute >= currentMinutes;
+  });
+};
+
+const pickupScheduleCandidates = () => {
+  const current = indiaDateParts(new Date());
+  const currentDate = indiaDateString(current);
+  const workingDay = current.weekday !== "Sat" && current.weekday !== "Sun";
+  const beforeSameDayCutoff = current.hour < 14;
+  const schedules: Array<{ pickupDate: string; pickupTime: string; currentDate: string }> = [];
+
+  if (workingDay && beforeSameDayCutoff) {
+    pickupTimeCandidates(current).forEach((pickupTime) => schedules.push({ pickupDate: currentDate, pickupTime, currentDate }));
+  }
+
+  // Try the next working day as a fallback. This also handles weekends and
+  // orders placed after Delhivery's same-day cutoff.
+  const nextWorkingDate = businessDate(current.year, current.month, current.day, 1);
+  const nextDayTimes = Array.from(new Set([validPickupTime(config().pickupTime), "10:00:00", "14:00:00"]));
+  nextDayTimes.forEach((pickupTime) => schedules.push({ pickupDate: nextWorkingDate, pickupTime, currentDate }));
+  return schedules;
+};
+
+export const delhiveryPickupSchedule = () => pickupScheduleCandidates()[0];
 
 export async function createDelhiveryPickupRequest(expectedPackageCount: number): Promise<DelhiveryPickupRequestResult> {
   const current = config();
   if (!isDelhiveryPickupConfigured()) throw delhiveryError("Delhivery pickup automation is not fully configured on the server.");
-  const schedule = delhiveryPickupSchedule();
   const count = Math.max(1, Math.floor(Number(expectedPackageCount) || 0));
-  const body = new URLSearchParams({
-    pickup_time: schedule.pickupTime,
-    pickup_date: schedule.pickupDate,
-    pickup_location: current.pickupLocation,
-    expected_package_count: String(count),
-  });
-  const response = await fetch(pickupRequestEndpoint, {
-    method: "POST",
-    headers: { Authorization: `Token ${current.token}`, "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-    body,
-  });
-  const { value } = await safeJson(response);
-  if (!response.ok) throw delhiveryError(`Delhivery pickup request failed: ${responseMessage(value, "request rejected")}`, response.status);
-  return {
-    pickupId: pickupRequestId(value) || undefined,
-    pickupDate: schedule.pickupDate,
-    pickupTime: schedule.pickupTime,
-    expectedPackageCount: count,
-    status: responseMessage(value, "Scheduled"),
-  };
+  let lastError: Error | undefined;
+  for (const schedule of pickupScheduleCandidates()) {
+    const body = JSON.stringify({
+      pickup_time: schedule.pickupTime,
+      pickup_date: schedule.pickupDate,
+      pickup_location: current.pickupLocation,
+      expected_package_count: count,
+    });
+    const response = await fetch(pickupRequestEndpoint, {
+      method: "POST",
+      headers: { Authorization: `Token ${current.token}`, "Content-Type": "application/json", Accept: "application/json" },
+      body,
+    });
+    const { value, text } = await safeJson(response);
+    if (response.ok) {
+      return {
+        pickupId: pickupRequestId(value) || undefined,
+        pickupDate: schedule.pickupDate,
+        pickupTime: schedule.pickupTime,
+        expectedPackageCount: count,
+        status: responseMessage(value, "Scheduled"),
+      };
+    }
+
+    lastError = delhiveryError(`Delhivery pickup request failed: ${responseMessage(value, text.trim() || "request rejected")}`, response.status);
+    // A rejected slot/date can be retried automatically. Do not retry auth,
+    // content-type, or other permanent configuration failures.
+    if (![400, 409, 422].includes(response.status)) break;
+  }
+  throw lastError || delhiveryError("Delhivery pickup request failed: request rejected");
 }
 
 export async function manifestDelhiveryShipment(order: DelhiveryOrder): Promise<DelhiveryShipmentResult> {
