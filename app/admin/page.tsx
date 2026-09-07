@@ -2115,12 +2115,14 @@ function SupplierBillsWorkspace() {
       const suppliers = ensurePreferredSupplier(parseSupplierRecords(storedSuppliers)).suppliers;
       const summaryMap = new Map<string, SupplierBillSummary>();
       suppliers.forEach((supplier) => summaryMap.set(supplier.name.toLowerCase(), { name: supplier.name, entries: 0, units: 0, total: 0, products: [] }));
-      let unassigned: SupplierBillSummary | null = null;
+      const mumbaiKey = "mumbai";
+      const mumbaiSummary = summaryMap.get(mumbaiKey) || { name: "Mumbai", entries: 0, units: 0, total: 0, products: [] };
+      if (!summaryMap.has(mumbaiKey)) summaryMap.set(mumbaiKey, mumbaiSummary);
       products.forEach((product) => {
         const supplierName = (product.supplierName || supplierNames[product.sku] || "").trim();
         const key = supplierName.toLowerCase();
         const summary = key ? summaryMap.get(key) : undefined;
-        const target = summary || (unassigned ||= { name: "Unassigned", entries: 0, units: 0, total: 0, products: [], isUnassigned: true });
+        const target = summary || mumbaiSummary;
         const units = getSupplierBillUnits(product);
         target.entries += 1;
         target.units += units;
@@ -2128,7 +2130,6 @@ function SupplierBillsWorkspace() {
         target.products.push({ name: product.name, sku: product.sku, createdAt: product.createdAt });
       });
       const next = [...summaryMap.values()];
-      if (unassigned) next.push(unassigned);
       if (active) {
         setSummaries(next);
         setLoading(false);
