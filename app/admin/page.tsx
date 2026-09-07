@@ -467,6 +467,26 @@ const isDemoOrder = (order: { id?: string }) => /^#FZ-104[4-8]$/.test(String(ord
 const hasConfirmedPayment = (order: Pick<OrderRecord, "paymentStatus" | "razorpayPaymentId">) => order.paymentStatus === "paid" || order.paymentStatus === "cod_pending" || order.paymentStatus === "cod_collected" || Boolean(order.razorpayPaymentId);
 const safeOrderStatus = (value: unknown): OrderStatus => value === "Packed" || value === "Shipped" || value === "Delivered" || value === "Cancelled" ? value : "Processing";
 const orderListsEqual = (left: OrderRecord[], right: OrderRecord[]) => left.length === right.length && left.every((order, index) => order.id === right[index]?.id && JSON.stringify(order) === JSON.stringify(right[index]));
+const safeOrderString = (value: unknown, fallback = "") => typeof value === "string" ? value : typeof value === "number" || typeof value === "boolean" ? String(value) : fallback;
+const safeOrderNumber = (value: unknown, fallback = 0) => {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+};
+const normalizePromotionForDisplay = (value: unknown): PromotionCartLine | undefined => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>;
+  const role = source.role === "free" || source.role === "bundle" ? source.role : "paid";
+  const groupId = safeOrderString(source.groupId);
+  const offerId = safeOrderString(source.offerId);
+  return {
+    groupId,
+    offerId,
+    role,
+    label: safeOrderString(source.label, "Promotion"),
+    regularPrice: safeOrderNumber(source.regularPrice),
+    linePrice: safeOrderNumber(source.linePrice),
+  };
+};
 const normalizeOrderItemForDisplay = (value: unknown, index: number): OrderItem => {
   const source = value && typeof value === "object" ? value as Partial<OrderItem> & { price?: unknown; quantity?: unknown } : {};
   const quantity = Number(source.quantity);
@@ -480,7 +500,62 @@ const normalizeOrderItemForDisplay = (value: unknown, index: number): OrderItem 
     variantName: typeof source.variantName === "string" ? source.variantName : undefined,
     variantImage: typeof source.variantImage === "string" ? source.variantImage : undefined,
     size: typeof source.size === "string" ? source.size : undefined,
-    promotion: source.promotion,
+    promotion: normalizePromotionForDisplay(source.promotion),
+  };
+};
+const normalizeOrderRecordForDisplay = (value: unknown): OrderRecord | null => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  const id = safeOrderString(source.id);
+  if (!id) return null;
+  const paymentStatus = source.paymentStatus === "paid" || source.paymentStatus === "cod_pending" || source.paymentStatus === "cod_collected" || source.paymentStatus === "pending" ? source.paymentStatus : undefined;
+  const paymentMethod = source.paymentMethod === "cod" || source.paymentMethod === "online" ? source.paymentMethod : undefined;
+  const fulfillmentMethod = source.fulfillmentMethod === "pickup" ? "pickup" : "delivery";
+  const shipmentStatus = source.delhiveryShipmentStatus === "created" || source.delhiveryShipmentStatus === "failed" || source.delhiveryShipmentStatus === "skipped" ? source.delhiveryShipmentStatus : source.delhiveryShipmentStatus === "pending" ? "pending" : undefined;
+  const pickupStatus = source.delhiveryPickupRequestStatus === "created" || source.delhiveryPickupRequestStatus === "covered" || source.delhiveryPickupRequestStatus === "failed" || source.delhiveryPickupRequestStatus === "skipped" ? source.delhiveryPickupRequestStatus : source.delhiveryPickupRequestStatus === "pending" ? "pending" : undefined;
+  return {
+    id,
+    invoiceNumber: safeOrderString(source.invoiceNumber) || undefined,
+    date: safeOrderString(source.date, new Date().toISOString().slice(0, 10)),
+    createdAt: safeOrderString(source.createdAt) || undefined,
+    status: safeOrderStatus(source.status),
+    total: typeof source.total === "string" ? source.total : formatAdminCurrency(safeOrderNumber(source.total)),
+    customerName: safeOrderString(source.customerName, "Customer"),
+    userId: safeOrderString(source.userId) || undefined,
+    userPhone: safeOrderString(source.userPhone) || undefined,
+    userEmail: safeOrderString(source.userEmail) || undefined,
+    phone: safeOrderString(source.phone),
+    email: safeOrderString(source.email) || undefined,
+    address: safeOrderString(source.address) || undefined,
+    fulfillmentMethod,
+    pickupHubId: safeOrderString(source.pickupHubId) || undefined,
+    pickupHubName: safeOrderString(source.pickupHubName) || undefined,
+    pickupHubPlace: safeOrderString(source.pickupHubPlace) || undefined,
+    coupon: safeOrderString(source.coupon) || undefined,
+    couponDiscount: safeOrderNumber(source.couponDiscount) || undefined,
+    paymentStatus,
+    paymentMethod,
+    codCharge: safeOrderNumber(source.codCharge) || undefined,
+    razorpayOrderId: safeOrderString(source.razorpayOrderId) || undefined,
+    razorpayPaymentId: safeOrderString(source.razorpayPaymentId) || undefined,
+    inventoryAdjusted: source.inventoryAdjusted === true,
+    delhiveryAwb: safeOrderString(source.delhiveryAwb) || undefined,
+    delhiveryTrackingUrl: safeOrderString(source.delhiveryTrackingUrl) || undefined,
+    delhiveryShipmentStatus: shipmentStatus,
+    delhiveryShipmentError: safeOrderString(source.delhiveryShipmentError) || undefined,
+    delhiveryShipmentCreatedAt: safeOrderString(source.delhiveryShipmentCreatedAt) || undefined,
+    delhiveryPickupRequestStatus: pickupStatus,
+    delhiveryPickupRequestId: safeOrderString(source.delhiveryPickupRequestId) || undefined,
+    delhiveryPickupRequestDate: safeOrderString(source.delhiveryPickupRequestDate) || undefined,
+    delhiveryPickupRequestTime: safeOrderString(source.delhiveryPickupRequestTime) || undefined,
+    delhiveryPickupExpectedPackageCount: safeOrderNumber(source.delhiveryPickupExpectedPackageCount) || undefined,
+    delhiveryPickupRequestError: safeOrderString(source.delhiveryPickupRequestError) || undefined,
+    delhiveryLiveStatus: safeOrderString(source.delhiveryLiveStatus) || undefined,
+    delhiveryLiveStatusType: safeOrderString(source.delhiveryLiveStatusType) || undefined,
+    delhiveryLiveStatusDate: safeOrderString(source.delhiveryLiveStatusDate) || undefined,
+    delhiveryLiveLocation: safeOrderString(source.delhiveryLiveLocation) || undefined,
+    delhiveryLastTrackedAt: safeOrderString(source.delhiveryLastTrackedAt) || undefined,
+    items: Array.isArray(source.items) ? source.items.map(normalizeOrderItemForDisplay) : [],
   };
 };
 const siteBasePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
@@ -5312,7 +5387,8 @@ function OrdersWorkspace({
         const stored = window.localStorage.getItem("fanzzy-orders");
         const parsed = stored ? JSON.parse(stored) as OrderRecord[] : [];
         if (Array.isArray(parsed)) parsed.forEach((order) => {
-          if (order?.id && !isDemoOrder(order) && hasConfirmedPayment(order)) localOrders.push(order);
+          const normalized = normalizeOrderRecordForDisplay(order);
+          if (normalized && !isDemoOrder(normalized) && hasConfirmedPayment(normalized)) localOrders.push(normalized);
         });
       } catch {
         window.localStorage.removeItem("fanzzy-orders");
@@ -5329,7 +5405,10 @@ function OrdersWorkspace({
       // The shared record is written newest-first. Keep that order as the
       // primary ordering and append only local records not yet synced.
       const merged = new Map<string, OrderRecord>();
-      remote.data?.forEach((order) => { if (order?.id && !isDemoOrder(order) && hasConfirmedPayment(order)) merged.set(order.id, order); });
+      remote.data?.forEach((order) => {
+        const normalized = normalizeOrderRecordForDisplay(order);
+        if (normalized && !isDemoOrder(normalized) && hasConfirmedPayment(normalized)) merged.set(normalized.id, normalized);
+      });
       localOrders.forEach((order) => { if (!merged.has(order.id)) merged.set(order.id, order); });
       const nextOrders = Array.from(merged.values());
       setOrders((current) => orderListsEqual(current, nextOrders) ? current : nextOrders);
