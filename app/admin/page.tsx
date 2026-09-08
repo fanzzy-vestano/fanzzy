@@ -415,7 +415,7 @@ type OrderStatus =
   | "Cancelled";
 type OrderStatusFilter = "all" | OrderStatus;
 type PromotionCartLine = { groupId: string; offerId: string; role: "paid" | "free" | "bundle"; label: string; regularPrice: number; linePrice: number };
-type OrderItem = { name: string; quantity: number; price: string; productId?: string; image?: string; variantName?: string; variantImage?: string; size?: string; promotion?: PromotionCartLine };
+type OrderItem = { name: string; productName?: string; quantity: number; price: string; productId?: string; image?: string; variantName?: string; variantImage?: string; size?: string; promotion?: PromotionCartLine };
 type OrderRecord = {
   id: string;
   invoiceNumber?: string;
@@ -493,6 +493,7 @@ const normalizeOrderItemForDisplay = (value: unknown, index: number): OrderItem 
   const numericPrice = Number(source.price);
   return {
     name: typeof source.name === "string" && source.name.trim() ? source.name : `Unnamed product ${index + 1}`,
+    productName: typeof source.productName === "string" ? source.productName : undefined,
     quantity: Number.isFinite(quantity) ? quantity : 0,
     price: typeof source.price === "string" ? source.price : formatAdminCurrency(Number.isFinite(numericPrice) ? numericPrice : 0),
     productId: typeof source.productId === "string" ? source.productId : undefined,
@@ -5653,6 +5654,7 @@ function OrdersWorkspace({
     const price = orderItemDraft.price.trim() || `₹${draftProduct.price.toLocaleString("en-IN")}`;
     const item = {
       productId: draftProduct.id,
+      productName: draftProduct.name,
       name: `${draftProduct.name}${variant?.name ? ` · ${variant.name}` : ""}`,
       quantity,
       price,
