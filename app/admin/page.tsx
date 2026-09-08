@@ -6616,9 +6616,14 @@ function CategoryWorkspace({
   useEffect(() => {
     let active = true;
     const loadCategories = async () => {
-      const [remote, productsRemote] = await Promise.all([fetchCatalogCategories(), fetchCatalogProducts()]);
+      const [remote, productsRemote, shared] = await Promise.all([
+        fetchCatalogCategories(),
+        fetchCatalogProducts(),
+        fetchStoreSetting("categoryCatalog"),
+      ]);
       if (active && productsRemote.data) setCategoryProducts(productsRemote.data);
       let localCategories: AdminCategory[] = [];
+      let sharedCategories: AdminCategory[] = [];
       const stored = window.localStorage.getItem("fanzzy-categories");
       if (stored) {
         try {
@@ -6637,19 +6642,37 @@ function CategoryWorkspace({
           window.localStorage.removeItem("fanzzy-categories");
         }
       }
+      if (shared.value) {
+        try {
+          const parsed = JSON.parse(shared.value) as Array<Partial<AdminCategory>>;
+          if (Array.isArray(parsed)) {
+            sharedCategories = parsed
+              .filter((category) => typeof category.name === "string" && category.name.trim())
+              .map((category) => ({
+                name: category.name!.trim(),
+                pieces: Number(category.pieces) || 0,
+                section: category.section === "luxury" ? "luxury" : "normal",
+                image: category.image || "",
+              }));
+          }
+        } catch {
+          // Ignore an invalid shared snapshot and use the catalog table/local cache.
+        }
+      }
       if (active && !remote.error && remote.data) {
-        const categoryIdentity = (name: string, section: CategorySection = "normal") => `${name.trim()}::${section}`;
-        const localCategoryByIdentity = new Map(localCategories.map((category) => [categoryIdentity(category.name, category.section), category]));
+        const knownCategories = [...sharedCategories, ...localCategories];
+        const categoryIdentity = (name: string, section: CategorySection = "normal") => `${name.trim().toLowerCase()}::${section}`;
+        const localCategoryByIdentity = new Map(knownCategories.map((category) => [categoryIdentity(category.name, category.section), category]));
         const localCategoryByExactName = new Map<string, AdminCategory | null>();
-        localCategories.forEach((category) => {
-          const key = category.name.trim();
+        knownCategories.forEach((category) => {
+          const key = category.name.trim().toLowerCase();
           const previous = localCategoryByExactName.get(key);
           localCategoryByExactName.set(key, previous && previous.section !== category.section ? null : category);
         });
         const mapped = remote.data.map((category) => ({
           name: category.name,
           pieces: category.pieces,
-          section: localCategoryByIdentity.get(categoryIdentity(category.name, category.section || "normal"))?.section || localCategoryByExactName.get(category.name.trim())?.section || category.section || "normal",
+          section: localCategoryByIdentity.get(categoryIdentity(category.name, category.section || "normal"))?.section || localCategoryByExactName.get(category.name.trim().toLowerCase())?.section || category.section || "normal",
           image:
             category.image ||
             defaultCategoryImages[category.name] ||
@@ -6657,7 +6680,7 @@ function CategoryWorkspace({
         }));
         const remoteIdentities = new Set(mapped.map((category) => categoryIdentity(category.name, category.section)));
         const nextCategories = mergeCategoriesFromProducts(
-          inferLegacyCategorySections([...mapped, ...localCategories.filter((category) => !remoteIdentities.has(categoryIdentity(category.name, category.section)))]),
+          inferLegacyCategorySections([...mapped, ...knownCategories.filter((category) => !remoteIdentities.has(categoryIdentity(category.name, category.section)))]),
           productsRemote.data || [],
         );
         setCategories(nextCategories);
@@ -6665,7 +6688,10 @@ function CategoryWorkspace({
         return;
       }
       if (active) {
-        const nextCategories = mergeCategoriesFromProducts(localCategories, productsRemote.data || []);
+        const nextCategories = mergeCategoriesFromProducts(
+          inferLegacyCategorySections([...sharedCategories, ...localCategories]),
+          productsRemote.data || [],
+        );
         if (nextCategories.length) setCategories(nextCategories);
       }
     };
@@ -7253,8 +7279,29 @@ function ProductLibraryWorkspace({
       }
     };
     const loadCategories = async () => {
-      const remote = await fetchCatalogCategories();
+      const [remote, shared] = await Promise.all([
+        fetchCatalogCategories(),
+        fetchStoreSetting("categoryCatalog"),
+      ]);
       if (!active) return;
+      let sharedCategories: Array<{ name: string; pieces: number; image?: string; section?: CategorySection }> = [];
+      if (shared.value) {
+        try {
+          const parsed = JSON.parse(shared.value) as Array<{ name?: string; pieces?: number; image?: string; section?: CategorySection }>;
+          if (Array.isArray(parsed)) {
+            sharedCategories = parsed
+              .filter((category) => typeof category.name === "string" && category.name.trim())
+              .map((category) => ({
+                name: category.name!.trim(),
+                pieces: Number(category.pieces) || 0,
+                image: category.image || "",
+                section: category.section === "luxury" ? "luxury" : "normal",
+              }));
+          }
+        } catch {
+          // Ignore an invalid shared snapshot and use the catalog table/local cache.
+        }
+      }
       if (!remote.error && remote.data) {
         const stored = window.localStorage.getItem("fanzzy-categories");
         let localCategories: Array<{ name: string; pieces: number; image?: string; section?: CategorySection }> = [];
@@ -7275,11 +7322,12 @@ function ProductLibraryWorkspace({
             window.localStorage.removeItem("fanzzy-categories");
           }
         }
-        const categoryIdentity = (name: string, section: CategorySection = "normal") => `${name.trim()}::${section}`;
-        const localCategoryByIdentity = new Map(localCategories.map((category) => [categoryIdentity(category.name, category.section), category]));
+        const knownCategories = [...sharedCategories, ...localCategories];
+        const categoryIdentity = (name: string, section: CategorySection = "normal") => `${name.trim().toLowerCase()}::${section}`;
+        const localCategoryByIdentity = new Map(knownCategories.map((category) => [categoryIdentity(category.name, category.section), category]));
         const localCategoryByExactName = new Map<string, { name: string; pieces: number; image?: string; section?: CategorySection } | null>();
-        localCategories.forEach((category) => {
-          const key = category.name.trim();
+        knownCategories.forEach((category) => {
+          const key = category.name.trim().toLowerCase();
           const previous = localCategoryByExactName.get(key);
           localCategoryByExactName.set(key, previous && previous.section !== category.section ? null : category);
         });
@@ -7287,15 +7335,19 @@ function ProductLibraryWorkspace({
           name: category.name,
           pieces: category.pieces,
           image: category.image || "",
-          section: localCategoryByIdentity.get(categoryIdentity(category.name, category.section || "normal"))?.section || localCategoryByExactName.get(category.name.trim())?.section || category.section || "normal",
+          section: localCategoryByIdentity.get(categoryIdentity(category.name, category.section || "normal"))?.section || localCategoryByExactName.get(category.name.trim().toLowerCase())?.section || category.section || "normal",
         }));
         const remoteIdentities = new Set(mapped.map((category) => categoryIdentity(category.name, category.section)));
         const nextCategories = inferLegacyCategorySections([
           ...mapped,
-          ...localCategories.filter((category) => !remoteIdentities.has(categoryIdentity(category.name, category.section))),
+          ...knownCategories.filter((category) => !remoteIdentities.has(categoryIdentity(category.name, category.section))),
         ]);
         setCatalogCategories(nextCategories);
         persistCategories(nextCategories);
+        return;
+      }
+      if (sharedCategories.length) {
+        setCatalogCategories(inferLegacyCategorySections(sharedCategories));
         return;
       }
       readLocalCategories();
