@@ -226,6 +226,38 @@ const productCatalogSection = (productCategory: string, categories: StorefrontCa
   );
   return matchingSections.size === 1 && matchingSections.has("luxury") ? "luxury" as const : "normal" as const;
 };
+const mergeStorefrontCategoriesFromProducts = (
+  categories: StorefrontCategory[],
+  products: Array<{ category: string }>,
+) => {
+  const nextCategories = dedupeStorefrontCategories(categories);
+  const categoryByIdentity = new Map(
+    nextCategories.map((category, index) => [categoryIdentityKey(category), index]),
+  );
+  const productCounts = new Map<string, number>();
+
+  products.forEach((product) => {
+    const productCategory = String(product.category || "").trim();
+    const name = baseProductCategory(productCategory);
+    if (!name) return;
+    const section = productCatalogSection(productCategory, nextCategories);
+    const identity = categoryIdentityKey({ name, section });
+    productCounts.set(identity, (productCounts.get(identity) || 0) + 1);
+    if (categoryByIdentity.has(identity)) return;
+    categoryByIdentity.set(identity, nextCategories.length);
+    nextCategories.push({
+      name,
+      count: "0 pieces",
+      image: categoryImageFallback(name, nextCategories.length),
+      section,
+    });
+  });
+
+  return nextCategories.map((category) => {
+    const count = productCounts.get(categoryIdentityKey(category));
+    return count === undefined ? category : { ...category, count: `${count} pieces` };
+  });
+};
 const matchesCatalogCategory = (
   productCategory: string,
   selectedCategory: string,
@@ -1129,9 +1161,10 @@ export default function Home() {
           window.localStorage.removeItem("fanzzy-categories");
         }
       }
-      const [remote, shared] = await Promise.all([
+      const [remote, shared, productsRemote] = await Promise.all([
         fetchCatalogCategories(),
         fetchStoreSetting("categoryCatalog"),
+        fetchCatalogProducts(),
       ]);
       let sharedCategories: StorefrontCategory[] = [];
       if (shared.value) {
@@ -1167,12 +1200,18 @@ export default function Home() {
         }));
         const remoteIdentities = new Set(remoteCategories.map((category) => categoryIdentity(category.name, category.section)));
         const localOnlyCategories = knownCategories.filter((category) => !remoteIdentities.has(categoryIdentity(category.name, category.section)));
-        setCategories(dedupeStorefrontCategories(inferLegacyCategorySections([...remoteCategories, ...localOnlyCategories])));
+        setCategories(mergeStorefrontCategoriesFromProducts(
+          dedupeStorefrontCategories(inferLegacyCategorySections([...remoteCategories, ...localOnlyCategories])),
+          productsRemote.data || [],
+        ));
         return;
       }
-      if (active && (sharedCategories.length || localCategories.length)) {
+      if (active && (sharedCategories.length || localCategories.length || productsRemote.data?.length)) {
         const merged = [...sharedCategories, ...localCategories];
-        setCategories(dedupeStorefrontCategories(inferLegacyCategorySections(merged)));
+        setCategories(mergeStorefrontCategoriesFromProducts(
+          dedupeStorefrontCategories(inferLegacyCategorySections(merged)),
+          productsRemote.data || [],
+        ));
       }
     };
     const runSyncCategories = () => { void syncCategories().catch(() => undefined); };

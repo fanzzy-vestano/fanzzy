@@ -6527,7 +6527,10 @@ type AdminCategory = {
 
 const isLuxuryProductCategory = (category: string) => /\s*·\s*lx\s*$/i.test(category.trim());
 const baseProductCategory = (category: string) => category.replace(/\s*·\s*lx\s*$/i, "").trim();
-const productCategorySection = (productCategory: string, categories: AdminCategory[]) => {
+const productCategorySection = (
+  productCategory: string,
+  categories: Array<{ name: string; section?: CategorySection }>,
+) => {
   if (isLuxuryProductCategory(productCategory)) return "luxury" as const;
   const categoryName = baseProductCategory(productCategory).toLowerCase();
   const matchingSections = new Set(
@@ -6536,6 +6539,43 @@ const productCategorySection = (productCategory: string, categories: AdminCatego
       .map((category) => category.section),
   );
   return matchingSections.size === 1 && matchingSections.has("luxury") ? "luxury" as const : "normal" as const;
+};
+
+const canonicalProductCategory = (
+  productCategory: string,
+  categories: Array<{ name: string; section?: CategorySection }>,
+) => {
+  const name = baseProductCategory(productCategory);
+  if (!name) return "";
+  return productCategorySection(productCategory, categories) === "luxury" ? `${name} · LX` : name;
+};
+
+const mergeCategoriesFromProducts = (
+  categories: AdminCategory[],
+  products: Array<{ category: string }>,
+) => {
+  const nextCategories = [...categories];
+  const identities = new Set(
+    nextCategories.map((category) => `${baseProductCategory(category.name).toLowerCase()}::${category.section}`),
+  );
+
+  products.forEach((product) => {
+    const productCategory = String(product.category || "").trim();
+    const name = baseProductCategory(productCategory);
+    if (!name) return;
+    const section = productCategorySection(productCategory, nextCategories);
+    const identity = `${name.toLowerCase()}::${section}`;
+    if (identities.has(identity)) return;
+    nextCategories.push({
+      name,
+      pieces: 0,
+      image: defaultCategoryImages[name] || "",
+      section,
+    });
+    identities.add(identity);
+  });
+
+  return inferLegacyCategorySections(nextCategories);
 };
 
 const categorySectionDetails: Array<{
@@ -6616,12 +6656,18 @@ function CategoryWorkspace({
             "",
         }));
         const remoteIdentities = new Set(mapped.map((category) => categoryIdentity(category.name, category.section)));
-        const nextCategories = inferLegacyCategorySections([...mapped, ...localCategories.filter((category) => !remoteIdentities.has(categoryIdentity(category.name, category.section)))]);
+        const nextCategories = mergeCategoriesFromProducts(
+          inferLegacyCategorySections([...mapped, ...localCategories.filter((category) => !remoteIdentities.has(categoryIdentity(category.name, category.section)))]),
+          productsRemote.data || [],
+        );
         setCategories(nextCategories);
         persistCategories(nextCategories);
         return;
       }
-      if (active && localCategories.length) setCategories(localCategories);
+      if (active) {
+        const nextCategories = mergeCategoriesFromProducts(localCategories, productsRemote.data || []);
+        if (nextCategories.length) setCategories(nextCategories);
+      }
     };
     void loadCategories();
     return () => {
@@ -7600,16 +7646,16 @@ function ProductLibraryWorkspace({
       active = false;
     };
   }, []);
-  const productCategories = useMemo(
-    () => Array.from(new Set(products.map((product) => product.category.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
-    [products],
-  );
   const categoryOptions = useMemo(
-    () => Array.from(new Set([
-      ...catalogCategories.map((category) => category.name.trim()),
-      ...productCategories,
-    ].filter(Boolean))).sort((a, b) => a.localeCompare(b)),
-    [catalogCategories, productCategories],
+    () => {
+      const optionsByKey = new Map<string, string>();
+      [
+        ...catalogCategories.map((category) => canonicalProductCategory(category.name, catalogCategories)),
+        ...products.map((product) => canonicalProductCategory(product.category, catalogCategories)),
+      ].filter(Boolean).forEach((category) => optionsByKey.set(category.toLowerCase(), category));
+      return Array.from(optionsByKey.values()).sort((a, b) => a.localeCompare(b));
+    },
+    [catalogCategories, products],
   );
   const productSuppliers = useMemo(
     () => Array.from(new Set([
@@ -7630,14 +7676,15 @@ function ProductLibraryWorkspace({
         ...(product.sizes || []),
         ...variants.map((variant) => variant.name),
       ].some((value) => String(value || "").toLowerCase().includes(query));
-      const matchesCategory = productCategoryFilter === "all" || product.category.trim().toLowerCase() === productCategoryFilter.trim().toLowerCase();
+      const matchesCategory = productCategoryFilter === "all"
+        || canonicalProductCategory(product.category, catalogCategories).toLowerCase() === productCategoryFilter.trim().toLowerCase();
       const matchesVariant = productVariantFilter === "all"
         || (productVariantFilter === "with-variants" && variants.length > 0);
       const matchesSupplier = productSupplierFilter === "all"
         || product.supplierName?.trim().toLowerCase() === productSupplierFilter.trim().toLowerCase();
       return matchesSearch && matchesCategory && matchesVariant && matchesSupplier;
     });
-  }, [productCategoryFilter, productSearch, productSupplierFilter, productVariantFilter, products]);
+  }, [catalogCategories, productCategoryFilter, productSearch, productSupplierFilter, productVariantFilter, products]);
   const damageOptions = useMemo(() => {
     if (!selectedProduct) return [];
     const variants = selectedProduct.variants || [];
@@ -8633,13 +8680,13 @@ function ProductLibraryWorkspace({
               <label>
                 Category
                 <select
-                  value={newProduct.category}
+                  value={canonicalProductCategory(newProduct.category, catalogCategories)}
                   onChange={(event) =>
                     updateField("category", event.target.value)
                   }
                 >
-                  {Array.from(new Set([newProduct.category, ...categoryOptions].filter(Boolean))).map((category) => (
-                    <option key={category}>{category}{catalogCategories.find((item) => item.name.toLowerCase() === category.toLowerCase())?.section === "luxury" ? "  ·  LX" : ""}</option>
+                  {Array.from(new Set([canonicalProductCategory(newProduct.category, catalogCategories), ...categoryOptions].filter(Boolean))).map((category) => (
+                    <option key={category} value={category}>{category}</option>
                   ))}
                 </select>
               </label>
@@ -8751,7 +8798,7 @@ function ProductLibraryWorkspace({
           <span>Category</span>
           <select value={productCategoryFilter} onChange={(event) => setProductCategoryFilter(event.target.value)} aria-label="Filter by category">
             <option value="all">All categories</option>
-            {productCategories.map((category) => <option key={category} value={category}>{category}</option>)}
+            {categoryOptions.map((category) => <option key={category} value={category}>{category}</option>)}
           </select>
         </label>
         <label>
@@ -9070,7 +9117,7 @@ function ProductLibraryWorkspace({
             <label>
               Category
               <select
-                value={editValues.category}
+                value={canonicalProductCategory(editValues.category, catalogCategories)}
                 onChange={(event) =>
                   setEditValues((current) => ({
                     ...current,
@@ -9078,8 +9125,8 @@ function ProductLibraryWorkspace({
                   }))
                 }
               >
-                {Array.from(new Set([editValues.category, ...categoryOptions].filter(Boolean))).map((category) => (
-                  <option key={category}>{category}{catalogCategories.find((item) => item.name.toLowerCase() === category.toLowerCase())?.section === "luxury" ? "  ·  LX" : ""}</option>
+                {Array.from(new Set([canonicalProductCategory(editValues.category, catalogCategories), ...categoryOptions].filter(Boolean))).map((category) => (
+                  <option key={category} value={category}>{category}</option>
                 ))}
               </select>
             </label>
