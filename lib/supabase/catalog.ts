@@ -1,4 +1,5 @@
 import { supabase } from "./client";
+import { mergeCatalogCategories } from "../catalog-categories";
 
 export type CatalogStatus = "Published" | "Draft" | "Low stock";
 export type ProductVariantType = "normal" | "size";
@@ -57,9 +58,9 @@ export const countCatalogProductsByCategory = (products: Array<Pick<CatalogProdu
 // Luxury categories visible until those records are saved with an explicit
 // section, while keeping the standard Earrings category in Everyday.
 export const inferLegacyCategorySections = <T extends { name: string; section?: CatalogCategorySection }>(categories: T[]) => {
-  const normalizedCategories = categories.map((category) =>
+  const normalizedCategories = mergeCatalogCategories(categories.map((category) =>
     category.name.trim().toLowerCase() === "earrings" ? { ...category, section: "normal" as const } : category,
-  );
+  ));
   if (normalizedCategories.some((category) => category.section === "luxury")) return normalizedCategories;
   const luxuryNames = new Set(
     normalizedCategories
