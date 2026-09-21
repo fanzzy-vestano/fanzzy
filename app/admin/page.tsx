@@ -962,16 +962,8 @@ const menu = [
 ];
 
 type AdminAuthResponse = { authenticated?: boolean; error?: string; message?: string; resetReady?: boolean };
-const isGitHubPagesHost = () =>
-  typeof window !== "undefined" &&
-  window.location.hostname.endsWith(".github.io");
-const staticAdminEmail = process.env.NEXT_PUBLIC_STATIC_ADMIN_EMAIL ?? "";
-const staticAdminPassword = process.env.NEXT_PUBLIC_STATIC_ADMIN_PASSWORD ?? "";
-const adminRecoveryEmail = (staticAdminEmail || "fanzzy@vestanoretail.com").trim().toLowerCase();
-const staticAdminSessionKey = "fanzzy-github-pages-admin-authenticated";
-const hasStaticAdminSession = () =>
-  typeof window !== "undefined" &&
-  window.localStorage.getItem(staticAdminSessionKey) === "true";
+const staticPagesMode = process.env.NEXT_PUBLIC_STATIC_BUILD === "true";
+const adminRecoveryEmail = "fanzzy@vestanoretail.com";
 const readAdminAuthResponse = async (response: Response): Promise<AdminAuthResponse> => {
   const raw = await response.text();
   if (!raw) return {};
@@ -987,7 +979,6 @@ const adminApiUnavailableMessage = (status: number) =>
     : "Could not connect to admin login. Check that the local server is running.";
 
 function AdminLoginGate() {
-  const staticPagesMode = isGitHubPagesHost();
   const [checked, setChecked] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
   const [authView, setAuthView] = useState<"login" | "forgot" | "reset">(() => {
@@ -1024,8 +1015,15 @@ function AdminLoginGate() {
   }, [resetCooldown]);
   useEffect(() => {
     if (staticPagesMode) {
-      setAuthenticated(hasStaticAdminSession());
-      setChecked(true);
+      if (!supabase) {
+        setError("Secure admin login is not configured.");
+        setChecked(true);
+        return;
+      }
+      void supabase.auth.getSession()
+        .then(({ data }) => setAuthenticated(Boolean(data.session)))
+        .catch(() => setError("Could not verify the secure admin login."))
+        .finally(() => setChecked(true));
       return;
     }
     void fetch("/api/admin-auth", { cache: "no-store" })
@@ -1046,28 +1044,16 @@ function AdminLoginGate() {
     setLoading(true);
     setError("");
     if (staticPagesMode) {
-      const isStaticCredential =
-        email.trim().toLowerCase() === staticAdminEmail.trim().toLowerCase() &&
-        password === staticAdminPassword &&
-        Boolean(staticAdminEmail && staticAdminPassword);
-      if (isStaticCredential) {
-        window.localStorage.setItem(staticAdminSessionKey, "true");
-        setAuthenticated(true);
-        setPassword("");
-        setLoading(false);
-        return;
-      }
       if (supabase) {
         const { error: supabaseError } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
         if (!supabaseError) {
-          window.localStorage.setItem(staticAdminSessionKey, "true");
           setAuthenticated(true);
           setPassword("");
           setLoading(false);
           return;
         }
       }
-      setError("Invalid admin email or password.");
+      setError(supabase ? "Invalid admin email or password." : "Secure admin login is not configured.");
       setLoading(false);
       return;
     }
@@ -1462,8 +1448,8 @@ function AdminDashboard() {
   };
   const logOut = async () => {
     try {
-      if (isGitHubPagesHost()) {
-        window.localStorage.removeItem(staticAdminSessionKey);
+      if (staticPagesMode) {
+        await supabase?.auth.signOut();
       } else {
         await fetch("/api/admin-auth", { method: "DELETE", cache: "no-store" });
       }

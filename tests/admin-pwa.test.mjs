@@ -38,3 +38,15 @@ test("shared service worker leaves admin pages and APIs network-only", async () 
     assert.equal(intercepted, false, `${path} must not be cached`);
   }
 });
+
+test("static Pages build never injects an admin password", async () => {
+  const [viteConfig, adminPage] = await Promise.all([
+    readFile(new URL("../vite.config.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/admin/page.tsx", import.meta.url), "utf8"),
+  ]);
+  assert.match(viteConfig, /NEXT_PUBLIC_STATIC_BUILD/);
+  assert.doesNotMatch(viteConfig, /NEXT_PUBLIC_STATIC_ADMIN_(?:EMAIL|PASSWORD)/);
+  assert.match(adminPage, /supabase\.auth\.getSession\(\)/);
+  assert.match(adminPage, /supabase\.auth\.signInWithPassword/);
+  assert.doesNotMatch(adminPage, /fanzzy-github-pages-admin-authenticated/);
+});

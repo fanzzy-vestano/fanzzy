@@ -51,12 +51,9 @@ export default defineConfig(async ({ command }) => {
 
   return {
     define: {
-      "process.env.NEXT_PUBLIC_STATIC_ADMIN_EMAIL": JSON.stringify(
-        process.env.GITHUB_PAGES === "true" ? process.env.ADMIN_LOGIN_EMAIL?.trim() ?? "" : "",
-      ),
-      "process.env.NEXT_PUBLIC_STATIC_ADMIN_PASSWORD": JSON.stringify(
-        process.env.GITHUB_PAGES === "true" ? process.env.ADMIN_LOGIN_PASSWORD ?? "" : "",
-      ),
+      // GitHub Pages is a public static host. Admin authentication there must
+      // use Supabase's browser session, never a password embedded in the app.
+      "process.env.NEXT_PUBLIC_STATIC_BUILD": JSON.stringify(process.env.GITHUB_PAGES === "true"),
       "process.env.NEXT_PUBLIC_CUSTOMER_AUTH_API_URL": JSON.stringify(
         process.env.GITHUB_PAGES === "true"
           ? process.env.CUSTOMER_AUTH_API_URL?.trim() || defaultCustomerAuthApiUrl
