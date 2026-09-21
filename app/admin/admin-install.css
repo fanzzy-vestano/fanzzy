@@ -1,0 +1,59 @@
+.admin-install-dialog {
+  width: min(460px, calc(100vw - 32px));
+  max-height: calc(100dvh - 40px);
+  margin: auto;
+  padding: 28px;
+  overflow-y: auto;
+  border: 1px solid #e2d8d0;
+  border-radius: 16px;
+  background: #fffdfa;
+  color: #30282b;
+  box-shadow: 0 20px 80px #24101933;
+  font-family: "Manrope", sans-serif;
+}
+
+.admin-install-dialog::backdrop { background: #24101980; }
+.admin-install-dialog h2 { margin: 0 0 16px; color: #551a2d; font-size: 24px; }
+.admin-install-dialog p, .admin-install-dialog li { font-size: 14px; line-height: 1.7; }
+.admin-install-dialog ul { padding-left: 20px; margin: 18px 0; }
+.admin-install-dialog li + li { margin-top: 12px; }
+.admin-install-dialog .admin-install-note { color: #74676c; font-size: 12px; }
+.admin-install-dialog button {
+  display: block;
+  margin-top: 22px;
+  padding: 12px 22px;
+  border: 0;
+  border-radius: 6px;
+  background: #551a2d;
+  color: white;
+  font: inherit;
+  cursor: pointer;
+}
+.admin-install-dialog button:focus-visible { outline: 3px solid #b69a62; outline-offset: 3px; }
+
+.admin-install-sidebar { margin-top: 14px; }
+.admin-install-sidebar button {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  padding: 12px 10px;
+  border: 1px solid #8c6570;
+  border-radius: 5px;
+  background: transparent;
+  color: #fff9f0;
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.admin-install-login { margin-top: 16px; }
+.admin-install-login button {
+  width: 100%;
+  background: #f1ebe5;
+  color: #551a2d;
+  font: inherit;
+  font-size: 12px;
+}
+.admin-install-login .nav-icon { margin-right: 8px; }
+.admin-install-sidebar button:disabled, .admin-install-login button:disabled { opacity: .65; cursor: default; }

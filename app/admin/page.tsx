@@ -40,6 +40,7 @@ import "../brand-polish.css";
 import "./admin.css";
 import "./admin-polish.css";
 import AdminVendorsWorkspace from "./vendors-workspace";
+import { AdminInstallButton } from "./admin-install";
 
 type AdminProduct = {
   name: string;
@@ -111,6 +112,7 @@ type ReportView = "overview" | "sales" | "category" | "item" | "top-selling" | "
 type AdminPermission =
   | "Overview"
   | "Products"
+  | "Purchase Entry"
   | "Product Image Scanner"
   | "Categories"
   | "Collections"
@@ -130,6 +132,19 @@ type AdminPermission =
   | "Suppliers"
   | "Supplier Bills";
 type SupplierRecord = { id: string; name: string; createdAt?: string; isDefault?: boolean };
+type PurchaseEntry = {
+  id: string;
+  supplierName: string;
+  productSku: string;
+  productName: string;
+  category: string;
+  entryAt: string;
+  quantity: number;
+  costPerUnit: number;
+  total: number;
+  notes: string;
+};
+type ProductInitialQuantity = { createdAt: string; quantity: number };
 type AdminRole = {
   id: string;
   name: string;
@@ -139,6 +154,7 @@ type AdminRole = {
 const allAdminPermissions: AdminPermission[] = [
   "Overview",
   "Products",
+  "Purchase Entry",
   "Product Image Scanner",
   "Categories",
   "Collections",
@@ -230,7 +246,10 @@ const parsePaymentSettings = (value: unknown): PaymentSettings => {
 type PickupHub = { id: string; name: string; place: string };
 const defaultPickupHubs: PickupHub[] = [];
 const localSuppliersKey = "fanzzy-suppliers";
+const localPurchaseEntriesKey = "fanzzy-purchase-entries";
+const localProductInitialQuantitiesKey = "fanzzy-product-initial-quantities-v5";
 const preferredDefaultSupplierName = "Thrissur bill";
+const thrissurMarginPercentage = 50;
 const parseSupplierRecords = (value: string | null | undefined): SupplierRecord[] => {
   if (!value) return [];
   try {
@@ -253,6 +272,74 @@ const persistSuppliers = (suppliers: SupplierRecord[]) => {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(localSuppliersKey, JSON.stringify(suppliers));
   window.dispatchEvent(new Event("fanzzy-suppliers-updated"));
+};
+const parsePurchaseEntries = (value: string | null | undefined): PurchaseEntry[] => {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const entry = item as Partial<PurchaseEntry>;
+      const quantity = Number(entry.quantity);
+      const costPerUnit = Number(entry.costPerUnit);
+      if (!entry.id || !entry.supplierName || !entry.productSku || !entry.productName || !Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(costPerUnit)) return [];
+      return [{
+        id: String(entry.id),
+        supplierName: String(entry.supplierName),
+        productSku: String(entry.productSku),
+        productName: String(entry.productName),
+        category: String(entry.category || "Uncategorised"),
+        entryAt: String(entry.entryAt || new Date().toISOString()),
+        quantity: Math.floor(quantity),
+        costPerUnit,
+        total: Number.isFinite(Number(entry.total)) ? Number(entry.total) : Math.floor(quantity) * costPerUnit,
+        notes: String(entry.notes || ""),
+      }];
+    });
+  } catch {
+    return [];
+  }
+};
+const persistPurchaseEntries = (entries: PurchaseEntry[]) => {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(localPurchaseEntriesKey, JSON.stringify(entries));
+  } catch {
+    // Keep shared storage available when the local cache is full.
+  }
+  window.dispatchEvent(new Event("fanzzy-purchase-entries-updated"));
+};
+const parseProductInitialQuantities = (value: string | null | undefined): Record<string, ProductInitialQuantity> => {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value) as Record<string, Partial<ProductInitialQuantity>>;
+    if (!parsed || typeof parsed !== "object") return {};
+    return Object.fromEntries(Object.entries(parsed).flatMap(([sku, item]) => {
+      const quantity = Number(item?.quantity);
+      if (!sku || !item?.createdAt || !Number.isFinite(quantity) || quantity < 0) return [];
+      return [[sku, { createdAt: String(item.createdAt), quantity: Math.floor(quantity) }]];
+    }));
+  } catch {
+    return {};
+  }
+};
+const persistProductInitialQuantities = (quantities: Record<string, ProductInitialQuantity>) => {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(localProductInitialQuantitiesKey, JSON.stringify(quantities));
+  } catch {
+    // Keep the shared setting available when the local cache is full.
+  }
+};
+const rememberProductInitialQuantity = async (sku: string, createdAt: string, quantity: number) => {
+  const remote = await fetchStoreSetting("productInitialQuantitiesV5");
+  const stored = remote.value || (typeof window !== "undefined" ? window.localStorage.getItem(localProductInitialQuantitiesKey) : null);
+  const quantities = parseProductInitialQuantities(stored);
+  if (quantities[sku]) return;
+  const next = { ...quantities, [sku]: { createdAt, quantity: Math.max(0, Math.floor(quantity)) } };
+  persistProductInitialQuantities(next);
+  await saveStoreSetting("productInitialQuantitiesV5", JSON.stringify(next));
 };
 const ensurePreferredSupplier = (suppliers: SupplierRecord[]) => {
   const preferredSupplier = suppliers.find(
@@ -590,14 +677,17 @@ const formatMoney = (value: number) => {
     maximumFractionDigits: 2,
   })}`;
 };
-const calculatePricing = (costValue: string, gstValue: string, markupValue: string) => {
+const calculatePricing = (costValue: string, gstValue: string, markupValue: string, roundUpSellingPrice = false) => {
   const cost = parseMoney(costValue);
   const gst = Number(gstValue) || 0;
   const markup = Number(markupValue) || 0;
   const costWithGst = cost > 0 ? cost * (1 + gst / 100) : 0;
+  const sellingPrice = costWithGst * (1 + markup / 100);
   return {
     costWithGst: costWithGst > 0 ? formatMoney(costWithGst) : "₹",
-    price: costWithGst > 0 ? formatMoney(costWithGst * (1 + markup / 100)) : "₹",
+    price: costWithGst > 0
+      ? formatMoney(roundUpSellingPrice ? Math.ceil(sellingPrice) : sellingPrice)
+      : "₹",
   };
 };
 const calculateMarkupFromSellingPrice = (costValue: string, gstValue: string, priceValue: string) => {
@@ -606,13 +696,6 @@ const calculateMarkupFromSellingPrice = (costValue: string, gstValue: string, pr
   const price = parseMoney(priceValue);
   const costWithGst = cost * (1 + gst / 100);
   return costWithGst > 0 && price > 0 ? String(Math.round(((price / costWithGst - 1) * 100) * 100) / 100) : "";
-};
-const normalizeSellingPriceForMargin = (costValue: string | number, priceValue: string | number) => {
-  const cost = parseMoney(String(costValue));
-  const price = parseMoney(String(priceValue));
-  if (price <= 0) return String(priceValue || "₹0");
-  if (cost > 0 && ((price - cost) / price) * 100 < 50) return formatAdminCurrency(Math.ceil(cost * 2));
-  return formatAdminCurrency(Math.round(price));
 };
 const normalizeWholeSellingPrice = (priceValue: string | number) => {
   const price = parseMoney(String(priceValue));
@@ -859,6 +942,7 @@ const persistCategories = (
 const menu = [
   { label: "Overview", icon: "◌" },
   { label: "Products", icon: "◇", count: "24" },
+  { label: "Purchase Entry", icon: "＋" },
   { label: "Supplier Bills", icon: "▥" },
   { label: "Suppliers", icon: "▤" },
   { label: "Categories", icon: "▦" },
@@ -1115,6 +1199,7 @@ function AdminLoginGate() {
         {resetMessage && <p className="admin-auth-success" role="status">{resetMessage}</p>}
         <button className="module-primary" type="submit" disabled={loading}>{loading ? "Signing in…" : "Sign in"}</button>
       </form>
+      <div className="admin-install-login"><AdminInstallButton /></div>
     </>}
     {authView === "forgot" && <>
       <h1>Reset password</h1>
@@ -1453,6 +1538,7 @@ function AdminDashboard() {
             </button>
           ))}
         </nav>
+        <div className="admin-install-sidebar"><AdminInstallButton /></div>
         <div className="sidebar-actions">
           <button className={active === "Settings" ? "active" : ""} onClick={() => canAccess("Settings") ? setActive("Settings") : notify(`${activeRole.title} cannot access Settings`)}>
             <span className="nav-icon">⚙</span>Settings
@@ -2017,6 +2103,227 @@ function SuppliersWorkspace({ onNotify }: { onNotify: (message: string) => void 
   );
 }
 
+function PurchaseEntryWorkspace({ onNotify }: { onNotify: (message: string) => void }) {
+  const [entries, setEntries] = useState<PurchaseEntry[]>([]);
+  const [suppliers, setSuppliers] = useState<SupplierRecord[]>([]);
+  const [products, setProducts] = useState<Array<{ name: string; sku: string; category: string; cost?: number; price: number; stock: number; createdAt?: string; firstCreatedAt?: string; initialQuantity?: number; supplierName?: string }>>([]);
+  const [filterSupplier, setFilterSupplier] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({ supplierName: "", productSku: "", entryAt: new Date().toISOString().slice(0, 16), quantity: "1", costPerUnit: "", notes: "" });
+
+  const load = async () => {
+    setLoading(true);
+    const [entriesRemote, suppliersRemote, supplierNamesRemote, initialQuantitiesRemote, ordersRemote, catalogRemote, variantsRemote, sizeStockRemote, variantTypeRemote] = await Promise.all([
+      fetchStoreSetting("purchaseEntries"),
+      fetchStoreSetting("suppliers"),
+      fetchStoreSetting("productSupplierNames"),
+      fetchStoreSetting("productInitialQuantitiesV5"),
+      fetchStoreOrders<OrderRecord>(),
+      fetchCatalogProducts(),
+      fetchStoreSetting("productVariants"),
+      fetchStoreSetting("productSizeStock"),
+      fetchStoreSetting("productVariantType"),
+    ]);
+    const storedEntries = entriesRemote.value || (typeof window !== "undefined" ? window.localStorage.getItem(localPurchaseEntriesKey) : null);
+    const nextEntries = parsePurchaseEntries(storedEntries);
+    const storedSuppliers = suppliersRemote.value || (typeof window !== "undefined" ? window.localStorage.getItem(localSuppliersKey) : null);
+    const nextSuppliers = ensurePreferredSupplier(parseSupplierRecords(storedSuppliers)).suppliers;
+    let supplierNames: Record<string, string> = {};
+    try {
+      const parsed = JSON.parse(supplierNamesRemote.value || "{}") as Record<string, unknown>;
+      if (parsed && typeof parsed === "object") supplierNames = Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+    } catch {
+      supplierNames = {};
+    }
+    let variantsBySku: Record<string, Array<{ stock?: number }>> = {};
+    let sizeStockBySku: Record<string, Record<string, number>> = {};
+    let variantTypeBySku: Record<string, ProductVariantType> = {};
+    try {
+      const parsed = JSON.parse(variantsRemote.value || "{}") as Record<string, Array<{ stock?: number }>>;
+      if (parsed && typeof parsed === "object") variantsBySku = parsed;
+    } catch {
+      variantsBySku = {};
+    }
+    try {
+      const parsed = JSON.parse(sizeStockRemote.value || "{}") as Record<string, Record<string, number>>;
+      if (parsed && typeof parsed === "object") sizeStockBySku = parsed;
+    } catch {
+      sizeStockBySku = {};
+    }
+    try {
+      const parsed = JSON.parse(variantTypeRemote.value || "{}") as Record<string, unknown>;
+      if (parsed && typeof parsed === "object") {
+        variantTypeBySku = Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, ProductVariantType] => entry[1] === "normal" || entry[1] === "size"));
+      }
+    } catch {
+      variantTypeBySku = {};
+    }
+    const localCatalogProducts = typeof window !== "undefined" ? (() => {
+      try {
+        const parsed = JSON.parse(window.localStorage.getItem("fanzzy-products") || "[]") as Array<{
+          name?: string;
+          sku?: string;
+          category?: string;
+          stock?: number;
+          price?: number;
+          cost?: number;
+          createdAt?: string;
+          supplierName?: string;
+          variants?: Array<{ stock?: number }>;
+          sizeStock?: Record<string, number>;
+          variantType?: ProductVariantType;
+        }>;
+        return Array.isArray(parsed) ? parsed.filter((product) => product.sku && product.name) : [];
+      } catch {
+        return [];
+      }
+    })() : [];
+    const sourceProducts = !catalogRemote.error && catalogRemote.data !== null ? catalogRemote.data : localCatalogProducts;
+    const storedInitialQuantities = initialQuantitiesRemote.value || (typeof window !== "undefined" ? window.localStorage.getItem(localProductInitialQuantitiesKey) : null);
+    const initialQuantities = parseProductInitialQuantities(storedInitialQuantities);
+    const localOrders = typeof window !== "undefined" ? (() => { try { return JSON.parse(window.localStorage.getItem("fanzzy-orders") || "[]") as OrderRecord[]; } catch { return []; } })() : [];
+    const storedOrders = Array.from(new Map([...localOrders, ...(ordersRemote.data || [])].map((order) => [order.id, order])).values());
+    const soldOrderItems: Array<{ keys: string[]; quantity: number }> = [];
+    const orderItemKeys = (item: OrderItem) => Array.from(new Set([item.productId, item.productName, item.name, item.name?.split(" · ")[0]].filter((key): key is string => Boolean(key)).map(reportNameKey)));
+    storedOrders.filter((order) => order.status !== "Cancelled" && (hasConfirmedPayment(order) || !order.paymentStatus)).forEach((order) => {
+      (order.items || []).forEach((item) => {
+        const quantity = Math.max(0, Math.floor(Number(item.quantity) || 0));
+        if (!quantity) return;
+        soldOrderItems.push({ keys: orderItemKeys(item), quantity });
+      });
+    });
+    const nextInitialQuantities = { ...initialQuantities };
+    let initialQuantitiesChanged = false;
+    const nextProducts = sourceProducts.map((product) => {
+        const productKeys = new Set([reportNameKey(product.sku), reportNameKey(product.name)]);
+        const sold = soldOrderItems.reduce((total, item) => total + (item.keys.some((key) => productKeys.has(key)) ? item.quantity : 0), 0);
+        const localVariants = Array.isArray(product.variants) ? product.variants : [];
+        const localSizeStock = product.sizeStock || {};
+        const sizeStocks = Object.values(sizeStockBySku[product.sku] || localSizeStock).map((quantity) => Math.max(0, Math.floor(Number(quantity) || 0)));
+        const variantStocks = (variantsBySku[product.sku] || localVariants).map((variant) => Number(variant.stock)).filter((quantity) => Number.isFinite(quantity)).map((quantity) => Math.max(0, Math.floor(quantity)));
+        const variantType = variantTypeBySku[product.sku] || product.variantType || (sizeStocks.length ? "size" : "normal");
+        const currentStock = variantType === "size" && sizeStocks.length
+          ? sizeStocks.reduce((total, quantity) => total + quantity, 0)
+          : variantStocks.length
+            ? variantStocks.reduce((total, quantity) => total + quantity, 0)
+            : Math.max(0, Math.floor(Number(product.stock) || 0));
+        const calculatedQuantity = currentStock + sold;
+        const storedInitial = initialQuantities[product.sku];
+        const initial = storedInitial
+          ? { ...storedInitial, quantity: Math.max(storedInitial.quantity, calculatedQuantity) }
+          : { createdAt: product.createdAt || new Date().toISOString(), quantity: calculatedQuantity };
+        if (!storedInitial || initial.quantity !== storedInitial.quantity) {
+          nextInitialQuantities[product.sku] = initial;
+          initialQuantitiesChanged = true;
+        }
+        return { name: product.name, sku: product.sku, category: product.category || "Uncategorised", cost: Number(product.cost) || 0, price: Number(product.price) || 0, stock: currentStock, createdAt: product.createdAt, firstCreatedAt: initial?.createdAt || product.createdAt, initialQuantity: initial?.quantity, supplierName: supplierNames[product.sku] || product.supplierName || "" };
+      });
+    if (initialQuantitiesChanged) {
+      persistProductInitialQuantities(nextInitialQuantities);
+      void saveStoreSetting("productInitialQuantitiesV5", JSON.stringify(nextInitialQuantities));
+    }
+    setEntries(nextEntries);
+    setSuppliers(nextSuppliers);
+    setProducts(nextProducts);
+    setForm((current) => ({
+      ...current,
+      supplierName: current.supplierName || nextSuppliers.find((supplier) => supplier.isDefault)?.name || nextSuppliers[0]?.name || "",
+      costPerUnit: current.costPerUnit || (nextProducts[0]?.cost !== undefined ? String(nextProducts[0].cost) : ""),
+    }));
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    let active = true;
+    void load().then(() => { if (!active) return; });
+    const refresh = () => void load();
+    window.addEventListener("fanzzy-purchase-entries-updated", refresh);
+    window.addEventListener("fanzzy-suppliers-updated", refresh);
+    window.addEventListener("fanzzy-products-updated", refresh);
+    window.addEventListener("storage", refresh);
+    return () => {
+      active = false;
+      window.removeEventListener("fanzzy-purchase-entries-updated", refresh);
+      window.removeEventListener("fanzzy-suppliers-updated", refresh);
+      window.removeEventListener("fanzzy-products-updated", refresh);
+      window.removeEventListener("storage", refresh);
+    };
+  }, []);
+
+  const selectedProduct = products.find((product) => product.sku === form.productSku);
+  const billOptions = Array.from(new Set([...suppliers.map((supplier) => supplier.name), ...entries.map((entry) => entry.supplierName), ...products.map((product) => product.supplierName || "")].filter(Boolean)));
+  const sameSupplierBill = (left: string, right: string) => reportNameKey(left) === reportNameKey(right);
+  const visibleEntries = entries
+    .filter((entry) => filterSupplier && sameSupplierBill(entry.supplierName, filterSupplier))
+    .sort((left, right) => new Date(right.entryAt).getTime() - new Date(left.entryAt).getTime());
+  const selectedBillProducts = products.filter((product) => filterSupplier && sameSupplierBill(product.supplierName || "", filterSupplier));
+  const savedEntrySkus = new Set(visibleEntries.map((entry) => entry.productSku));
+  const billDetails = [
+    ...visibleEntries,
+    ...selectedBillProducts
+      .filter((product) => !savedEntrySkus.has(product.sku))
+      .map((product) => ({
+        id: `catalog-${product.sku}`,
+        supplierName: filterSupplier,
+        productSku: product.sku,
+        productName: product.name,
+        category: product.category,
+        entryAt: product.firstCreatedAt || product.createdAt || "",
+        quantity: product.initialQuantity ?? null,
+        costPerUnit: product.cost || 0,
+        total: (product.initialQuantity ?? 0) * (product.cost || 0),
+        notes: product.initialQuantity === undefined ? "Initial quantity not recorded" : "Initial product entry",
+      })),
+  ];
+
+  const saveEntry = async () => {
+    const quantity = Math.floor(Number(form.quantity));
+    const costPerUnit = parseMoney(form.costPerUnit);
+    if (!form.supplierName.trim()) return onNotify("Select a supplier bill");
+    if (!selectedProduct) return onNotify("Select a product");
+    if (!Number.isFinite(quantity) || quantity < 1) return onNotify("Enter a correct quantity");
+    if (!Number.isFinite(costPerUnit) || costPerUnit < 0) return onNotify("Enter a correct cost price");
+    const entry: PurchaseEntry = {
+      id: `purchase-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      supplierName: form.supplierName.trim(),
+      productSku: selectedProduct.sku,
+      productName: selectedProduct.name,
+      category: selectedProduct.category,
+      entryAt: form.entryAt ? new Date(form.entryAt).toISOString() : new Date().toISOString(),
+      quantity,
+      costPerUnit,
+      total: quantity * costPerUnit,
+      notes: form.notes.trim(),
+    };
+    const next = [entry, ...entries];
+    setSaving(true);
+    const remoteError = await saveStoreSetting("purchaseEntries", JSON.stringify(next));
+    persistPurchaseEntries(next);
+    setEntries(next);
+    setForm((current) => ({ ...current, productSku: "", entryAt: new Date().toISOString().slice(0, 16), quantity: "1", costPerUnit: "", notes: "" }));
+    setSaving(false);
+    onNotify(remoteError ? "Purchase entry saved locally; shared settings need attention" : "Purchase entry saved");
+  };
+
+  return (
+    <section className="panel module-workspace purchase-entry-workspace">
+      <div className="module-workspace-head">
+        <div>
+          <p className="eyebrow">PURCHASE CONTROL</p>
+          <h2>Purchase entry</h2>
+          <p>Select a supplier bill to review every product, entry time, quantity, cost, and note saved under it.</p>
+        </div>
+        <div className="module-summary supplier-bills-total"><span><i className="status-light" />{filterSupplier ? `${billDetails.length} products · ${billDetails.reduce((sum, entry) => sum + (entry.quantity || 0), 0)} entered units` : "Select a supplier bill"}</span><strong>{filterSupplier ? formatAdminCurrency(billDetails.reduce((sum, entry) => sum + entry.total, 0)) : "—"}</strong></div>
+      </div>
+      <div className="supplier-bill-summary-list purchase-entry-list">
+        <div className="module-workspace-head"><div><p className="eyebrow">SUPPLIER BILL PRODUCTS</p><h3>{filterSupplier ? filterSupplier : "Select a supplier bill"}</h3><p>Choose one supplier bill to see every product and its purchase details.</p></div><label>Supplier bill<select value={filterSupplier} onChange={(event) => setFilterSupplier(event.target.value)}><option value="">Select supplier bill</option>{billOptions.map((name) => <option key={name} value={name}>{name}</option>)}</select></label></div>
+        {loading ? <div className="supplier-bill-empty">Loading supplier bill products…</div> : !filterSupplier ? <div className="supplier-bill-empty">Select a supplier bill above to view its products.</div> : billDetails.length === 0 ? <div className="supplier-bill-empty">No products are assigned to this supplier bill yet. Assign this supplier bill to the product in Products.</div> : <div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>First created</th><th>Product</th><th>SKU / category</th><th>Entered quantity</th><th>Current stock</th><th>Cost / unit</th><th>Total cost</th><th>Current price</th><th>Details</th></tr></thead><tbody>{billDetails.map((entry) => { const product = products.find((item) => item.sku === entry.productSku); return <tr key={entry.id}><td>{entry.entryAt ? new Date(entry.entryAt).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" }) : "—"}</td><td><strong>{entry.productName}</strong></td><td><small>{entry.productSku}</small><small>{entry.category}</small></td><td>{entry.quantity ?? "Not entered"}</td><td>{product ? product.stock : "—"}</td><td>{formatAdminCurrency(entry.costPerUnit)}</td><td>{entry.total ? formatAdminCurrency(entry.total) : "—"}</td><td>{product ? formatAdminCurrency(product.price) : "—"}</td><td>{entry.notes || "—"}</td></tr>; })}</tbody></table></div>}
+      </div>
+    </section>
+  );
+}
+
 type SupplierBillSummary = {
   name: string;
   entries: number;
@@ -2025,7 +2332,7 @@ type SupplierBillSummary = {
   products: Array<{ name: string; sku: string; createdAt?: string }>;
   isUnassigned?: boolean;
 };
-const existingMarginFloorMigrationKey = "fanzzy-existing-margin-floor-applied";
+const nonLuxuryMarginMigrationKey = "fanzzy-non-luxury-margin-50-applied";
 const getSupplierBillUnits = (product: {
   stock: number;
   variants?: Array<{ stock?: number }>;
@@ -2159,59 +2466,10 @@ function SupplierBillsWorkspace() {
           products = [];
         }
       }
-      const missingSupplierProducts = products.filter((product) => !(product.supplierName || supplierNames[product.sku] || "").trim());
-      if (missingSupplierProducts.length) {
-        const assignedSupplierNames = Object.fromEntries(missingSupplierProducts.map((product) => [product.sku, preferredDefaultSupplierName]));
-        await saveStoreSetting("productSupplierNames", JSON.stringify({ ...supplierNames, ...assignedSupplierNames }));
-        if (typeof window !== "undefined") {
-          try {
-            const storedCatalog = JSON.parse(window.localStorage.getItem("fanzzy-products") || "[]") as Array<Record<string, unknown>>;
-            if (Array.isArray(storedCatalog)) {
-              window.localStorage.setItem("fanzzy-products", JSON.stringify(storedCatalog.map((product) => {
-                const sku = String(product.sku || product.id || "");
-                return assignedSupplierNames[sku] ? { ...product, supplierName: preferredDefaultSupplierName } : product;
-              })));
-              window.dispatchEvent(new Event("fanzzy-products-updated"));
-            }
-          } catch {
-            // The supplier setting remains the source of truth when local storage is unavailable.
-          }
-        }
-        products = products.map((product) => assignedSupplierNames[product.sku] ? { ...product, supplierName: preferredDefaultSupplierName } : product);
-        Object.assign(supplierNames, assignedSupplierNames);
-      }
-      const shouldApplyExistingMarginFloor = typeof window !== "undefined" && window.localStorage.getItem(existingMarginFloorMigrationKey) !== "true";
-      const adjustedProducts = products.map((product) => ({
+      products = products.map((product) => ({
         ...product,
-        price: shouldApplyExistingMarginFloor
-          ? normalizeSellingPriceForMargin(product.cost, product.price)
-          : normalizeWholeSellingPrice(product.price),
+        supplierName: (product.supplierName || supplierNames[product.sku] || "").trim(),
       }));
-      const priceUpdates = new Map(
-        adjustedProducts
-          .filter((product, index) => parseMoney(String(product.price)) !== parseMoney(String(products[index]?.price)))
-          .map((product) => [product.sku, product.price]),
-      );
-      if (shouldApplyExistingMarginFloor && priceUpdates.size && typeof window !== "undefined") {
-        try {
-          const storedCatalog = JSON.parse(window.localStorage.getItem("fanzzy-products") || "[]") as Array<Record<string, unknown>>;
-          if (Array.isArray(storedCatalog)) {
-            const updatedCatalog = storedCatalog.map((product) => {
-              const sku = String(product.sku || product.id || "");
-              return priceUpdates.has(sku) ? { ...product, price: priceUpdates.get(sku) } : product;
-            });
-            window.localStorage.setItem("fanzzy-products", JSON.stringify(updatedCatalog));
-            window.dispatchEvent(new Event("fanzzy-products-updated"));
-          }
-        } catch {
-          // The shared catalog update below remains available when local storage is unavailable.
-        }
-      }
-      if (shouldApplyExistingMarginFloor && priceUpdates.size && catalogRemote.data) {
-        await Promise.all(catalogRemote.data.filter((product) => priceUpdates.has(product.sku)).map((product) => saveCatalogProduct({ ...product, price: parseMoney(String(priceUpdates.get(product.sku))) })));
-      }
-      if (shouldApplyExistingMarginFloor && typeof window !== "undefined") window.localStorage.setItem(existingMarginFloorMigrationKey, "true");
-      products = adjustedProducts;
       const storedSuppliers = suppliersRemote.value || (typeof window !== "undefined" ? window.localStorage.getItem(localSuppliersKey) : null);
       const suppliers = ensurePreferredSupplier(parseSupplierRecords(storedSuppliers)).suppliers;
       const summaryMap = new Map<string, SupplierBillSummary>();
@@ -2397,6 +2655,8 @@ function ModuleWorkspace({
     return <ProductLibraryWorkspace onNotify={onNotify} productScannerRequest={productScannerRequest} scannerOnly />;
   if (module === "Products")
     return <ProductLibraryWorkspace onNotify={onNotify} />;
+  if (module === "Purchase Entry")
+    return <PurchaseEntryWorkspace onNotify={onNotify} />;
   if (module === "Reports") return <ReportsWorkspace onNotify={onNotify} view={reportView} />;
   if (module === "Announcement") return <AnnouncementPanel onNotify={onNotify} module />;
   if (module === "Categories") return <CategoryWorkspace onNotify={onNotify} />;
@@ -7130,10 +7390,12 @@ function ProductLibraryWorkspace({
   onNotify,
   productScannerRequest = 0,
   scannerOnly = false,
+  purchaseEntryMode = false,
 }: {
   onNotify: (message: string) => void;
   productScannerRequest?: number;
   scannerOnly?: boolean;
+  purchaseEntryMode?: boolean;
 }) {
   const [products, setProducts] = useState(adminProducts);
   const [suppliers, setSuppliers] = useState<SupplierRecord[]>([]);
@@ -7168,7 +7430,7 @@ function ProductLibraryWorkspace({
     hsnCode: "",
     billName: "",
     supplierName: "",
-    markup: "",
+    markup: "50",
     gstRate: "",
     costWithGst: "₹",
     sizes: "",
@@ -7227,6 +7489,12 @@ function ProductLibraryWorkspace({
   useEffect(() => {
     if (productScannerRequest > 0) setScannerOpen(true);
   }, [productScannerRequest]);
+  useEffect(() => {
+    if (!purchaseEntryMode) return;
+    setSelectedProduct(null);
+    setIsEditing(false);
+    setIsAdding(true);
+  }, [purchaseEntryMode]);
   useEffect(() => {
     let active = true;
     const loadSuppliers = async () => {
@@ -7413,6 +7681,7 @@ function ProductLibraryWorkspace({
         billNameRemote,
         supplierNameRemote,
         pricingRemote,
+        categoriesRemote,
         variantsRemote,
         variantTypeRemote,
         sizesRemote,
@@ -7426,6 +7695,7 @@ function ProductLibraryWorkspace({
         fetchStoreSetting("productBillNames"),
         fetchStoreSetting("productSupplierNames"),
         fetchStoreSetting("productPricing"),
+        fetchCatalogCategories(),
         fetchStoreSetting("productVariants"),
         fetchStoreSetting("productVariantType"),
         fetchStoreSetting("productSizes"),
@@ -7452,6 +7722,9 @@ function ProductLibraryWorkspace({
       let sizesMap: Record<string, string[]> = {};
       let sizeStockMap: Record<string, Record<string, number>> = {};
       let imageAdjustmentsMap: Record<string, ProductImageAdjustments> = {};
+      const marginCategories = !categoriesRemote.error && categoriesRemote.data?.length
+        ? categoriesRemote.data.map((category) => ({ name: category.name, section: category.section }))
+        : catalogCategories;
       if (barcodeRemote.value) {
         try {
           const parsed = JSON.parse(barcodeRemote.value) as Record<string, unknown>;
@@ -7500,7 +7773,7 @@ function ProductLibraryWorkspace({
           supplierNameMap = {};
         }
       }
-      const shouldBackfillSupplierNames = Object.keys(supplierNameMap).length === 0;
+      const shouldApplyNonLuxuryMargin = window.localStorage.getItem(nonLuxuryMarginMigrationKey) !== "true";
       if (pricingRemote.value) {
         try {
           const parsed = JSON.parse(pricingRemote.value) as Record<string, { gstRate?: number; markup?: number }>;
@@ -7597,9 +7870,16 @@ function ProductLibraryWorkspace({
           const sizeStock = Object.keys(savedSizeStock).length
             ? savedSizeStock
             : Object.fromEntries(variants.filter((variant) => variant.size && variant.stock !== undefined).map((variant) => [variant.size!, variant.stock!]));
+          const supplierName = supplierNameMap[product.sku] || "";
+          const gstRate = pricingMap[product.sku]?.gstRate || 0;
+          const appliesNonLuxuryMargin = shouldApplyNonLuxuryMargin && productCategorySection(product.category, marginCategories) !== "luxury";
+          const markup = appliesNonLuxuryMargin
+            ? thrissurMarginPercentage
+            : pricingMap[product.sku]?.markup || 0;
+          const pricing = calculatePricing(`₹${(product.cost ?? 0).toLocaleString("en-IN")}`, String(gstRate), String(markup), appliesNonLuxuryMargin);
           return {
           name: product.name,
-          price: normalizeWholeSellingPrice(product.price),
+          price: appliesNonLuxuryMargin && Number(product.cost ?? 0) > 0 ? pricing.price : normalizeWholeSellingPrice(product.price),
            cost: `₹${(product.cost ?? 0).toLocaleString("en-IN")}`,
            compareAt: product.compareAt,
           sku: product.sku,
@@ -7612,10 +7892,10 @@ function ProductLibraryWorkspace({
           barcode: barcodeMap[product.sku] || product.barcode || "",
           hsnCode: hsnCodeMap[product.sku] || "",
           billName: billNameMap[product.sku] || "",
-          supplierName: supplierNameMap[product.sku] || (shouldBackfillSupplierNames ? preferredDefaultSupplierName : ""),
-          gstRate: pricingMap[product.sku]?.gstRate || 0,
-          markup: pricingMap[product.sku]?.markup || 0,
-          costWithGst: calculatePricing(`₹${(product.cost ?? 0).toLocaleString("en-IN")}`, String(pricingMap[product.sku]?.gstRate || 0), String(pricingMap[product.sku]?.markup || 0)).costWithGst,
+          supplierName,
+          gstRate,
+          markup,
+          costWithGst: pricing.costWithGst,
            sizes,
            sizeStock,
            variantType: variantTypeMap[product.sku] || (sizes.length ? "size" : "normal"),
@@ -7630,9 +7910,22 @@ function ProductLibraryWorkspace({
         // Supabase is the shared catalog. Never merge stale local records back
         // into it, otherwise a product deleted on one device can be resurrected
         // by an older localStorage snapshot on another device.
+        const sourceProducts = new Map(remote.data.map((product) => [product.sku, product]));
+        const nonLuxuryProductsNeedingSync = shouldApplyNonLuxuryMargin ? mapped.filter((product) => {
+          if (productCategorySection(product.category, marginCategories) === "luxury") return false;
+          const source = sourceProducts.get(product.sku);
+          return parseMoney(String(source?.price ?? 0)) !== parseMoney(product.price)
+            || pricingMap[product.sku]?.markup !== thrissurMarginPercentage;
+        }) : [];
+        if (nonLuxuryProductsNeedingSync.length) {
+          await Promise.all([
+            ...nonLuxuryProductsNeedingSync.map((product) => saveCatalogProduct(toCatalogProduct(product))),
+            saveProductPricing(mapped),
+          ]);
+        }
         setProducts(mapped);
         persistCatalog(mapped);
-        if (shouldBackfillSupplierNames && mapped.length) void saveProductSupplierNames(mapped);
+        if (shouldApplyNonLuxuryMargin) window.localStorage.setItem(nonLuxuryMarginMigrationKey, "true");
         return;
       }
       const stored = window.localStorage.getItem("fanzzy-products");
@@ -7661,9 +7954,16 @@ function ProductLibraryWorkspace({
                 const localVariants = product.variants?.length ? product.variants : variantsMap[sku]?.length ? variantsMap[sku] : localVariantsMap[sku] || [];
                 const localSizes = product.sizes?.length ? product.sizes : sizesMap[sku]?.length ? sizesMap[sku] : localSizesMap[sku] || Array.from(new Set(localVariants.map((variant) => variant.size).filter((size): size is string => Boolean(size))));
                 const localSizeStock = product.sizeStock || sizeStockMap[sku] || Object.fromEntries(localVariants.filter((variant) => variant.size && variant.stock !== undefined).map((variant) => [variant.size!, variant.stock!]));
+                const supplierName = product.supplierName || supplierNameMap[sku] || "";
+                const gstRate = product.gstRate ?? pricingMap[sku]?.gstRate ?? 0;
+                const appliesNonLuxuryMargin = shouldApplyNonLuxuryMargin && productCategorySection(product.category || "Uncategorised", marginCategories) !== "luxury";
+                const markup = appliesNonLuxuryMargin
+                  ? thrissurMarginPercentage
+                  : product.markup ?? pricingMap[sku]?.markup ?? 0;
+                const pricing = calculatePricing(String(rawCost ?? "₹0"), String(gstRate), String(markup), appliesNonLuxuryMargin);
                 return {
                   name: product.name!.trim(),
-                  price: normalizeWholeSellingPrice(rawPrice ?? "₹0"),
+                  price: appliesNonLuxuryMargin && parseMoney(String(rawCost ?? "₹0")) > 0 ? pricing.price : normalizeWholeSellingPrice(rawPrice ?? "₹0"),
                   cost:
                     typeof rawCost === "number"
                       ? `₹${rawCost.toLocaleString("en-IN")}`
@@ -7681,10 +7981,10 @@ function ProductLibraryWorkspace({
                   barcode: product.barcode || barcodeMap[sku] || "",
                   hsnCode: product.hsnCode || hsnCodeMap[sku] || "",
                   billName: product.billName || billNameMap[sku] || "",
-                  supplierName: product.supplierName || supplierNameMap[sku] || (shouldBackfillSupplierNames ? preferredDefaultSupplierName : ""),
-                  gstRate: product.gstRate ?? pricingMap[sku]?.gstRate ?? 0,
-                  markup: product.markup ?? pricingMap[sku]?.markup ?? 0,
-                  costWithGst: product.costWithGst || calculatePricing(String(rawCost ?? "₹0"), String(product.gstRate ?? pricingMap[sku]?.gstRate ?? 0), String(product.markup ?? pricingMap[sku]?.markup ?? 0)).costWithGst,
+                  supplierName,
+                  gstRate,
+                  markup,
+                  costWithGst: pricing.costWithGst,
            sizes: localSizes,
            sizeStock: localSizeStock,
            variantType: product.variantType || variantTypeMap[sku] || (localSizes.length ? "size" : "normal"),
@@ -7693,7 +7993,7 @@ function ProductLibraryWorkspace({
               });
           setProducts(mapped);
           persistCatalog(mapped);
-          if (shouldBackfillSupplierNames && mapped.length) void saveProductSupplierNames(mapped);
+          if (shouldApplyNonLuxuryMargin) window.localStorage.setItem(nonLuxuryMarginMigrationKey, "true");
         }
       } catch {
         window.localStorage.removeItem("fanzzy-products");
@@ -7782,8 +8082,12 @@ function ProductLibraryWorkspace({
           ? { sku: createSku(value, current.category, products) }
           : {}),
       };
-      if (field === "cost" || field === "gstRate" || field === "markup") {
-        const pricing = calculatePricing(next.cost, next.gstRate, next.markup);
+      if (field === "category" && productCategorySection(next.category, catalogCategories) !== "luxury") {
+        next.markup = String(thrissurMarginPercentage);
+      }
+      if (field === "cost" || field === "gstRate" || field === "markup" || field === "category") {
+        const roundSellingPrice = productCategorySection(next.category, catalogCategories) !== "luxury" && Number(next.markup) === thrissurMarginPercentage;
+        const pricing = calculatePricing(next.cost, next.gstRate, next.markup, roundSellingPrice);
         next.costWithGst = pricing.costWithGst;
         if (parseMoney(next.cost) > 0) next.price = pricing.price;
       }
@@ -7911,7 +8215,7 @@ function ProductLibraryWorkspace({
       hsnCode: "",
       billName: "",
       supplierName: defaultSupplierName,
-      markup: "",
+      markup: "50",
       gstRate: "",
       costWithGst: "₹",
       sizes: "",
@@ -7979,6 +8283,13 @@ function ProductLibraryWorkspace({
     const newProductSizeStock = newProduct.variantType === "size" && newProduct.variants.length
       ? Object.fromEntries(newProduct.variants.filter((variant) => (variant.size || variant.name).trim()).map((variant) => [(variant.size || variant.name).trim(), variant.stock === undefined ? "" : variant.stock])) as Record<string, number | "">
       : newProduct.sizeStock;
+    const supplierName = newProduct.supplierName.trim();
+    const productPricing = calculatePricing(
+      newProduct.cost,
+      newProduct.gstRate,
+      newProduct.markup,
+      productCategorySection(newProduct.category, catalogCategories) !== "luxury" && Number(newProduct.markup) === thrissurMarginPercentage,
+    );
     const product: AdminProduct = {
       name: newProduct.name.trim(),
       sku: productSku,
@@ -7993,10 +8304,10 @@ function ProductLibraryWorkspace({
       barcode: newProduct.barcode.trim(),
       hsnCode: newProduct.hsnCode.trim(),
       billName: newProduct.billName.trim(),
-      supplierName: newProduct.supplierName.trim(),
+      supplierName,
       gstRate: Number(newProduct.gstRate) || 0,
       markup: Number(newProduct.markup) || 0,
-      costWithGst: newProduct.costWithGst,
+      costWithGst: productPricing.costWithGst,
        sizes: newProductSizes,
        sizeStock: normalizeSizeStock(newProductSizeStock),
       variantType: newProduct.variantType,
@@ -8007,6 +8318,7 @@ function ProductLibraryWorkspace({
       hoverImageAdjustments: newHoverAdjustmentsEnabled ? newHoverAdjustments : defaultImageAdjustments,
     };
     const remoteError = await saveCatalogProduct(toCatalogProduct(product));
+    void rememberProductInitialQuantity(product.sku, product.createdAt || new Date().toISOString(), product.stock);
     const nextProducts = [...products, product];
     setProducts(nextProducts);
     persistCatalog(nextProducts);
@@ -8035,7 +8347,7 @@ function ProductLibraryWorkspace({
       hsnCode: "",
       billName: "",
       supplierName: "",
-      markup: "",
+      markup: "50",
       gstRate: "",
       costWithGst: "₹",
       sizes: "",
@@ -8195,8 +8507,12 @@ function ProductLibraryWorkspace({
   const updateEditField = (field: keyof typeof editValues, value: string) =>
     setEditValues((current) => {
       const next = { ...current, [field]: value };
-      if (field === "cost" || field === "gstRate" || field === "markup") {
-        const pricing = calculatePricing(next.cost, next.gstRate, next.markup);
+      if (field === "category" && productCategorySection(next.category, catalogCategories) !== "luxury") {
+        next.markup = String(thrissurMarginPercentage);
+      }
+      if (field === "cost" || field === "gstRate" || field === "markup" || field === "category") {
+        const roundSellingPrice = productCategorySection(next.category, catalogCategories) !== "luxury" && Number(next.markup) === thrissurMarginPercentage;
+        const pricing = calculatePricing(next.cost, next.gstRate, next.markup, roundSellingPrice);
         next.costWithGst = pricing.costWithGst;
         if (parseMoney(next.cost) > 0) next.price = pricing.price;
       }
@@ -8212,6 +8528,9 @@ function ProductLibraryWorkspace({
     setSelectedProduct(product);
     setIsAdding(false);
     setIsEditing(true);
+    const supplierName = product.supplierName || "";
+    const markup = calculateMarkupFromSellingPrice(product.cost, String(product.gstRate || 0), product.price);
+    const pricing = calculatePricing(product.cost, String(product.gstRate || 0), String(markup));
     setEditValues({
       name: product.name,
       category: product.category,
@@ -8224,10 +8543,10 @@ function ProductLibraryWorkspace({
       barcode: product.barcode || "",
       hsnCode: product.hsnCode || "",
       billName: product.billName || "",
-      supplierName: product.supplierName || "",
-      markup: calculateMarkupFromSellingPrice(product.cost, String(product.gstRate || 0), product.price),
+      supplierName,
+      markup: String(markup),
       gstRate: String(product.gstRate || 0),
-      costWithGst: product.costWithGst || product.cost,
+      costWithGst: pricing.costWithGst,
       sizes: product.sizes?.join(", ") || "",
       sizeStock: product.sizeStock || {},
       variants: product.variants?.length
@@ -8281,6 +8600,8 @@ function ProductLibraryWorkspace({
     const editProductSizeStock = editValues.variantType === "size" && editValues.variants.length
       ? Object.fromEntries(editValues.variants.filter((variant) => (variant.size || variant.name).trim()).map((variant) => [(variant.size || variant.name).trim(), variant.stock === undefined ? "" : variant.stock])) as Record<string, number | "">
       : editValues.sizeStock;
+    const supplierName = editValues.supplierName.trim();
+    const productPricing = calculatePricing(editValues.cost, editValues.gstRate, editValues.markup);
     const updated: AdminProduct = {
       ...selectedProduct,
       name: editValues.name.trim(),
@@ -8295,10 +8616,10 @@ function ProductLibraryWorkspace({
       barcode: editValues.barcode.trim(),
       hsnCode: editValues.hsnCode.trim(),
       billName: editValues.billName.trim(),
-      supplierName: editValues.supplierName.trim(),
+      supplierName,
       gstRate: Number(editValues.gstRate) || 0,
       markup: Number(editValues.markup) || 0,
-      costWithGst: editValues.costWithGst,
+      costWithGst: productPricing.costWithGst,
        sizes: editProductSizes,
        sizeStock: normalizeSizeStock(editProductSizeStock),
       variantType: editValues.variantType,
@@ -8495,9 +8816,9 @@ function ProductLibraryWorkspace({
       <div className="module-workspace-head">
         <div>
           <p className="eyebrow">CATALOG</p>
-          <h2>Product library</h2>
+          <h2>{purchaseEntryMode ? "Purchase entry" : "Product library"}</h2>
           <p>
-            Create, edit, price, and organise every piece in your storefront.
+            {purchaseEntryMode ? "Add a purchased product with supplier bill, cost, stock, and selling price." : "Create, edit, price, and organise every piece in your storefront."}
           </p>
         </div>
         <div className="module-actions">

@@ -1,5 +1,6 @@
 import { supabase } from "./client";
 import { mergeCatalogCategories } from "../catalog-categories";
+import { prepareStoreImage } from "../store-image-upload";
 
 export type CatalogStatus = "Published" | "Draft" | "Low stock";
 export type ProductVariantType = "normal" | "size";
@@ -94,6 +95,12 @@ const settingKeys = {
   productBillNames: "product_bill_names",
   productSupplierNames: "product_supplier_names",
   suppliers: "suppliers",
+  purchaseEntries: "purchase_entries",
+  productInitialQuantities: "product_initial_quantities",
+  productInitialQuantitiesV2: "product_initial_quantities_v2",
+  productInitialQuantitiesV3: "product_initial_quantities_v3",
+  productInitialQuantitiesV4: "product_initial_quantities_v4",
+  productInitialQuantitiesV5: "product_initial_quantities_v5",
   categoryCatalog: "category_catalog",
   productPricing: "product_pricing",
   productVariants: "product_variants",
@@ -281,6 +288,19 @@ export async function fetchStoreSetting(key: keyof typeof settingKeys) {
   return { value: typeof result.data?.value === "string" ? result.data.value : null, error: result.error };
 }
 
+// Related product settings belong to one catalog read. Fetch them together
+// rather than making seven connections before a customer can see products.
+export async function fetchStoreSettings<const Keys extends readonly (keyof typeof settingKeys)[]>(keys: Keys) {
+  const result = supabase
+    ? await supabase.from("store_settings").select("key,value").in("key", keys.map((key) => settingKeys[key]))
+    : { data: null, error: new Error("Supabase is not configured") };
+  const values = new Map((result.data || []).map((row) => [row.key, row.value]));
+  return Object.fromEntries(keys.map((key) => {
+    const value = values.get(settingKeys[key]);
+    return [key, { value: typeof value === "string" ? value : null, error: result.error }];
+  })) as Record<Keys[number], { value: string | null; error: typeof result.error }>;
+}
+
 export async function saveStoreSetting(key: keyof typeof settingKeys, value: string) {
   if (!supabase) return new Error("Supabase is not configured");
   const { error } = await supabase.from("store_settings").upsert({ key: settingKeys[key], value, updated_at: new Date().toISOString() }, { onConflict: "key" });
@@ -325,10 +345,11 @@ export function subscribeToStoreSetting(key: keyof typeof settingKeys, onChange:
 export async function uploadStoreImage(file: File, folder: "products" | "homepage" | "categories" | "vendors") {
   if (!supabase) return { url: null, error: new Error("Supabase is not configured") };
   try {
+    file = await prepareStoreImage(file, folder);
     const extension = file.name.split(".").pop()?.toLowerCase() || "jpg";
     const uniqueId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const path = `${folder}/${uniqueId}.${extension}`;
-    const upload = await supabase.storage.from("fanzzy-assets").upload(path, file, { upsert: true, contentType: file.type || "image/jpeg" });
+    const upload = await supabase.storage.from("fanzzy-assets").upload(path, file, { upsert: true, contentType: file.type || "image/jpeg", cacheControl: "31536000" });
     if (upload.error) return { url: null, error: upload.error };
     const { data } = supabase.storage.from("fanzzy-assets").getPublicUrl(path);
     return { url: data.publicUrl, error: null };

@@ -1,4 +1,4 @@
-const CACHE_NAME = "fanzzy-shell-v2";
+const CACHE_NAME = "fanzzy-shell-v3";
 const APP_SHELL = [
   "/",
   "/manifest.webmanifest",
@@ -24,6 +24,19 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(request.url);
   if (request.method !== "GET" || url.origin !== self.location.origin || url.pathname.startsWith("/api/")) return;
   if (url.pathname.startsWith("/admin")) return;
+
+  // Only content-addressed display copies are immutable. Catalog, stock and
+  // HTML remain network-first so returning customers see current data.
+  if (/^\/optimized\/[a-f0-9]{20}\.webp$/.test(url.pathname)) {
+    event.respondWith(caches.open(CACHE_NAME).then(async (cache) => {
+      const cached = await cache.match(request);
+      if (cached) return cached;
+      const response = await fetch(request);
+      if (response.ok) await cache.put(request, response.clone());
+      return response;
+    }));
+    return;
+  }
 
   if (request.mode === "navigate") {
     event.respondWith(

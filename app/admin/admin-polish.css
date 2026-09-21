@@ -3856,6 +3856,25 @@
 .supplier-bill-unassigned-details strong { color: var(--wine); font-family: var(--serif); font-size: 14px; font-weight: 500; overflow-wrap: anywhere; }
 .supplier-bill-unassigned-details small { color: var(--admin-muted); font-family: var(--mono); font-size: 7px; }
 .supplier-bill-empty { color: var(--admin-muted); font-size: 11px; padding: 42px 0; text-align: center; }
+.purchase-entry-form-card { gap: 22px; }
+.purchase-entry-form-card .product-form-grid { align-items: start; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.purchase-entry-form-card .product-form-grid label { min-width: 0; }
+.purchase-entry-form-card .product-form-grid input,
+.purchase-entry-form-card .product-form-grid select { box-sizing: border-box; min-width: 0; width: 100%; }
+.purchase-entry-form-card .form-wide { grid-column: 1 / -1; }
+.purchase-entry-form-card .module-actions { justify-content: flex-start; }
+.purchase-entry-list { gap: 18px; }
+.purchase-entry-list > .module-workspace-head { align-items: end; margin: 0; }
+.purchase-entry-list > .module-workspace-head h3 { color: var(--wine); font-family: var(--serif); font-size: 24px; font-weight: 500; letter-spacing: -.04em; margin: 5px 0 0; }
+.purchase-entry-list > .module-workspace-head > label { color: var(--wine); display: grid; flex: 0 0 min(280px, 35%); font-family: var(--mono); font-size: 8px; gap: 7px; letter-spacing: .08em; text-transform: uppercase; }
+.purchase-entry-list > .module-workspace-head select { background: #fffaf5; border: 1px solid var(--admin-line); box-sizing: border-box; color: var(--admin-ink); min-height: 42px; padding: 10px; width: 100%; }
+.purchase-entry-list .report-table-wrap { overflow-x: auto; }
+.purchase-entry-list .report-detail-table { min-width: 900px; }
+.purchase-entry-list .report-detail-table td,
+.purchase-entry-list .report-detail-table th { vertical-align: top; }
+.purchase-entry-list .report-detail-table td strong,
+.purchase-entry-list .report-detail-table td small { display: block; }
+.purchase-entry-list .report-detail-table td small { color: var(--admin-muted); font-family: var(--mono); font-size: 8px; margin-top: 4px; }
 @media (max-width: 640px) {
   .supplier-count-summary { align-items: start; }
   .supplier-form-row { align-items: stretch; flex-direction: column; }
@@ -3867,6 +3886,10 @@
   .supplier-bill-summary-row { gap: 10px; grid-template-columns: minmax(0, 1fr) 55px 55px; }
   .supplier-bill-summary-row > strong:last-child { grid-column: 1 / -1; text-align: left; }
   .supplier-bill-unassigned-details > div { grid-template-columns: 1fr; }
+  .purchase-entry-form-card .product-form-grid { grid-template-columns: 1fr; }
+  .purchase-entry-form-card .form-wide { grid-column: auto; }
+  .purchase-entry-list > .module-workspace-head { align-items: start; flex-direction: column; gap: 14px; }
+  .purchase-entry-list > .module-workspace-head > label { flex-basis: auto; width: 100%; }
 }
 .agents-workspace .module-workspace-head > .module-primary { align-self: start; white-space: nowrap; }
 .agent-list { border-top: 1px solid var(--admin-line); overflow-x: auto; }

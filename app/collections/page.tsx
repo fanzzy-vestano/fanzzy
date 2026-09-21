@@ -2,10 +2,10 @@
 
 import { useEffect, useState } from "react";
 import { countCatalogProductsByCategory, fetchCatalogCategories, fetchCatalogProducts, inferLegacyCategorySections, type CatalogCategorySection } from "../../lib/supabase/catalog";
+import { storefrontImageProps } from "../../lib/storefront-images";
 import "../globals.css";
 
 const siteBasePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
-const siteAsset = (name: string) => `${siteBasePath}/${name}`;
 
 type Collection = { name: string; count: string; image: string; section: CatalogCategorySection };
 const defaultCollections: Collection[] = [
@@ -24,10 +24,13 @@ export default function CollectionsPage() {
   const [activeSection, setActiveSection] = useState<CatalogCategorySection | null>(null);
 
   useEffect(() => {
+    let active = true;
     const syncCollections = async () => {
       const stored = window.localStorage.getItem("fanzzy-categories");
-      const productsRemote = await fetchCatalogProducts();
-      if (productsRemote.data) setProductCounts(countCatalogProductsByCategory(productsRemote.data));
+      // Counts should never delay downloading and displaying category images.
+      void fetchCatalogProducts().then((result) => {
+        if (active && result.data) setProductCounts(countCatalogProductsByCategory(result.data));
+      }).catch(() => undefined);
       let localCollections: Collection[] = [];
       if (stored) {
         try {
@@ -43,6 +46,7 @@ export default function CollectionsPage() {
         }
       }
       const remote = await fetchCatalogCategories();
+      if (!active) return;
       if (!remote.error && remote.data?.length) {
         const localCollectionByName = new Map(localCollections.map((collection) => [collection.name.trim().toLowerCase(), collection]));
         const remoteCollections = remote.data.map((category, index) => ({
@@ -61,6 +65,7 @@ export default function CollectionsPage() {
     window.addEventListener("storage", syncCollections);
     window.addEventListener("fanzzy-categories-updated", syncCollections);
     return () => {
+      active = false;
       window.removeEventListener("storage", syncCollections);
       window.removeEventListener("fanzzy-categories-updated", syncCollections);
     };
@@ -84,12 +89,12 @@ export default function CollectionsPage() {
   return <main className="site-shell collections-page">
     <div className="announcement"><strong>Complimentary shipping on orders above ₹999</strong><a href={`${siteBasePath}/#shop`}>Explore now&nbsp; ↗</a></div>
     <header className="site-header">
-      <a href={`${siteBasePath}/`} className="wordmark" aria-label="Fanzzy home"><img src={siteAsset("fanzzy-mark.png")} alt="Fanzzy" className="brand-logo" /><span className="navbar-brand-name">fanzzy</span></a>
+      <a href={`${siteBasePath}/`} className="wordmark" aria-label="Fanzzy home"><img {...storefrontImageProps("/fanzzy-mark.png", "110px")} decoding="async" alt="Fanzzy" className="brand-logo" /><span className="navbar-brand-name">fanzzy</span></a>
       <nav className="desktop-nav" aria-label="Main navigation"><a href={`${siteBasePath}/#shop`}>Shop</a><a className="active-nav" href={`${siteBasePath}/collections`}>Collections</a><a href={`${siteBasePath}/#story`}>The journal</a><a href={`${siteBasePath}/#footer`}>About</a></nav>
       <div className="header-actions"><a className="admin-link" href={`${siteBasePath}/admin/`}>Admin</a><a href={`${siteBasePath}/#shop`}>Bag <span className="bag-count">(00)</span></a></div>
     </header>
     <section className="collections-intro"><p className="eyebrow">THE FANZZY COLLECTIONS</p><h1>Find your <em>signature.</em></h1><p>Explore every category and find the pieces that meet your mood.</p><a className="button button-dark" href={`${siteBasePath}/#shop`}>Shop the full edit <span>↗</span></a></section>
-    <section className="collections-grid" aria-label="Fanzzy collections">{collectionGroups.map(({ section, collections: sectionCollections }) => sectionCollections.length ? <div className="collection-group" id={section} key={section}><div className="collection-group-heading"><h2>{section === "luxury" ? "Luxury Category" : "Everyday Collection"}</h2></div><div className="collection-group-grid">{sectionCollections.map((collection, index) => <a className={`category-card collection-card category-${index + 1}`} key={collection.name} href={`${siteBasePath}/?category=${encodeURIComponent(collection.name)}#shop`}><img src={collection.image || collectionImageFallback(collection.name, index)} alt={collection.name} /><span className="category-overlay" /><span className="category-info"><strong>{collection.name}</strong><small>{productCounts ? `${productCounts[collection.name.trim().toLowerCase()] || 0} pieces` : collection.count}</small></span></a>)}</div></div> : null)}</section>
+    <section className="collections-grid" aria-label="Fanzzy collections">{collectionGroups.map(({ section, collections: sectionCollections }) => sectionCollections.length ? <div className="collection-group" id={section} key={section}><div className="collection-group-heading"><h2>{section === "luxury" ? "Luxury Category" : "Everyday Collection"}</h2></div><div className="collection-group-grid">{sectionCollections.map((collection, index) => <a className={`category-card collection-card category-${index + 1}`} key={collection.name} href={`${siteBasePath}/?category=${encodeURIComponent(collection.name)}#shop`}><img {...storefrontImageProps(collection.image || collectionImageFallback(collection.name, index), "(max-width: 640px) 46vw, 24vw")} loading={index < 4 ? "eager" : "lazy"} decoding="async" alt={collection.name} /><span className="category-overlay" /><span className="category-info"><strong>{collection.name}</strong><small>{productCounts ? `${productCounts[collection.name.trim().toLowerCase()] || 0} pieces` : collection.count}</small></span></a>)}</div></div> : null)}</section>
     <footer className="collections-footer"><a href={`${siteBasePath}/`} className="text-link">← Back to Fanzzy</a><span>Made with intention in India.</span></footer>
   </main>;
 }

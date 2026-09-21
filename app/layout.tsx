@@ -36,5 +36,11 @@ export const viewport: Viewport = {
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en"><head><meta name="apple-mobile-web-app-capable" content="yes" /></head><body>{children}<PwaInstall basePath={siteBasePath} /></body></html>;
+  return <html lang="en"><head>
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <link rel="preconnect" href={process.env.NEXT_PUBLIC_SUPABASE_URL || "https://pdrcrkxeyqxqgpwfxqpu.supabase.co"} crossOrigin="anonymous" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,500;0,600;1,500;1,600&display=swap" />
+  </head><body>{children}<PwaInstall basePath={siteBasePath} /></body></html>;
 }
