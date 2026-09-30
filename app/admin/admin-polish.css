@@ -3472,6 +3472,16 @@
   width: 42px;
 }
 
+.barcode-row-value {
+  color: #514743;
+  font-family: var(--mono);
+  font-size: 8px;
+  justify-self: end;
+  letter-spacing: .08em;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
 .module-list .product-list-main {
   align-items: center;
   border: 0;
@@ -3723,6 +3733,12 @@
     grid-template-columns: auto auto;
     justify-content: start;
     padding: 10px 0;
+  }
+
+  .barcode-row-value {
+    grid-column: 3;
+    justify-self: start;
+    text-align: left;
   }
 
   .product-row-actions {

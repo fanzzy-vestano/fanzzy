@@ -1,7 +1,7 @@
 ﻿"use client";
 /* eslint-disable @next/next/no-html-link-for-pages */
 
-import { Component, useEffect, useMemo, useRef, useState, type ChangeEvent, type ErrorInfo } from "react";
+import { Component, memo, useEffect, useMemo, useRef, useState, type ChangeEvent, type ErrorInfo } from "react";
 import { Eye, Pencil, Printer, Trash2 } from "lucide-react";
 import QRCode from "react-qr-code";
 import { createProductCategoryResolver, mergeCatalogCategories } from "../../lib/catalog-categories";
@@ -991,7 +991,7 @@ const ean13Bits = (value: string) => {
   return `101${left}01010${right}101`;
 };
 
-function ProductBarcode({ value }: { value: string }) {
+const ProductBarcode = memo(function ProductBarcode({ value }: { value: string }) {
   const bits = ean13Bits(value);
   return (
     <span className="product-barcode" title={`Barcode ${value}`} aria-label={`Barcode ${value}`}>
@@ -1001,7 +1001,7 @@ function ProductBarcode({ value }: { value: string }) {
       <small>{value}</small>
     </span>
   );
-}
+});
 const saveProductHsnCodes = async (catalog: AdminProduct[]) => {
   const hsnCodes = Object.fromEntries(
     catalog
@@ -10104,7 +10104,9 @@ function ProductLibraryWorkspace({
                   {product.category} · SKU {product.sku}
                 </small>
               </span>
-              <ProductBarcode value={product.barcode || createProductBarcode(product.sku, new Set())} />
+              {multiBarcodeMode
+                ? <span className="barcode-row-value">{product.barcode || createProductBarcode(product.sku, new Set())}</span>
+                : <ProductBarcode value={product.barcode || createProductBarcode(product.sku, new Set())} />}
             </button>
             <div className="product-row-actions">
               <button

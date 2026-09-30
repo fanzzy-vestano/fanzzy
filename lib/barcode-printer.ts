@@ -42,13 +42,32 @@ export async function printProductBarcode(input: ProductBarcodePrintInput) {
 }
 
 export async function printProductBarcodes(inputs: ProductBarcodePrintInput[]) {
-  const jobs = inputs.filter((input) => String(input.barcode || "").trim());
+  const jobs = inputs.filter((input) => String(input.barcode || "").trim()).map((input) => ({
+    ...input,
+    copies: Math.min(100, Math.max(1, Math.floor(Number(input.copies) || 1))),
+  }));
   if (!jobs.length) throw new Error("Select at least one product with a barcode.");
 
+  const savedPrinter = selectedPrinterName();
+  const batchResponse = await fetch("http://127.0.0.1:3002/print-barcodes", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items: jobs, printerName: savedPrinter }),
+  });
+  if (batchResponse.status !== 404) {
+    const payload = await batchResponse.json().catch(() => ({})) as { error?: string; printed?: boolean; printedProducts?: number; printedLabels?: number };
+    if (!batchResponse.ok || !payload.printed) throw new Error(payload.error || "Could not print the selected barcode labels.");
+    return {
+      printedProducts: payload.printedProducts || jobs.length,
+      printedLabels: payload.printedLabels || jobs.reduce((sum, input) => sum + Number(input.copies || 1), 0),
+    };
+  }
+
+  // Compatibility fallback for a printer bridge that has not restarted yet.
   let printedProducts = 0;
   let printedLabels = 0;
   for (const input of jobs) {
-    const copies = Math.min(100, Math.max(1, Math.floor(Number(input.copies) || 1)));
+    const copies = Number(input.copies || 1);
     try {
       // Send one label per queued request so multi-copy batches also work
       // with an already-running printer bridge that predates copy support.

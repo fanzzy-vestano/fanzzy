@@ -284,6 +284,17 @@ const printBarcodeLabel = async (productName, barcode, price, copies, requestedP
   return printerName;
 };
 
+const printBarcodeLabels = async (items, requestedPrinter) => {
+  const configured = text(requestedPrinter);
+  const printerName = (configured === "Essae PR 55" ? defaultPrinter : configured) || defaultPrinter;
+  const isTsc = /\bTSC\b|TTP[- ]?244/i.test(printerName);
+  const payloads = items.map((item) => isTsc
+    ? makeTscBarcodeLabel(item)
+    : makeBarcodeLabel(item));
+  await sendThroughPrinterWorker(Buffer.concat(payloads), printerName, "");
+  return printerName;
+};
+
 const listWindowsPrinters = () => new Promise((resolve, reject) => {
   const command = [
     "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
@@ -293,7 +304,7 @@ const listWindowsPrinters = () => new Promise((resolve, reject) => {
   const child = spawn("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], { windowsHide: true });
   let output = "";
   let errorOutput = "";
-  const timeout = setTimeout(() => child.kill(), 5000);
+  const timeout = setTimeout(() => child.kill(), 15000);
   child.stdout.on("data", (chunk) => { output += chunk.toString(); });
   child.stderr.on("data", (chunk) => { errorOutput += chunk.toString(); });
   child.once("error", (error) => {
@@ -456,7 +467,7 @@ const server = createServer(async (request, response) => {
       return send(response, 500, { error: error instanceof Error ? error.message : "Could not list Windows printers." });
     }
   }
-  if (request.method !== "POST" || !["/print", "/print-barcode", "/prepare-printer"].includes(request.url || "")) return send(response, 404, { error: "Not found" });
+  if (request.method !== "POST" || !["/print", "/print-barcode", "/print-barcodes", "/prepare-printer"].includes(request.url || "")) return send(response, 404, { error: "Not found" });
   try {
     let body = "";
     for await (const chunk of request) body += chunk;
@@ -470,6 +481,14 @@ const server = createServer(async (request, response) => {
       if (!text(payload.productName) || !text(payload.barcode)) return send(response, 400, { error: "Product name and barcode are required." });
       const printerName = await printBarcodeLabel(payload.productName, payload.barcode, payload.price, payload.copies, payload.printerName);
       return send(response, 200, { printed: true, printerName });
+    }
+    if (request.url === "/print-barcodes") {
+      const items = Array.isArray(payload.items) ? payload.items.filter((item) => text(item?.productName) && text(item?.barcode)) : [];
+      const printedLabels = items.reduce((sum, item) => sum + Math.min(100, Math.max(1, Math.floor(Number(item.copies) || 1))), 0);
+      if (!items.length) return send(response, 400, { error: "Select at least one product with a barcode." });
+      if (items.length > 500 || printedLabels > 1000) return send(response, 400, { error: "A barcode batch can contain up to 500 products or 1000 labels." });
+      const printerName = await printBarcodeLabels(items, payload.printerName);
+      return send(response, 200, { printed: true, printerName, printedProducts: items.length, printedLabels });
     }
     if (!payload.order?.id) return send(response, 400, { error: "Order details are required." });
     const printerName = await printOrder(payload.order, payload.printerName, payload.design);
