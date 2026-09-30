@@ -8984,7 +8984,7 @@ function ProductLibraryWorkspace({
     if (!product.barcode?.trim()) return onNotify("This product does not have a barcode yet");
     setPrintingBarcodeSku(product.sku);
     try {
-      await printProductBarcode({ productName: product.name, barcode: product.barcode, price: product.price, copies: 1 });
+      await printProductBarcode({ productName: product.name, sku: product.sku, barcode: product.barcode, price: product.price, copies: 1 });
       onNotify(`${product.name} barcode sent to the printer`);
     } catch (error) {
       onNotify(error instanceof Error ? error.message : "Could not print the barcode label");
@@ -9009,7 +9009,7 @@ function ProductLibraryWorkspace({
     const jobs = products.flatMap((product) => {
       const copies = selectedBarcodeCopies[product.sku];
       return copies && product.barcode?.trim()
-        ? [{ productName: product.name, barcode: product.barcode, price: product.price, copies }]
+        ? [{ productName: product.name, sku: product.sku, barcode: product.barcode, price: product.price, copies }]
         : [];
     });
     if (!jobs.length) return onNotify("Select at least one product to print");

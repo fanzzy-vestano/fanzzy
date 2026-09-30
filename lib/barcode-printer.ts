@@ -1,5 +1,6 @@
 export type ProductBarcodePrintInput = {
   productName: string;
+  sku?: string;
   barcode: string;
   price?: string | number;
   copies?: number;
@@ -30,6 +31,7 @@ export async function printProductBarcode(input: ProductBarcodePrintInput) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       productName: input.productName,
+      sku: input.sku,
       barcode,
       price: input.price,
       copies: Math.min(100, Math.max(1, Math.floor(Number(input.copies) || 1))),

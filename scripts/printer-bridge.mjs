@@ -220,6 +220,11 @@ const labelRate = (price) => {
   return amount ? `Rs. ${amount}` : "";
 };
 
+const labelFrp = (price) => {
+  const amount = parseMoney(price);
+  return Number.isFinite(amount) ? `FRP :${amount.toFixed(2)}` : "";
+};
+
 const makeBarcodeLabel = ({ productName, barcode, price, copies }) => {
   const esc = 0x1b;
   const gs = 0x1d;
@@ -245,30 +250,37 @@ const makeBarcodeLabel = ({ productName, barcode, price, copies }) => {
   return Buffer.concat(chunks);
 };
 
-const makeTscBarcodeLabel = ({ productName, barcode, price, copies }) => {
-  const cleanName = text(productName).replace(/["\r\n]/g, " ").replace(/\s+/g, " ").trim().slice(0, 24) || "Fanzzy product";
-  const rate = labelRate(price).slice(0, 14);
+const makeTscBarcodeLabel = ({ productName, sku, barcode, price, copies }) => {
+  const cleanName = text(productName).replace(/["\r\n]/g, " ").replace(/\s+/g, " ").trim().slice(0, 22) || "Fanzzy product";
+  const cleanSku = text(sku).replace(/["\r\n]/g, " ").replace(/\s+/g, " ").trim().slice(0, 22);
+  const rate = labelFrp(price).slice(0, 18);
   const cleanBarcode = text(barcode).replace(/["\r\n]/g, "").trim().slice(0, 32);
   const digits = cleanBarcode.replace(/\D/g, "");
-  const barcodeType = digits.length === 12 || digits.length === 13 ? "EAN13" : digits.length === 7 || digits.length === 8 ? "EAN8" : "128";
-  const barcodeContent = barcodeType === "EAN13" ? digits.slice(0, 12) : barcodeType === "EAN8" ? digits.slice(0, 7) : cleanBarcode;
   const printedBarcode = digits || cleanBarcode;
+  const barcodeContent = digits === cleanBarcode
+    ? digits.length % 2 === 0
+      ? `!105${digits}`
+      : `!104${digits.slice(0, 1)}!099${digits.slice(1)}`
+    : `!104${cleanBarcode}`;
   const count = Math.min(100, Math.max(1, Math.floor(Number(copies) || 1)));
-  // The 81 x 12 mm jewellery tag has a 54 mm printable panel followed by
-  // a 27 mm fastening tail. Keep every field inside the first 432 dots
-  // (54 mm at the TTP-244 Pro's 203 dpi) instead of printing on the tail.
+  // Match the supplied BarTender/TSC jewellery-label PRN exactly. Coordinates
+  // are measured from the right because every printable object is rotated 180°.
   return Buffer.from([
-    "SIZE 81 mm,12 mm",
-    "GAP 2 mm,0 mm",
-    "SPEED 3",
-    "DENSITY 8",
-    "DIRECTION 1",
+    "SIZE 79.5 mm, 12 mm",
+    "DIRECTION 0,0",
     "REFERENCE 0,0",
+    "OFFSET 0 mm",
+    "SET PEEL OFF",
+    "SET CUTTER OFF",
+    "SET PARTIAL_CUTTER OFF",
+    "SET TEAR ON",
     "CLS",
-    `TEXT 12,8,"1",0,1,1,"${cleanName}"`,
-    ...(rate ? [`TEXT 308,8,"1",0,1,1,"${rate}"`] : []),
-    `BARCODE 12,26,"${barcodeType}",28,0,0,2,4,"${barcodeContent}"`,
-    `TEXT 56,60,"1",0,1,1,"${printedBarcode}"`,
+    `BARCODE 422,86,"128M",37,0,180,2,4,"${barcodeContent}"`,
+    "CODEPAGE 1252",
+    `TEXT 411,43,"ROMAN.TTF",180,1,12,"${printedBarcode}"`,
+    ...(rate ? [`TEXT 587,31,"ROMAN.TTF",180,1,8,"${rate}"`] : []),
+    `TEXT 619,91,"ROMAN.TTF",180,1,8,"${cleanName}"`,
+    ...(cleanSku ? [`TEXT 619,64,"ROMAN.TTF",180,1,8,"${cleanSku}"`] : []),
     `PRINT 1,${count}`,
     "",
   ].join("\r\n"), "ascii");
