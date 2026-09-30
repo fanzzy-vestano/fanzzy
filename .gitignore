@@ -44,4 +44,5 @@ next-env.d.ts
 /work/
 docs/.vite/
 /.site-deploy-*/
+/.sites-reconcile-*/
 /fanzzy-site-*.tar.gz
