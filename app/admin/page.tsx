@@ -3,6 +3,7 @@
 
 import { Component, useEffect, useMemo, useRef, useState, type ChangeEvent, type ErrorInfo } from "react";
 import { Eye, Pencil, Printer, Trash2 } from "lucide-react";
+import QRCode from "react-qr-code";
 import { createProductCategoryResolver, mergeCatalogCategories } from "../../lib/catalog-categories";
 import {
   fetchCatalogCategories,
@@ -518,6 +519,8 @@ type PosQrState = {
   status: "idle" | "loading" | "ready" | "paid" | "error";
   id?: string;
   imageUrl?: string;
+  paymentUrl?: string;
+  mode?: "native_qr" | "payment_link";
   amount?: number;
   closeBy?: number;
   paymentId?: string;
@@ -7859,20 +7862,20 @@ function PosWorkspace({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ amount: Math.round(total * 100), reference: `POS-${Date.now()}` }),
         });
-        const payload = await response.json() as { id?: string; imageUrl?: string; amount?: number; closeBy?: number; error?: string };
-        if (!response.ok || !payload.id || !payload.imageUrl) throw new Error(payload.error || "Could not create the Razorpay UPI QR code.");
+        const payload = await response.json() as { id?: string; imageUrl?: string; paymentUrl?: string; mode?: "native_qr" | "payment_link"; amount?: number; closeBy?: number; error?: string };
+        if (!response.ok || !payload.id || (!payload.imageUrl && !payload.paymentUrl)) throw new Error(payload.error || "Could not create the Razorpay payment QR.");
         if (posQrRequestRef.current !== requestNumber) {
           void fetch(`${adminRazorpayApiUrl("pos-qr")}?id=${encodeURIComponent(payload.id)}`, { method: "DELETE" }).catch(() => undefined);
           return;
         }
-        const readyState: PosQrState = { status: "ready", id: payload.id, imageUrl: payload.imageUrl, amount: payload.amount || Math.round(total * 100), closeBy: payload.closeBy };
+        const readyState: PosQrState = { status: "ready", id: payload.id, imageUrl: payload.imageUrl, paymentUrl: payload.paymentUrl, mode: payload.mode, amount: payload.amount || Math.round(total * 100), closeBy: payload.closeBy };
         posQrRef.current = readyState;
         setPosQr(readyState);
       } catch (qrError) {
         if (posQrRequestRef.current !== requestNumber) return;
-        const rawMessage = qrError instanceof Error ? qrError.message : "Could not create the Razorpay UPI QR code.";
+        const rawMessage = qrError instanceof Error ? qrError.message : "Could not create the Razorpay payment QR.";
         const message = /requested url|not found|not enabled|feature/i.test(rawMessage)
-          ? "Razorpay UPI QR Codes is not enabled for this merchant account. Ask Razorpay Support to activate QR Codes."
+          ? "Razorpay could not create a payment request. Check that Payment Links are enabled for this merchant account."
           : rawMessage;
         const errorState: PosQrState = { status: "error", message };
         posQrRef.current = errorState;
@@ -8091,9 +8094,11 @@ function PosWorkspace({
           {paymentMethod === "UPI" && cartLines.length > 0 && <section className={`pos-upi-qr pos-upi-qr-${posQr.status}`} aria-live="polite">
             {posQr.status === "loading" && <><span className="pos-upi-qr-loader" /><div><strong>Creating Razorpay QR…</strong><small>The QR will include the exact bill amount.</small></div></>}
             {posQr.status === "error" && <><span className="pos-upi-qr-error">!</span><div><strong>QR unavailable</strong><small>{posQr.message}</small><button type="button" onClick={() => setPosQrRefresh((current) => current + 1)}>Retry</button></div></>}
-            {(posQr.status === "ready" || posQr.status === "paid") && posQr.imageUrl && <>
-              <img src={posQr.imageUrl} alt={`Razorpay UPI QR for ${formatAdminCurrency(total)}`} />
-              <div><small>RAZORPAY UPI</small><strong>{posQr.status === "paid" ? "Payment received" : `Scan to pay ${formatAdminCurrency(total)}`}</strong><span>{posQr.status === "paid" ? `Confirmed · ${posQr.paymentId}` : "Waiting for payment confirmation…"}</span></div>
+            {(posQr.status === "ready" || posQr.status === "paid") && (posQr.imageUrl || posQr.paymentUrl) && <>
+              {posQr.imageUrl
+                ? <img src={posQr.imageUrl} alt={`Razorpay UPI QR for ${formatAdminCurrency(total)}`} />
+                : <span className="pos-upi-qr-code" role="img" aria-label={`Razorpay payment QR for ${formatAdminCurrency(total)}`}><QRCode value={posQr.paymentUrl!} size={104} /></span>}
+              <div><small>{posQr.mode === "payment_link" ? "RAZORPAY PAYMENT QR" : "RAZORPAY UPI"}</small><strong>{posQr.status === "paid" ? "Payment received" : `Scan to pay ${formatAdminCurrency(total)}`}</strong><span>{posQr.status === "paid" ? `Confirmed · ${posQr.paymentId}` : posQr.mode === "payment_link" ? "Scan and complete payment on Razorpay…" : "Waiting for payment confirmation…"}</span></div>
               <b className={posQr.status === "paid" ? "is-paid" : ""}>{posQr.status === "paid" ? "✓" : "•••"}</b>
             </>}
           </section>}

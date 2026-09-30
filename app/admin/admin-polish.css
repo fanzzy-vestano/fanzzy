@@ -1785,7 +1785,8 @@
 .pos-payment-section button { background: #f4eee9; border: 1px solid transparent; color: var(--wine); font-family: var(--mono); font-size: 8px; padding: 10px; }
 .pos-payment-section button.active { background: var(--wine); border-color: var(--wine); color: #fff8ef; }
 .pos-upi-qr { align-items: center; background: #f8f4f0; border: 1px solid var(--admin-line); display: grid; gap: 12px; grid-template-columns: auto minmax(0, 1fr) auto; margin-top: 12px; min-height: 82px; padding: 11px; }
-.pos-upi-qr > img { background: #fff; border: 1px solid #e4d9d1; height: 116px; object-fit: contain; padding: 6px; width: 116px; }
+.pos-upi-qr > img, .pos-upi-qr-code { align-items: center; background: #fff; border: 1px solid #e4d9d1; display: flex; height: 116px; justify-content: center; object-fit: contain; padding: 6px; width: 116px; }
+.pos-upi-qr-code > svg { display: block; height: 100%; width: 100%; }
 .pos-upi-qr > div { display: grid; gap: 5px; min-width: 0; }
 .pos-upi-qr > div > small { color: var(--gold); font-family: var(--mono); font-size: 7px; letter-spacing: .08em; }
 .pos-upi-qr > div > strong { color: var(--wine); font-family: var(--serif); font-size: 17px; font-weight: 500; }
@@ -1845,7 +1846,7 @@
   .pos-product-card-image { height: 118px; }
   .pos-customer-fields { grid-template-columns: 1fr; }
   .pos-upi-qr { grid-template-columns: auto minmax(0, 1fr); }
-  .pos-upi-qr > img { height: 100px; width: 100px; }
+  .pos-upi-qr > img, .pos-upi-qr-code { height: 100px; width: 100px; }
   .pos-upi-qr > b { display: none; }
 }
 
