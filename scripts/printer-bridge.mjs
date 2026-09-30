@@ -245,7 +245,7 @@ const makeBarcodeLabel = ({ productName, barcode, price, copies }) => {
   return Buffer.concat(chunks);
 };
 
-const makeTscBarcodeLabel = ({ productName, barcode, price }) => {
+const makeTscBarcodeLabel = ({ productName, barcode, price, copies }) => {
   const cleanName = text(productName).replace(/["\r\n]/g, " ").replace(/\s+/g, " ").trim().slice(0, 24) || "Fanzzy product";
   const rate = labelRate(price).slice(0, 14);
   const cleanBarcode = text(barcode).replace(/["\r\n]/g, "").trim().slice(0, 32);
@@ -253,6 +253,7 @@ const makeTscBarcodeLabel = ({ productName, barcode, price }) => {
   const barcodeType = digits.length === 12 || digits.length === 13 ? "EAN13" : digits.length === 7 || digits.length === 8 ? "EAN8" : "128";
   const barcodeContent = barcodeType === "EAN13" ? digits.slice(0, 12) : barcodeType === "EAN8" ? digits.slice(0, 7) : cleanBarcode;
   const printedBarcode = digits || cleanBarcode;
+  const count = Math.min(100, Math.max(1, Math.floor(Number(copies) || 1)));
   // The 81 x 12 mm jewellery tag has a 54 mm printable panel followed by
   // a 27 mm fastening tail. Keep every field inside the first 432 dots
   // (54 mm at the TTP-244 Pro's 203 dpi) instead of printing on the tail.
@@ -268,7 +269,7 @@ const makeTscBarcodeLabel = ({ productName, barcode, price }) => {
     ...(rate ? [`TEXT 308,8,"1",0,1,1,"${rate}"`] : []),
     `BARCODE 12,26,"${barcodeType}",28,0,0,2,4,"${barcodeContent}"`,
     `TEXT 56,60,"1",0,1,1,"${printedBarcode}"`,
-    "PRINT 1,1",
+    `PRINT 1,${count}`,
     "",
   ].join("\r\n"), "ascii");
 };

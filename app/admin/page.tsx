@@ -26,7 +26,7 @@ import {
   uploadStoreImage,
 } from "../../lib/supabase/catalog";
 import { defaultBillDesignSettings, printOrderBill, type BillDesignSettings } from "../../lib/order-bill";
-import { prepareProductBarcodePrinter, printProductBarcode } from "../../lib/barcode-printer";
+import { prepareProductBarcodePrinter, printProductBarcode, printProductBarcodes } from "../../lib/barcode-printer";
 import { supabase } from "../../lib/supabase/client";
 import {
   defaultPromotionForm,
@@ -8143,6 +8143,9 @@ function ProductLibraryWorkspace({
   const [catalogCategories, setCatalogCategories] = useState<Array<{ name: string; pieces: number; image?: string; section?: CategorySection }>>([]);
   const [scannerOpen, setScannerOpen] = useState(false);
   const [printingBarcodeSku, setPrintingBarcodeSku] = useState<string | null>(null);
+  const [multiBarcodeMode, setMultiBarcodeMode] = useState(false);
+  const [selectedBarcodeCopies, setSelectedBarcodeCopies] = useState<Record<string, number>>({});
+  const [printingMultipleBarcodes, setPrintingMultipleBarcodes] = useState(false);
   const [editValues, setEditValues] = useState({
     name: "",
     category: "",
@@ -8776,6 +8779,10 @@ function ProductLibraryWorkspace({
       return matchesSearch && matchesCategory && matchesVariant && matchesSupplier;
     });
   }, [resolveProductCategory, productCategoryFilter, productSearch, productSupplierFilter, productVariantFilter, products]);
+  const selectedBarcodeProductCount = Object.keys(selectedBarcodeCopies).length;
+  const selectedBarcodeLabelCount = Object.values(selectedBarcodeCopies).reduce((sum, copies) => sum + copies, 0);
+  const allVisibleBarcodesSelected = filteredProducts.length > 0
+    && filteredProducts.every((product) => Boolean(selectedBarcodeCopies[product.sku]));
   const damageOptions = useMemo(() => {
     if (!selectedProduct) return [];
     const variants = selectedProduct.variants || [];
@@ -8973,7 +8980,7 @@ function ProductLibraryWorkspace({
     setIsEditing(false);
   };
   const printBarcode = async (product: AdminProduct) => {
-    if (printingBarcodeSku) return;
+    if (printingBarcodeSku || printingMultipleBarcodes) return;
     if (!product.barcode?.trim()) return onNotify("This product does not have a barcode yet");
     setPrintingBarcodeSku(product.sku);
     try {
@@ -8983,6 +8990,38 @@ function ProductLibraryWorkspace({
       onNotify(error instanceof Error ? error.message : "Could not print the barcode label");
     } finally {
       setPrintingBarcodeSku(null);
+    }
+  };
+  const toggleBarcodeSelection = (product: AdminProduct, selected: boolean) => {
+    setSelectedBarcodeCopies((current) => {
+      if (selected) return { ...current, [product.sku]: current[product.sku] || 1 };
+      const next = { ...current };
+      delete next[product.sku];
+      return next;
+    });
+  };
+  const updateBarcodeCopies = (sku: string, value: string) => {
+    const copies = Math.min(100, Math.max(1, Math.floor(Number(value) || 1)));
+    setSelectedBarcodeCopies((current) => ({ ...current, [sku]: copies }));
+  };
+  const printSelectedBarcodes = async () => {
+    if (printingBarcodeSku || printingMultipleBarcodes) return;
+    const jobs = products.flatMap((product) => {
+      const copies = selectedBarcodeCopies[product.sku];
+      return copies && product.barcode?.trim()
+        ? [{ productName: product.name, barcode: product.barcode, price: product.price, copies }]
+        : [];
+    });
+    if (!jobs.length) return onNotify("Select at least one product to print");
+    setPrintingMultipleBarcodes(true);
+    try {
+      const result = await printProductBarcodes(jobs);
+      onNotify(`${result.printedLabels} barcode label${result.printedLabels === 1 ? "" : "s"} for ${result.printedProducts} product${result.printedProducts === 1 ? "" : "s"} sent to the printer`);
+      setSelectedBarcodeCopies({});
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "Could not print the selected barcode labels");
+    } finally {
+      setPrintingMultipleBarcodes(false);
     }
   };
   const saveProduct = async () => {
@@ -9600,6 +9639,18 @@ function ProductLibraryWorkspace({
           <button className="module-secondary" onClick={exportCsv}>
             Export CSV ↗
           </button>
+          <button
+            className={`module-secondary barcode-multi-toggle${multiBarcodeMode ? " active" : ""}`}
+            type="button"
+            onClick={() => {
+              setMultiBarcodeMode((current) => !current);
+              if (multiBarcodeMode) setSelectedBarcodeCopies({});
+            }}
+            disabled={printingBarcodeSku !== null || printingMultipleBarcodes}
+          >
+            <Printer size={14} strokeWidth={1.8} aria-hidden="true" />
+            {multiBarcodeMode ? "Close multi print" : "Multi barcode print"}
+          </button>
           <button className="module-primary" onClick={() => openAddProduct()}>
             + Add product
           </button>
@@ -9973,12 +10024,64 @@ function ProductLibraryWorkspace({
           </button>
         )}
       </div>
+      {multiBarcodeMode && <div className="barcode-bulk-toolbar" aria-label="Multi barcode printing">
+        <div>
+          <strong>Multi barcode print</strong>
+          <span>{selectedBarcodeProductCount ? `${selectedBarcodeProductCount} product${selectedBarcodeProductCount === 1 ? "" : "s"} · ${selectedBarcodeLabelCount} label${selectedBarcodeLabelCount === 1 ? "" : "s"}` : "Select products and set the label quantity for each."}</span>
+        </div>
+        <div>
+          <button
+            className="module-secondary"
+            type="button"
+            onClick={() => setSelectedBarcodeCopies((current) => {
+              const next = { ...current };
+              if (allVisibleBarcodesSelected) filteredProducts.forEach((product) => { delete next[product.sku]; });
+              else filteredProducts.forEach((product) => { next[product.sku] = next[product.sku] || 1; });
+              return next;
+            })}
+            disabled={!filteredProducts.length || printingMultipleBarcodes}
+          >
+            {allVisibleBarcodesSelected ? "Deselect visible" : "Select visible"}
+          </button>
+          <button className="module-secondary" type="button" onClick={() => setSelectedBarcodeCopies({})} disabled={!selectedBarcodeProductCount || printingMultipleBarcodes}>Clear</button>
+          <button className="module-primary" type="button" onClick={() => void printSelectedBarcodes()} disabled={!selectedBarcodeProductCount || printingMultipleBarcodes || printingBarcodeSku !== null}>
+            <Printer size={14} strokeWidth={1.8} aria-hidden="true" />
+            {printingMultipleBarcodes ? "Printing…" : selectedBarcodeLabelCount ? `Print ${selectedBarcodeLabelCount} label${selectedBarcodeLabelCount === 1 ? "" : "s"}` : "Print labels"}
+          </button>
+        </div>
+      </div>}
       <div className="module-list">
         {filteredProducts.map((product, index) => (
           <div
             key={product.sku}
-            className={`product-list-row ${selectedProduct?.sku === product.sku ? "selected" : ""}`}
+            className={`product-list-row${selectedProduct?.sku === product.sku ? " selected" : ""}${multiBarcodeMode ? " barcode-multi-select" : ""}`}
           >
+            {multiBarcodeMode && <div className="barcode-row-selector">
+              <label>
+                <input
+                  type="checkbox"
+                  checked={Boolean(selectedBarcodeCopies[product.sku])}
+                  onChange={(event) => toggleBarcodeSelection(product, event.target.checked)}
+                  disabled={printingMultipleBarcodes}
+                  aria-label={`Select ${product.name} barcode`}
+                />
+                <span>Select</span>
+              </label>
+              {selectedBarcodeCopies[product.sku] && <label className="barcode-copy-count">
+                <span>Labels</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="100"
+                  step="1"
+                  value={selectedBarcodeCopies[product.sku]}
+                  onChange={(event) => updateBarcodeCopies(product.sku, event.target.value)}
+                  onWheel={(event) => event.currentTarget.blur()}
+                  disabled={printingMultipleBarcodes}
+                  aria-label={`Label quantity for ${product.name}`}
+                />
+              </label>}
+            </div>}
             <button
               className="product-list-main"
               onClick={() => {
@@ -10036,7 +10139,7 @@ function ProductLibraryWorkspace({
                 onClick={() => void printBarcode(product)}
                 aria-label={`Print barcode for ${product.name}`}
                 title={printingBarcodeSku === product.sku ? "Printing barcode" : "Print barcode"}
-                disabled={printingBarcodeSku !== null}
+                disabled={printingBarcodeSku !== null || printingMultipleBarcodes}
               >
                 <Printer size={15} strokeWidth={1.8} aria-hidden="true" />
               </button>
@@ -10458,7 +10561,7 @@ function ProductLibraryWorkspace({
               <button
                 className="module-secondary barcode-print-detail-action"
                 onClick={() => void printBarcode(selectedProduct)}
-                disabled={printingBarcodeSku !== null}
+                disabled={printingBarcodeSku !== null || printingMultipleBarcodes}
               >
                 <Printer size={15} strokeWidth={1.8} aria-hidden="true" />
                 {printingBarcodeSku === selectedProduct.sku ? "Printing…" : "Print barcode"}

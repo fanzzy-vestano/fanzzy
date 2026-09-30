@@ -40,3 +40,28 @@ export async function printProductBarcode(input: ProductBarcodePrintInput) {
   if (!response.ok || !payload.printed) throw new Error(payload.error || "Could not print the barcode label.");
   return payload;
 }
+
+export async function printProductBarcodes(inputs: ProductBarcodePrintInput[]) {
+  const jobs = inputs.filter((input) => String(input.barcode || "").trim());
+  if (!jobs.length) throw new Error("Select at least one product with a barcode.");
+
+  let printedProducts = 0;
+  let printedLabels = 0;
+  for (const input of jobs) {
+    const copies = Math.min(100, Math.max(1, Math.floor(Number(input.copies) || 1)));
+    try {
+      // Send one label per queued request so multi-copy batches also work
+      // with an already-running printer bridge that predates copy support.
+      for (let copy = 0; copy < copies; copy += 1) {
+        await printProductBarcode({ ...input, copies: 1 });
+        printedLabels += 1;
+      }
+      printedProducts += 1;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not print the barcode label.";
+      throw new Error(`${printedLabels} label${printedLabels === 1 ? "" : "s"} printed before ${input.productName} failed: ${message}`);
+    }
+  }
+
+  return { printedProducts, printedLabels };
+}
