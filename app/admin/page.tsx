@@ -2,13 +2,14 @@
 /* eslint-disable @next/next/no-html-link-for-pages */
 
 import { Component, useEffect, useMemo, useRef, useState, type ChangeEvent, type ErrorInfo } from "react";
-import { Eye, Pencil, Trash2 } from "lucide-react";
+import { Eye, Pencil, Printer, Trash2 } from "lucide-react";
 import { createProductCategoryResolver, mergeCatalogCategories } from "../../lib/catalog-categories";
 import {
   fetchCatalogCategories,
   fetchCatalogProducts,
   fetchStoreOrders,
   fetchStoreSetting,
+  decrementCatalogStock,
   inferLegacyCategorySections,
   isSupabaseReady,
   removeCatalogCategory,
@@ -24,6 +25,7 @@ import {
   uploadStoreImage,
 } from "../../lib/supabase/catalog";
 import { defaultBillDesignSettings, printOrderBill, type BillDesignSettings } from "../../lib/order-bill";
+import { prepareProductBarcodePrinter, printProductBarcode } from "../../lib/barcode-printer";
 import { supabase } from "../../lib/supabase/client";
 import {
   defaultPromotionForm,
@@ -114,6 +116,7 @@ type AdminPermission =
   | "Products"
   | "Purchase Entry"
   | "Product Image Scanner"
+  | "POS"
   | "Categories"
   | "Collections"
    | "Orders"
@@ -156,6 +159,7 @@ const allAdminPermissions: AdminPermission[] = [
   "Products",
   "Purchase Entry",
   "Product Image Scanner",
+  "POS",
   "Categories",
   "Collections",
   "Orders",
@@ -196,6 +200,10 @@ const defaultHeroSlideDuration = 5.2;
 const defaultDeliveryCharge = { enabled: false, amount: 99, freeAboveEnabled: false, freeAbove: 999 };
 type PaymentSettings = { online: boolean; cod: boolean; provider: string; codCharge: number };
 const defaultPaymentSettings: PaymentSettings = { online: true, cod: true, provider: "Razorpay", codCharge: 0 };
+const adminRazorpayApiBaseUrl = (process.env.NEXT_PUBLIC_RAZORPAY_API_URL ?? "").replace(/\/$/, "");
+const adminRazorpayApiUrl = (path: "pos-qr") => adminRazorpayApiBaseUrl
+  ? `${adminRazorpayApiBaseUrl}/${path}`
+  : `/api/razorpay/${path}`;
 type RefundRequestStatus = "Requested" | "Approved" | "Rejected" | "Refunded";
 type RefundRequest = {
   id: string;
@@ -504,6 +512,17 @@ type OrderStatus =
 type OrderStatusFilter = "all" | OrderStatus;
 type PromotionCartLine = { groupId: string; offerId: string; role: "paid" | "free" | "bundle"; label: string; regularPrice: number; linePrice: number };
 type OrderItem = { name: string; productName?: string; quantity: number; price: string; productId?: string; image?: string; variantName?: string; variantImage?: string; size?: string; promotion?: PromotionCartLine };
+type DelhiveryScan = { status: string; date?: string; location?: string; instructions?: string };
+type PosPaymentMethod = "Cash" | "UPI" | "Card";
+type PosQrState = {
+  status: "idle" | "loading" | "ready" | "paid" | "error";
+  id?: string;
+  imageUrl?: string;
+  amount?: number;
+  closeBy?: number;
+  paymentId?: string;
+  message?: string;
+};
 type OrderRecord = {
   id: string;
   invoiceNumber?: string;
@@ -526,9 +545,12 @@ type OrderRecord = {
   couponDiscount?: number;
   paymentStatus?: "pending" | "paid" | "cod_pending" | "cod_collected";
   paymentMethod?: "online" | "cod";
+  posPaymentMethod?: PosPaymentMethod;
+  posSale?: boolean;
   codCharge?: number;
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
+  razorpayQrCodeId?: string;
   inventoryAdjusted?: boolean;
   delhiveryAwb?: string;
   delhiveryTrackingUrl?: string;
@@ -546,6 +568,7 @@ type OrderRecord = {
   delhiveryLiveStatusDate?: string;
   delhiveryLiveLocation?: string;
   delhiveryLastTrackedAt?: string;
+  delhiveryScans?: DelhiveryScan[];
   items?: OrderItem[];
 };
 const adminOrders: OrderRecord[] = [];
@@ -553,6 +576,34 @@ const isDemoOrder = (order: { id?: string }) => /^#FZ-104[4-8]$/.test(String(ord
 // Only verified payments belong in the operational Orders and Reports views.
 // Pending checkout records remain stored for payment recovery but stay hidden.
 const hasConfirmedPayment = (order: Pick<OrderRecord, "paymentStatus" | "razorpayPaymentId">) => order.paymentStatus === "paid" || order.paymentStatus === "cod_pending" || order.paymentStatus === "cod_collected" || Boolean(order.razorpayPaymentId);
+const orderPaymentLabel = (order: Pick<OrderRecord, "paymentMethod" | "posPaymentMethod">) => order.posPaymentMethod ? `POS · ${order.posPaymentMethod}` : order.paymentMethod === "cod" ? "COD" : "Online payment";
+const orderPaymentMethodDetail = (order: Pick<OrderRecord, "paymentMethod" | "posPaymentMethod">) => order.posPaymentMethod ? `POS · ${order.posPaymentMethod}` : order.paymentMethod === "cod" ? "COD · Cash on delivery" : "Online payment";
+const orderPaymentStatusDetail = (order: Pick<OrderRecord, "paymentMethod" | "paymentStatus">) => order.paymentMethod === "cod"
+  ? order.paymentStatus === "cod_collected" ? "Collected" : "Pay on delivery"
+  : order.paymentStatus === "paid" ? "Paid" : "Awaiting payment";
+const orderFulfillmentLabel = (order: Pick<OrderRecord, "fulfillmentMethod" | "pickupHubName" | "pickupHubPlace">) => order.fulfillmentMethod === "pickup"
+  ? `Pickup from ${order.pickupHubName || order.pickupHubPlace || "hub"}`
+  : "Delivery";
+const delhiveryTimelineStages = [
+  { key: "ready", label: "Ready to ship", match: /manifest|ready|shipment created|confirmed/i },
+  { key: "pickup", label: "Scheduled for pickup", match: /pickup|schedule|booked/i },
+  { key: "transit", label: "In-transit", match: /transit|dispatched|picked|shipped|reached destination/i },
+  { key: "out-for-delivery", label: "Out for delivery", match: /out for delivery|out-for-delivery/i },
+  { key: "delivered", label: "Delivered", match: /delivered|successfully delivered/i },
+] as const;
+const delhiveryTimelineStageIndex = (status: string) => {
+  const normalized = status.toLowerCase();
+  if (/delivered|successfully delivered/.test(normalized)) return 4;
+  if (/out for delivery|out-for-delivery/.test(normalized)) return 3;
+  if (/transit|dispatched|picked|shipped|reached destination/.test(normalized)) return 2;
+  if (/pickup|schedule|booked/.test(normalized)) return 1;
+  return 0;
+};
+const delhiveryTimelineDate = (value?: string) => {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
+};
 const safeOrderStatus = (value: unknown): OrderStatus => value === "Packed" || value === "Shipped" || value === "Delivered" || value === "Cancelled" ? value : "Processing";
 const orderListsEqual = (left: OrderRecord[], right: OrderRecord[]) => left.length === right.length && left.every((order, index) => order.id === right[index]?.id && JSON.stringify(order) === JSON.stringify(right[index]));
 const safeOrderString = (value: unknown, fallback = "") => typeof value === "string" ? value : typeof value === "number" || typeof value === "boolean" ? String(value) : fallback;
@@ -597,11 +648,33 @@ const normalizeOrderRecordForDisplay = (value: unknown): OrderRecord | null => {
   const source = value as Record<string, unknown>;
   const id = safeOrderString(source.id);
   if (!id) return null;
-  const paymentStatus = source.paymentStatus === "paid" || source.paymentStatus === "cod_pending" || source.paymentStatus === "cod_collected" || source.paymentStatus === "pending" ? source.paymentStatus : undefined;
-  const paymentMethod = source.paymentMethod === "cod" || source.paymentMethod === "online" ? source.paymentMethod : undefined;
-  const fulfillmentMethod = source.fulfillmentMethod === "pickup" ? "pickup" : "delivery";
+  const rawPaymentStatus = safeOrderString(source.paymentStatus ?? source.payment_status).toLowerCase();
+  const paymentStatus = rawPaymentStatus === "paid" || rawPaymentStatus === "cod_pending" || rawPaymentStatus === "cod_collected" || rawPaymentStatus === "pending"
+    ? rawPaymentStatus as OrderRecord["paymentStatus"]
+    : undefined;
+  const rawPaymentMethod = safeOrderString(source.paymentMethod ?? source.payment_method ?? source.paymentMode ?? source.payment_mode ?? source.payment).toLowerCase();
+  const paymentMethod = /cod|cash[ -]?on[ -]?delivery|pay[ -]?on[ -]?delivery/.test(rawPaymentMethod)
+    ? "cod"
+    : /online|razorpay|prepaid|paid[ -]?online/.test(rawPaymentMethod) || source.razorpayPaymentId != null || source.razorpayOrderId != null
+      ? "online"
+      : rawPaymentStatus === "cod_pending" || rawPaymentStatus === "cod_collected" || source.codCharge != null
+        ? "cod"
+        : "online";
+  const fulfillmentMethod = source.fulfillmentMethod === "pickup" || Boolean(source.pickupHubId || source.pickupHubName || source.pickupHubPlace) ? "pickup" : "delivery";
   const shipmentStatus = source.delhiveryShipmentStatus === "created" || source.delhiveryShipmentStatus === "failed" || source.delhiveryShipmentStatus === "skipped" ? source.delhiveryShipmentStatus : source.delhiveryShipmentStatus === "pending" ? "pending" : undefined;
-  const pickupStatus = source.delhiveryPickupRequestStatus === "created" || source.delhiveryPickupRequestStatus === "covered" || source.delhiveryPickupRequestStatus === "failed" || source.delhiveryPickupRequestStatus === "skipped" ? source.delhiveryPickupRequestStatus : source.delhiveryPickupRequestStatus === "pending" ? "pending" : undefined;
+  const pickupRequestError = safeOrderString(source.delhiveryPickupRequestError) || undefined;
+  const pickupStatus = source.delhiveryPickupRequestStatus === "created" || source.delhiveryPickupRequestStatus === "covered" || source.delhiveryPickupRequestStatus === "failed" || source.delhiveryPickupRequestStatus === "skipped" ? source.delhiveryPickupRequestStatus : source.delhiveryPickupRequestStatus === "pending" ? (pickupRequestError ? "failed" : "pending") : undefined;
+  const delhiveryScans = Array.isArray(source.delhiveryScans)
+    ? source.delhiveryScans.map((scan) => {
+      const record = scan && typeof scan === "object" ? scan as Record<string, unknown> : {};
+      return {
+        status: safeOrderString(record.status, "Update"),
+        date: safeOrderString(record.date) || undefined,
+        location: safeOrderString(record.location) || undefined,
+        instructions: safeOrderString(record.instructions) || undefined,
+      };
+    }).filter((scan) => scan.status)
+    : [];
   return {
     id,
     invoiceNumber: safeOrderString(source.invoiceNumber) || undefined,
@@ -624,9 +697,12 @@ const normalizeOrderRecordForDisplay = (value: unknown): OrderRecord | null => {
     couponDiscount: safeOrderNumber(source.couponDiscount) || undefined,
     paymentStatus,
     paymentMethod,
+    posPaymentMethod: source.posPaymentMethod === "Cash" || source.posPaymentMethod === "UPI" || source.posPaymentMethod === "Card" ? source.posPaymentMethod : undefined,
+    posSale: source.posSale === true,
     codCharge: safeOrderNumber(source.codCharge) || undefined,
     razorpayOrderId: safeOrderString(source.razorpayOrderId) || undefined,
     razorpayPaymentId: safeOrderString(source.razorpayPaymentId) || undefined,
+    razorpayQrCodeId: safeOrderString(source.razorpayQrCodeId) || undefined,
     inventoryAdjusted: source.inventoryAdjusted === true,
     delhiveryAwb: safeOrderString(source.delhiveryAwb) || undefined,
     delhiveryTrackingUrl: safeOrderString(source.delhiveryTrackingUrl) || undefined,
@@ -638,12 +714,13 @@ const normalizeOrderRecordForDisplay = (value: unknown): OrderRecord | null => {
     delhiveryPickupRequestDate: safeOrderString(source.delhiveryPickupRequestDate) || undefined,
     delhiveryPickupRequestTime: safeOrderString(source.delhiveryPickupRequestTime) || undefined,
     delhiveryPickupExpectedPackageCount: safeOrderNumber(source.delhiveryPickupExpectedPackageCount) || undefined,
-    delhiveryPickupRequestError: safeOrderString(source.delhiveryPickupRequestError) || undefined,
+    delhiveryPickupRequestError: pickupRequestError,
     delhiveryLiveStatus: safeOrderString(source.delhiveryLiveStatus) || undefined,
     delhiveryLiveStatusType: safeOrderString(source.delhiveryLiveStatusType) || undefined,
     delhiveryLiveStatusDate: safeOrderString(source.delhiveryLiveStatusDate) || undefined,
     delhiveryLiveLocation: safeOrderString(source.delhiveryLiveLocation) || undefined,
     delhiveryLastTrackedAt: safeOrderString(source.delhiveryLastTrackedAt) || undefined,
+    delhiveryScans,
     items: Array.isArray(source.items) ? source.items.map(normalizeOrderItemForDisplay) : [],
   };
 };
@@ -851,6 +928,77 @@ const saveProductBarcodes = async (catalog: AdminProduct[]) => {
   );
   await saveStoreSetting("productBarcodes", JSON.stringify(barcodes));
 };
+
+const barcodeCheckDigit = (body: string) => {
+  const sum = body.split("").reduce((total, digit, index) => total + Number(digit) * (index % 2 === 0 ? 1 : 3), 0);
+  return String((10 - (sum % 10)) % 10);
+};
+
+const barcodeHash = (value: string) => {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+};
+
+const createProductBarcode = (sku: string, usedBarcodes: Set<string>) => {
+  let attempt = 0;
+  while (attempt < 10000) {
+    // 29 is reserved for restricted-circulation/internal-use EAN numbers.
+    const payload = `290${String(barcodeHash(`${sku}:${attempt}`) % 1_000_000_000).padStart(9, "0")}`;
+    const barcode = `${payload}${barcodeCheckDigit(payload)}`;
+    if (!usedBarcodes.has(barcode)) return barcode;
+    attempt += 1;
+  }
+  const fallbackBody = `290${String(Date.now() % 1_000_000_000).padStart(9, "0")}`;
+  return `${fallbackBody}${barcodeCheckDigit(fallbackBody)}`;
+};
+
+const ensureProductBarcodes = (catalog: AdminProduct[]) => {
+  const used = new Set<string>();
+  let changed = false;
+  const products = catalog.map((product) => {
+    const supplied = product.barcode?.trim() || "";
+    const barcode = supplied && !used.has(supplied)
+      ? supplied
+      : createProductBarcode(product.sku || product.name, used);
+    used.add(barcode);
+    if (barcode !== supplied) changed = true;
+    return barcode === product.barcode ? product : { ...product, barcode };
+  });
+  return { products, changed };
+};
+
+const eanDigitPatterns = {
+  L: ["0001101", "0011001", "0010011", "0111101", "0100011", "0110001", "0101111", "0111011", "0110111", "0001011"],
+  G: ["0100111", "0110011", "0011011", "0100001", "0011101", "0111001", "0000101", "0010001", "0001001", "0010111"],
+  R: ["1110010", "1100110", "1101100", "1000010", "1011100", "1001110", "1010000", "1000100", "1001000", "1110100"],
+} as const;
+const eanParity = ["LLLLLL", "LLGLGG", "LLGGLG", "LLGGGL", "LGLLGG", "LGGLLG", "LGGGLL", "LGLGLG", "LGLGGL", "LGGLGL"] as const;
+
+const ean13Bits = (value: string) => {
+  const digits = value.replace(/\D/g, "");
+  const normalized = digits.length === 12 ? `0${digits}` : digits;
+  if (normalized.length !== 13) return "";
+  const first = Number(normalized[0]);
+  const left = normalized.slice(1, 7).split("").map((digit, index) => eanDigitPatterns[eanParity[first][index] as "L" | "G"][Number(digit)]).join("");
+  const right = normalized.slice(7).split("").map((digit) => eanDigitPatterns.R[Number(digit)]).join("");
+  return `101${left}01010${right}101`;
+};
+
+function ProductBarcode({ value }: { value: string }) {
+  const bits = ean13Bits(value);
+  return (
+    <span className="product-barcode" title={`Barcode ${value}`} aria-label={`Barcode ${value}`}>
+      {bits ? <svg viewBox="0 0 115 34" role="img" aria-hidden="true" preserveAspectRatio="none" shapeRendering="crispEdges">
+        {bits.split("").map((bit, index) => bit === "1" ? <rect key={index} x={index + 10} y="0" width="1" height="28" /> : null)}
+      </svg> : <span className="product-barcode-fallback" aria-hidden="true" />}
+      <small>{value}</small>
+    </span>
+  );
+}
 const saveProductHsnCodes = async (catalog: AdminProduct[]) => {
   const hsnCodes = Object.fromEntries(
     catalog
@@ -943,6 +1091,7 @@ const menu = [
   { label: "Overview", icon: "◌" },
   { label: "Products", icon: "◇", count: "24" },
   { label: "Purchase Entry", icon: "＋" },
+  { label: "POS", icon: "▣" },
   { label: "Supplier Bills", icon: "▥" },
   { label: "Suppliers", icon: "▤" },
   { label: "Categories", icon: "▦" },
@@ -1219,6 +1368,7 @@ function AdminDashboard() {
   const [activeRoleId, setActiveRoleId] = useState("vestano");
   const [reportsOpen, setReportsOpen] = useState(false);
   const [productScannerRequest, setProductScannerRequest] = useState(0);
+  const [posWorkspaceRequest, setPosWorkspaceRequest] = useState(0);
   const [reportView, setReportView] = useState<ReportView>("overview");
   const [query, setQuery] = useState("");
   const [toast, setToast] = useState("");
@@ -1234,6 +1384,9 @@ function AdminDashboard() {
   useEffect(() => {
     const timer = window.setInterval(() => setLiveDate(new Date()), 60 * 1000);
     return () => window.clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    void prepareProductBarcodePrinter().catch(() => undefined);
   }, []);
   const categories = useMemo(
     () => [
@@ -1515,6 +1668,11 @@ function AdminDashboard() {
                   setProductScannerRequest((current) => current + 1);
                   return;
                 }
+                if (item.label === "POS") {
+                  setActive(item.label);
+                  setPosWorkspaceRequest((current) => current + 1);
+                  return;
+                }
                 setActive(item.label);
               }}
             >
@@ -1600,7 +1758,7 @@ function AdminDashboard() {
           )}
         </div>
         {active !== "Overview" && (
-          <ModuleWorkspace module={active} onNotify={notify} reportView={reportView} productScannerRequest={productScannerRequest} />
+          <ModuleWorkspace module={active} onNotify={notify} reportView={reportView} productScannerRequest={productScannerRequest} posWorkspaceRequest={posWorkspaceRequest} />
         )}
         <div className="stats-grid">
           <Stat
@@ -2631,14 +2789,18 @@ function ModuleWorkspace({
   onNotify,
   reportView = "overview",
   productScannerRequest = 0,
+  posWorkspaceRequest = 0,
 }: {
   module: string;
   onNotify: (message: string) => void;
   reportView?: ReportView;
   productScannerRequest?: number;
+  posWorkspaceRequest?: number;
 }) {
   if (module === "Product Image Scanner")
     return <ProductLibraryWorkspace onNotify={onNotify} productScannerRequest={productScannerRequest} scannerOnly />;
+  if (module === "POS")
+    return <PosWorkspace onNotify={onNotify} request={posWorkspaceRequest} />;
   if (module === "Products")
     return <ProductLibraryWorkspace onNotify={onNotify} />;
   if (module === "Purchase Entry")
@@ -3408,9 +3570,13 @@ function ReportsWorkspace({
       daily.set(order.date, current);
     });
     const dailyRows = Array.from(daily.entries()).map(([date, values]) => ({ date, ...values })).sort((a, b) => b.date.localeCompare(a.date));
+    const onlineOrders = filteredOrders.filter((order) => !order.posSale && order.paymentMethod !== "cod" && Boolean(order.razorpayPaymentId));
+    const codOrders = filteredOrders.filter((order) => !order.posSale && order.paymentMethod === "cod");
+    const posOrders = filteredOrders.filter((order) => order.posSale);
     const payments = [
-      { name: "Online", count: filteredOrders.filter((order) => order.paymentMethod !== "cod" && Boolean(order.razorpayPaymentId)).length, revenue: filteredOrders.filter((order) => order.paymentMethod !== "cod" && Boolean(order.razorpayPaymentId)).reduce((sum, order) => sum + parseReportMoney(order.total), 0) },
-      { name: "COD", count: filteredOrders.filter((order) => order.paymentMethod === "cod").length, revenue: filteredOrders.filter((order) => order.paymentMethod === "cod").reduce((sum, order) => sum + parseReportMoney(order.total), 0) },
+      { name: "Online", count: onlineOrders.length, revenue: onlineOrders.reduce((sum, order) => sum + parseReportMoney(order.total), 0) },
+      { name: "COD", count: codOrders.length, revenue: codOrders.reduce((sum, order) => sum + parseReportMoney(order.total), 0) },
+      { name: "POS", count: posOrders.length, revenue: posOrders.reduce((sum, order) => sum + parseReportMoney(order.total), 0) },
     ];
     const fulfilment = [
       { name: "Delivery", count: filteredOrders.filter((order) => order.fulfillmentMethod !== "pickup").length },
@@ -3480,7 +3646,7 @@ function ReportsWorkspace({
       rows = report.inventoryRows.map((row) => [row.product.name, row.product.sku, row.product.category, row.product.status, row.movement, row.product.stock, row.units, formatAdminCurrency(parseReportMoney(row.product.price)), formatAdminCurrency(row.stockValue), formatAdminCurrency(row.costValue)]);
     } else if (view === "orders") {
       headers = ["order_id", "date", "customer", "status", "payment", "fulfilment", "items", "total", "phone", "email"];
-      rows = report.orderRows.map((order) => [order.id, order.date, order.customerName, order.status, order.paymentMethod === "cod" ? "COD" : order.razorpayPaymentId ? "Online" : "Cash / other", order.fulfillmentMethod === "pickup" ? `Pickup · ${order.pickupHubName || "Hub"}` : "Delivery", order.items?.reduce((sum, item) => sum + Math.max(0, Number(item.quantity) || 0), 0) || 0, order.total, order.userPhone || order.phone, order.userEmail || order.email || ""]);
+      rows = report.orderRows.map((order) => [order.id, order.date, order.customerName, order.status, orderPaymentLabel(order), order.fulfillmentMethod === "pickup" ? `Pickup · ${order.pickupHubName || "Hub"}` : "Delivery", order.items?.reduce((sum, item) => sum + Math.max(0, Number(item.quantity) || 0), 0) || 0, order.total, order.userPhone || order.phone, order.userEmail || order.email || ""]);
     } else if (view === "damaged") {
       headers = ["date", "product", "sku", "category", "quantity", "stock_scope", "reason", "estimated_retail_value", "estimated_cost_value"];
       rows = report.damagedRows.map((row) => [row.createdAt.slice(0, 10), row.productName, row.sku, row.category, row.quantity, row.stockScope, row.reason, formatAdminCurrency(row.retailValue), formatAdminCurrency(row.costValue)]);
@@ -3590,7 +3756,7 @@ function ReportsWorkspace({
         {view === "category" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Every category</strong><span>{report.categoryRows.length} rows</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Category</th><th>Products</th><th>Units sold</th><th>Revenue</th><th>Profit</th><th>Stock units</th><th>Stock value</th><th>Cost value</th></tr></thead><tbody>{report.categoryRows.map((category) => <tr key={category.name}><td>{category.name}</td><td>{category.products}</td><td>{category.units}</td><td>{formatAdminCurrency(category.revenue)}</td><td>{formatAdminCurrency(category.profit)}</td><td>{category.stockUnits}</td><td>{formatAdminCurrency(category.stockValue)}</td><td>{formatAdminCurrency(category.costValue)}</td></tr>)}</tbody></table></div></div>}
         {(view === "item" || view === "top-selling") && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><div><strong>{view === "top-selling" ? "Ranked best sellers" : "Every catalog item"}</strong><span>{view === "top-selling" ? report.topProducts.length : itemReportRows.length} rows</span></div>{view === "item" && <label className="report-table-filter">Filter items<select value={itemMovementFilter} onChange={(event) => setItemMovementFilter(event.target.value as ReportMovementFilter)}><option value="all">All items</option><option value="sales">Sales items</option><option value="slow">Slow moving</option><option value="no-sales">No sales</option><option value="out-of-stock">Out of stock</option></select></label>}</div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>{view === "top-selling" ? "Rank" : "Product"}</th><th>{view === "top-selling" ? "Product" : "SKU"}</th><th>Category</th><th>Units</th><th>Revenue</th><th>Profit</th><th>Stock</th>{view === "item" && <th>Stock details</th>}<th>Stock value</th><th>Cost value</th><th>Movement</th></tr></thead><tbody>{(view === "top-selling" ? report.topProducts : itemReportRows).map((row, index) => <tr key={row.product.sku}><td>{view === "top-selling" ? String(index + 1).padStart(2, "0") : row.product.name}</td><td>{view === "top-selling" ? row.product.name : row.product.sku}</td><td>{row.product.category}</td><td>{row.units}</td><td>{formatAdminCurrency(row.revenue)}</td><td>{formatAdminCurrency(row.profit)}</td><td>{row.stock}</td>{view === "item" && <td>{row.stockDetails}</td>}<td>{formatAdminCurrency(row.stockValue)}</td><td>{formatAdminCurrency(row.costValue)}</td><td><span className={`report-movement ${row.movement.toLowerCase().replace(/\s+/g, "-")}`}>{row.movement}</span></td></tr>)}</tbody></table></div>{view === "item" && <p className="report-help">Stock and cost value include variant or size stock when those quantities are configured. Stock details shows the quantity for each option.</p>}</div>}
         {view === "inventory" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Complete inventory movement</strong><span>{report.inventoryRows.length} products</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Product</th><th>SKU</th><th>Category</th><th>Status</th><th>Movement</th><th>Stock</th><th>Units sold</th><th>Unit price</th><th>Stock value</th><th>Cost value</th></tr></thead><tbody>{report.inventoryRows.map((row) => <tr key={row.product.sku}><td>{row.product.name}</td><td>{row.product.sku}</td><td>{row.product.category}</td><td>{row.product.status}</td><td><span className={`report-movement ${row.movement.toLowerCase().replace(/\s+/g, "-")}`}>{row.movement}</span></td><td>{row.product.stock}</td><td>{row.units}</td><td>{formatAdminCurrency(parseReportMoney(row.product.price))}</td><td>{formatAdminCurrency(row.stockValue)}</td><td>{formatAdminCurrency(row.costValue)}</td></tr>)}</tbody></table></div></div>}
-         {view === "orders" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Every confirmed order</strong><span>{report.orderRows.length} orders</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Order</th><th>Date</th><th>Customer</th><th>Status</th><th>Payment</th><th>Fulfilment</th><th>Items</th><th>Total</th><th>Phone</th></tr></thead><tbody>{report.orderRows.length ? report.orderRows.map((order) => <tr key={order.id}><td>{order.id}</td><td>{order.date}</td><td>{order.customerName}</td><td><span className={`report-order-status ${order.status.toLowerCase()}`}>{order.status}</span></td><td>{order.paymentMethod === "cod" ? "COD" : order.razorpayPaymentId ? "Online" : "Cash / other"}</td><td>{order.fulfillmentMethod === "pickup" ? `Pickup · ${order.pickupHubName || "Hub"}` : "Delivery"}</td><td>{order.items?.reduce((sum, item) => sum + Math.max(0, Number(item.quantity) || 0), 0) || 0}</td><td>{order.total}</td><td>{order.userPhone || order.phone}</td></tr>) : <tr><td colSpan={9}>No confirmed orders in this period.</td></tr>}</tbody></table></div></div>}
+         {view === "orders" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Every confirmed order</strong><span>{report.orderRows.length} orders</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Order</th><th>Date</th><th>Customer</th><th>Status</th><th>Payment</th><th>Fulfilment</th><th>Items</th><th>Total</th><th>Phone</th></tr></thead><tbody>{report.orderRows.length ? report.orderRows.map((order) => <tr key={order.id}><td>{order.id}</td><td>{order.date}</td><td>{order.customerName}</td><td><span className={`report-order-status ${order.status.toLowerCase()}`}>{order.status}</span></td><td>{orderPaymentLabel(order)}</td><td>{order.fulfillmentMethod === "pickup" ? `Pickup · ${order.pickupHubName || "Hub"}` : "Delivery"}</td><td>{order.items?.reduce((sum, item) => sum + Math.max(0, Number(item.quantity) || 0), 0) || 0}</td><td>{order.total}</td><td>{order.userPhone || order.phone}</td></tr>) : <tr><td colSpan={9}>No confirmed orders in this period.</td></tr>}</tbody></table></div></div>}
          {view === "damaged" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Every damaged item</strong><span>{report.damagedRows.length} records · {report.damagedUnits} units</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Date</th><th>Product</th><th>SKU</th><th>Category</th><th>Quantity</th><th>Scope</th><th>Reason</th><th>Retail value</th><th>Cost value</th></tr></thead><tbody>{report.damagedRows.length ? report.damagedRows.map((row) => <tr key={row.id}><td>{row.createdAt.slice(0, 10)}</td><td>{row.productName}</td><td>{row.sku}</td><td>{row.category}</td><td>{row.quantity}</td><td>{row.stockScope}</td><td>{row.reason}</td><td>{formatAdminCurrency(row.retailValue)}</td><td>{formatAdminCurrency(row.costValue)}</td></tr>) : <tr><td colSpan={9}>No damaged items in this period.</td></tr>}</tbody></table></div></div>}
       </section>
     </section>
@@ -3598,6 +3764,7 @@ function ReportsWorkspace({
 }
 
 type SettingsSection = "Store profile" | "Shipping rules" | "Payment methods" | "Printer" | "Bill design" | "Admin roles";
+type LocalPrinterOption = { name: string; status?: string; portName?: string; driverName?: string };
 
 function SettingsWorkspace({
   onNotify,
@@ -3618,8 +3785,36 @@ function SettingsWorkspace({
   });
   const [payments, setPayments] = useState<PaymentSettings>(defaultPaymentSettings);
   const [printerName, setPrinterName] = useState("Essae PR-55");
+  const [availablePrinters, setAvailablePrinters] = useState<LocalPrinterOption[]>([]);
+  const [printerListStatus, setPrinterListStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [printerListMessage, setPrinterListMessage] = useState("");
   const [billDesign, setBillDesign] = useState<BillDesignSettings>(defaultBillDesignSettings);
   const [roles, setRoles] = useState<AdminRole[]>(defaultAdminRoles);
+
+  const loadLocalPrinters = async () => {
+    setPrinterListStatus("loading");
+    setPrinterListMessage("Checking printers connected to this computer…");
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 6000);
+    try {
+      const response = await fetch("http://127.0.0.1:3002/printers", { cache: "no-store", signal: controller.signal });
+      const payload = await response.json().catch(() => ({})) as { printers?: LocalPrinterOption[]; error?: string };
+      if (!response.ok) throw new Error(payload.error || "Could not load printers.");
+      const printers = Array.isArray(payload.printers)
+        ? payload.printers.filter((printer) => typeof printer?.name === "string" && printer.name.trim())
+        : [];
+      setAvailablePrinters(printers);
+      setPrinterListStatus("ready");
+      setPrinterListMessage(printers.length ? `${printers.length} Windows printer${printers.length === 1 ? "" : "s"} found.` : "No Windows printers were found.");
+    } catch (error) {
+      setPrinterListStatus("error");
+      setPrinterListMessage(error instanceof Error && error.name === "AbortError"
+        ? "The local printer service did not respond. Start the Fanzzy app locally, then refresh."
+        : "The local printer service is unavailable. Start the Fanzzy app locally, then refresh.");
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  };
 
   useEffect(() => {
     const read = <T,>(key: string, fallback: T): T => {
@@ -3635,6 +3830,7 @@ function SettingsWorkspace({
     setShipping(read("fanzzy-shipping-rules", shipping));
     setPayments(parsePaymentSettings(read("fanzzy-payment-methods", defaultPaymentSettings)));
     setPrinterName(window.localStorage.getItem("fanzzy-printer-name")?.replace("Essae PR 55", "Essae PR-55") || "Essae PR-55");
+    void loadLocalPrinters();
     setBillDesign(read("fanzzy-bill-design", defaultBillDesignSettings));
     void fetchStoreSetting("printerName").then((remote) => {
       if (!remote.error && remote.value) {
@@ -3678,6 +3874,7 @@ function SettingsWorkspace({
     void saveStoreSetting("paymentMethods", JSON.stringify(payments));
     window.dispatchEvent(new Event("fanzzy-payment-methods-updated"));
     window.localStorage.setItem("fanzzy-printer-name", printerName);
+    void prepareProductBarcodePrinter(printerName).catch(() => undefined);
     void saveStoreSetting("printerName", printerName);
     window.localStorage.setItem("fanzzy-bill-design", JSON.stringify(billDesign));
     void saveStoreSetting("billDesign", JSON.stringify(billDesign));
@@ -3749,8 +3946,14 @@ function SettingsWorkspace({
           </div>}
 
           {selectedSection === "Printer" && <div className="settings-form-grid">
-            <label className="settings-wide">Printer selection<select value="browser" disabled><option value="browser">Choose printer when printing</option></select></label>
-          <p className="settings-help settings-wide">Bills open the browser printer window, not a PDF download. If it shows “Save to PDF” by default, open Destination and select any printer installed on this device, including an 80 mm thermal printer.</p>
+            <label className="settings-wide">Printer selection<select value={printerName} disabled={printerListStatus === "loading" && !availablePrinters.length} onChange={(event) => { setPrinterName(event.target.value); void prepareProductBarcodePrinter(event.target.value).catch(() => undefined); }}>
+              <option value="">Select a Windows printer</option>
+              {printerName && !availablePrinters.some((printer) => printer.name === printerName) && <option value={printerName}>{printerName} (saved — not currently available)</option>}
+              {availablePrinters.map((printer) => <option key={printer.name} value={printer.name}>{printer.name}{printer.portName ? ` · ${printer.portName}` : ""}</option>)}
+            </select></label>
+            <div className="settings-wide"><button className="module-secondary" type="button" disabled={printerListStatus === "loading"} onClick={() => void loadLocalPrinters()}>{printerListStatus === "loading" ? "Checking printers…" : "Refresh printer list"}</button></div>
+            <p className="settings-help settings-wide">{printerListMessage || "Choose a printer installed on this computer."} The saved printer is used for barcode labels. TSC TTP-244 Pro printers use their native TSPL label format.</p>
+            <p className="settings-help settings-wide">Bills still open the browser print window; choose its Destination there because browsers do not allow a website to silently select a system printer.</p>
           </div>}
 
           {selectedSection === "Bill design" && <div className="settings-form-grid bill-design-settings">
@@ -5406,6 +5609,7 @@ function MarketingWorkspace({
 type PromotionCatalogOption = {
   id: string;
   sku: string;
+  barcode: string;
   name: string;
   category: string;
   image: string;
@@ -5442,16 +5646,26 @@ function PromotionOffersWorkspace({ onNotify }: { onNotify: (message: string) =>
           if (alive) setOffers(valid);
         } catch { /* keep the empty workspace */ }
       }
-      const [remoteCatalog, localCatalog] = await Promise.all([
+      const [remoteCatalog, localCatalog, barcodeRemote] = await Promise.all([
         fetchCatalogProducts(),
         Promise.resolve(window.localStorage.getItem("fanzzy-products")),
+        fetchStoreSetting("productBarcodes"),
       ]);
+      const barcodeMap = (() => {
+        try {
+          const parsed = JSON.parse(barcodeRemote.value || "{}") as Record<string, unknown>;
+          return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+        } catch {
+          return {} as Record<string, string>;
+        }
+      })();
       const source = !remoteCatalog.error && remoteCatalog.data?.length ? remoteCatalog.data : (() => {
         try { return localCatalog ? JSON.parse(localCatalog) : []; } catch { return []; }
       })();
       const mapped = (Array.isArray(source) ? source : []).filter((product) => !isDemoProduct(product)).map((product) => ({
         id: String(product.sku || product.name).toLowerCase().replace(/[^a-z0-9]+/g, "-"),
         sku: String(product.sku || ""),
+        barcode: barcodeMap[String(product.sku || "")] || String(product.barcode || ""),
         name: String(product.name || ""),
         category: String(product.category || "Uncategorised"),
         image: String(product.image || ""),
@@ -5575,7 +5789,7 @@ function PromotionOffersWorkspace({ onNotify }: { onNotify: (message: string) =>
     await persist(offers.map((item) => item.id === offer.id ? { ...item, status, updatedAt: new Date().toISOString() } : item), `${offer.name} ${status === "Active" ? "activated" : "deactivated"}`);
     setSelected((current) => current?.id === offer.id ? { ...offer, status } : current);
   };
-  const visibleCatalog = catalog.filter((product) => `${product.name} ${product.sku} ${product.category}`.toLowerCase().includes(search.toLowerCase()));
+  const visibleCatalog = catalog.filter((product) => `${product.name} ${product.sku} ${product.barcode} ${product.category}`.toLowerCase().includes(search.toLowerCase()));
   const selectedCount = form.eligiblePaid.length ? 1 + form.eligibleFree.length : 0;
 
   return (
@@ -5601,7 +5815,7 @@ function PromotionOffersWorkspace({ onNotify }: { onNotify: (message: string) =>
         <div className="promotion-form-section"><h4>Offer basics</h4><div className="product-form-grid"><label>Offer name<input value={form.name} onChange={(event) => setForm((current) => ({ ...current, type: "bogo", buyQuantity: 1, name: event.target.value }))} placeholder="e.g. Bracelet · Buy 1 Get 3" /></label><label>Offer type<span className="field-help">Buy 1 Get X Free</span></label><label className="marketing-form-wide">Offer description<input value={form.description} onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))} placeholder="Explain what customers receive." /></label><label>Active status<select value={form.status} onChange={(event) => setForm((current) => ({ ...current, status: event.target.value as PromotionOfferStatus }))}><option>Active</option><option>Inactive</option><option>Archived</option></select></label><label>Start date/time<input type="datetime-local" value={form.startsAt} onChange={(event) => setForm((current) => ({ ...current, startsAt: event.target.value }))} /></label><label>End date/time<input type="datetime-local" value={form.endsAt} onChange={(event) => setForm((current) => ({ ...current, endsAt: event.target.value }))} /></label></div></div>
         <div className="promotion-form-section"><h4>Buy / get rules</h4><div className="product-form-grid"><label>Buy quantity<span className="field-help">1 item</span></label><label>Free quantity<select value={form.freeQuantity} onChange={(event) => setForm((current) => ({ ...current, type: "bogo", buyQuantity: 1, freeQuantity: Number(event.target.value) }))}><option value={1}>1 free</option><option value={2}>2 free</option><option value={3}>3 free</option><option value={4}>4 free</option></select></label><label>Minimum cart value<input type="number" min="0" value={form.minCartValue} onChange={(event) => setForm((current) => ({ ...current, minCartValue: Math.max(0, Number(event.target.value)) }))} /></label><label>Per-customer usage limit<input type="number" min="0" value={form.perCustomerLimit} onChange={(event) => setForm((current) => ({ ...current, perCustomerLimit: Math.max(0, Number(event.target.value)) }))} placeholder="0 = unlimited" /></label><label>Maximum total usage<input type="number" min="0" value={form.maxTotalUsage} onChange={(event) => setForm((current) => ({ ...current, maxTotalUsage: Math.max(0, Number(event.target.value)) }))} placeholder="0 = unlimited" /></label><label className="promotion-check"><input type="checkbox" checked={form.automatic} onChange={(event) => setForm((current) => ({ ...current, automatic: event.target.checked }))} /> Automatic offer</label>{!form.automatic && <label>Coupon code<input value={form.couponCode} onChange={(event) => setForm((current) => ({ ...current, couponCode: event.target.value.toUpperCase() }))} placeholder="FANZZYBOGO" /></label>}</div></div>
         <div className="promotion-form-section"><h4>Variant and size rule</h4><p className="promotion-form-intro">Only this product can qualify. Customers may mix its variants or sizes for the free items, and the same option can be used more than once when stock allows.</p></div>
-        <div className="promotion-form-section"><div className="promotion-selector-header"><div><h4>Choose one product</h4><p>Variants and sizes stay inside this product. Customers choose the paid option and their free options on the product page.</p></div><strong>{selectedProductId ? "1 product selected" : "Select 1 product"}</strong></div><input className="promotion-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search product or SKU…" /><div className="promotion-selector-list">{visibleCatalog.length ? visibleCatalog.map((product) => { const isSelected = product.id === selectedProductId; const options = productOptions(product); return <div className={`promotion-selector-product${isSelected ? " is-selected" : ""}`} key={product.id}><div className="promotion-product-heading"><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.sku} · {product.stock} in stock · ₹{product.price.toLocaleString("en-IN")}</small></span><button className={isSelected ? "module-secondary" : "module-secondary"} type="button" onClick={() => selectProduct(product)}>{isSelected ? "Deselect" : "Use this product"}</button></div>{isSelected && <><div className="promotion-selection-row"><span className="field-help">Buy 1: customer chooses any available variant or size.</span><span className="field-help">{form.eligibleFree.length ? `${form.eligibleFree.length} free option limit` : "All variants / sizes available free"}</span></div>{options.length ? <div className="promotion-variant-grid">{options.map((selection, index) => { const active = form.eligibleFree.some((item) => JSON.stringify(item) === JSON.stringify(selection)); const optionLabel = selection.size ? `Size ${selection.size}` : selection.variantName || `Option ${index + 1}`; return <div className="promotion-variant-option" key={JSON.stringify(selection)}><span><strong>{optionLabel}</strong><small>{selection.stock ?? product.stock} in stock · ₹{(selection.price || product.price).toLocaleString("en-IN")}</small></span><label title="Limit free item to this option"><input type="checkbox" checked={active} onChange={() => toggleFreeOption(selection)} /> Free option</label></div>; })}</div> : <p className="variant-empty">This product has no variants or sizes. The same product can be added for each free item.</p>}</>}</div>; }) : <p className="variant-empty">No products found. Add products in Products first, then return here.</p>}</div></div>
+        <div className="promotion-form-section"><div className="promotion-selector-header"><div><h4>Choose one product</h4><p>Variants and sizes stay inside this product. Customers choose the paid option and their free options on the product page.</p></div><strong>{selectedProductId ? "1 product selected" : "Select 1 product"}</strong></div><input className="promotion-search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search product, SKU or barcode…" /><div className="promotion-selector-list">{visibleCatalog.length ? visibleCatalog.map((product) => { const isSelected = product.id === selectedProductId; const options = productOptions(product); return <div className={`promotion-selector-product${isSelected ? " is-selected" : ""}`} key={product.id}><div className="promotion-product-heading"><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.sku}{product.barcode ? ` · Barcode ${product.barcode}` : ""} · {product.stock} in stock · ₹{product.price.toLocaleString("en-IN")}</small></span><button className={isSelected ? "module-secondary" : "module-secondary"} type="button" onClick={() => selectProduct(product)}>{isSelected ? "Deselect" : "Use this product"}</button></div>{isSelected && <><div className="promotion-selection-row"><span className="field-help">Buy 1: customer chooses any available variant or size.</span><span className="field-help">{form.eligibleFree.length ? `${form.eligibleFree.length} free option limit` : "All variants / sizes available free"}</span></div>{options.length ? <div className="promotion-variant-grid">{options.map((selection, index) => { const active = form.eligibleFree.some((item) => JSON.stringify(item) === JSON.stringify(selection)); const optionLabel = selection.size ? `Size ${selection.size}` : selection.variantName || `Option ${index + 1}`; return <div className="promotion-variant-option" key={JSON.stringify(selection)}><span><strong>{optionLabel}</strong><small>{selection.stock ?? product.stock} in stock · ₹{(selection.price || product.price).toLocaleString("en-IN")}</small></span><label title="Limit free item to this option"><input type="checkbox" checked={active} onChange={() => toggleFreeOption(selection)} /> Free option</label></div>; })}</div> : <p className="variant-empty">This product has no variants or sizes. The same product can be added for each free item.</p>}</>}</div>; }) : <p className="variant-empty">No products found. Add products in Products first, then return here.</p>}</div></div>
         <div className="promotion-form-actions"><button className="module-primary" onClick={() => void saveOffer()}>Save offer</button><button className="module-secondary" onClick={() => setFormOpen(false)}>Cancel</button></div>
       </div></div>}
     </section>
@@ -5800,7 +6014,7 @@ function OrdersWorkspace({
         try {
           const response = await fetch("/api/delhivery/track", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: id, waybill }), cache: "no-store" });
           if (!response.ok) return null;
-          const body = await response.json() as { tracking?: { status?: string; statusType?: string; statusDate?: string; location?: string } };
+          const body = await response.json() as { tracking?: { status?: string; statusType?: string; statusDate?: string; location?: string; scans?: DelhiveryScan[] } };
           return body.tracking ? { id, tracking: body.tracking } : null;
         } catch {
           return null;
@@ -5813,7 +6027,7 @@ function OrdersWorkspace({
       setOrders((current) => current.map((order) => {
         const tracking = byOrder.get(order.id);
         if (!tracking) return order;
-        return { ...order, delhiveryLiveStatus: tracking.status || order.delhiveryLiveStatus, delhiveryLiveStatusType: tracking.statusType || order.delhiveryLiveStatusType, delhiveryLiveStatusDate: tracking.statusDate || order.delhiveryLiveStatusDate, delhiveryLiveLocation: tracking.location || order.delhiveryLiveLocation, delhiveryLastTrackedAt: trackedAt };
+        return { ...order, delhiveryLiveStatus: tracking.status || order.delhiveryLiveStatus, delhiveryLiveStatusType: tracking.statusType || order.delhiveryLiveStatusType, delhiveryLiveStatusDate: tracking.statusDate || order.delhiveryLiveStatusDate, delhiveryLiveLocation: tracking.location || order.delhiveryLiveLocation, delhiveryScans: tracking.scans?.length ? tracking.scans : order.delhiveryScans, delhiveryLastTrackedAt: trackedAt };
       }));
     };
     void refreshTracking();
@@ -6116,9 +6330,10 @@ function OrdersWorkspace({
               <small>{formatOrderDate(order.date)}{formatOrderTime(order.createdAt) ? ` · ${formatOrderTime(order.createdAt)}` : ""}</small>
               <small className="order-list-products">Customer ID: {order.userId || "Legacy / guest"} · {order.customerName}</small>
               <small className="order-list-products">{Array.isArray(order.items) ? order.items.map((rawItem, itemIndex) => { const item = normalizeOrderItemForDisplay(rawItem, itemIndex); return getOrderedItemDisplayName(item, getOrderedProduct(item)); }).join(", ") || "No saved item details" : "No saved item details"}</small>
-              <small className="order-list-products">Payment: {order.paymentMethod === "cod" ? "COD · Pay on delivery" : order.paymentStatus === "paid" ? "Paid online" : "Awaiting online payment"} · Inventory: {order.inventoryAdjusted === true ? "Updated" : "Pending"}</small>
+               <small className="order-list-products">Payment: {orderPaymentLabel(order)}{order.paymentMethod === "cod" ? " · Pay on delivery" : order.paymentStatus === "paid" ? " · Paid" : " · Pending"} · Inventory: {order.inventoryAdjusted === true ? "Updated" : "Pending"}</small>
+               <small className="order-list-products">Fulfilment: {orderFulfillmentLabel(order)}</small>
               {order.fulfillmentMethod !== "pickup" && <small className="order-list-products">Delhivery: {order.delhiveryLiveStatus || (order.delhiveryAwb ? "Shipment created" : "Awaiting shipment")}</small>}
-              {order.fulfillmentMethod !== "pickup" && order.delhiveryAwb && <small className="order-list-products">Pickup: {order.delhiveryPickupRequestStatus === "created" ? `Scheduled${order.delhiveryPickupRequestId ? ` · ${order.delhiveryPickupRequestId}` : ""}` : order.delhiveryPickupRequestStatus === "covered" ? "Covered by an existing pickup" : order.delhiveryPickupRequestStatus === "pending" ? "Request in progress" : order.delhiveryPickupRequestStatus === "failed" ? "Needs attention" : "Waiting to schedule"}</small>}
+              {order.fulfillmentMethod !== "pickup" && order.delhiveryAwb && <small className="order-list-products">Pickup: {order.delhiveryPickupRequestStatus === "created" ? `Scheduled${order.delhiveryPickupRequestId ? ` · ${order.delhiveryPickupRequestId}` : ""}` : order.delhiveryPickupRequestStatus === "covered" ? "Covered by an existing pickup" : order.delhiveryPickupRequestStatus === "pending" ? "Request in progress" : order.delhiveryPickupRequestStatus === "failed" ? "Pickup request failed" : "Waiting to schedule"}</small>}
             </span>
             <i className={`status-pill ${safeOrderStatus(order.status).toLowerCase()}`}>
               {safeOrderStatus(order.status)}
@@ -6157,8 +6372,27 @@ function OrdersWorkspace({
                 {selectedOrder.customerName} ·{" "}
                 {formatOrderDate(selectedOrder.date)}{formatOrderTime(selectedOrder.createdAt) ? ` · ${formatOrderTime(selectedOrder.createdAt)}` : ""} · {selectedOrder.total}
               </p>
-              <p className="product-detail-meta">Payment: {selectedOrder.paymentMethod === "cod" ? `Cash on delivery${selectedOrder.codCharge ? ` · COD charge ${formatAdminCurrency(selectedOrder.codCharge)}` : ""}` : selectedOrder.paymentStatus === "paid" ? "Paid online" : "Awaiting online payment"}{selectedOrder.razorpayPaymentId ? ` · Razorpay payment ${selectedOrder.razorpayPaymentId}` : selectedOrder.razorpayOrderId ? ` · Razorpay order ${selectedOrder.razorpayOrderId}` : ""}</p>
-              {selectedOrder.fulfillmentMethod !== "pickup" && <section className="admin-customer-details admin-delhivery-details"><p className="eyebrow">DELHIVERY SHIPMENT</p>{selectedOrder.delhiveryAwb ? <dl><div><dt>AWB</dt><dd>{selectedOrder.delhiveryAwb}</dd></div><div><dt>Live status</dt><dd>{selectedOrder.delhiveryLiveStatus || (selectedOrder.delhiveryShipmentStatus === "created" ? "Manifested" : "Available")}</dd></div><div><dt>Pickup request</dt><dd>{selectedOrder.delhiveryPickupRequestStatus === "created" ? `Scheduled${selectedOrder.delhiveryPickupRequestId ? ` · ${selectedOrder.delhiveryPickupRequestId}` : ""}` : selectedOrder.delhiveryPickupRequestStatus === "covered" ? "Covered by an existing pickup" : selectedOrder.delhiveryPickupRequestStatus === "pending" ? "Request in progress" : selectedOrder.delhiveryPickupRequestStatus === "failed" ? "Needs attention" : "Waiting to schedule"}{selectedOrder.delhiveryPickupRequestDate && <small>{selectedOrder.delhiveryPickupRequestDate}{selectedOrder.delhiveryPickupRequestTime ? ` · ${selectedOrder.delhiveryPickupRequestTime}` : ""}</small>}{selectedOrder.delhiveryPickupRequestError && <small>{selectedOrder.delhiveryPickupRequestError}</small>}</dd></div>{selectedOrder.delhiveryLiveLocation && <div><dt>Location</dt><dd>{selectedOrder.delhiveryLiveLocation}</dd></div>}{selectedOrder.delhiveryLastTrackedAt && <div><dt>Last checked</dt><dd>{formatOrderTime(selectedOrder.delhiveryLastTrackedAt)}</dd></div>}</dl> : <p className="product-detail-meta">{selectedOrder.delhiveryShipmentStatus === "pending" ? "Shipment creation is in progress." : selectedOrder.delhiveryShipmentStatus === "failed" ? "Shipment creation needs attention before tracking can be shown." : "Shipment will be created automatically after payment confirmation."}</p>}{selectedOrder.delhiveryAwb && <a className="module-secondary admin-delhivery-link" href={selectedOrder.delhiveryTrackingUrl || `https://www.delhivery.com/tracking?uniqueIdentifier=${encodeURIComponent(selectedOrder.delhiveryAwb)}`} target="_blank" rel="noreferrer">Open Delhivery tracking ↗</a>}</section>}
+              <section className="admin-order-payment-summary" aria-label="Payment method used">
+                <div>
+                  <p className="eyebrow">PAYMENT METHOD USED</p>
+                  <strong>{orderPaymentMethodDetail(selectedOrder)}</strong>
+                </div>
+                <div>
+                  <p className="eyebrow">PAYMENT STATUS</p>
+                  <span>{orderPaymentStatusDetail(selectedOrder)}{selectedOrder.codCharge ? ` · COD charge ${formatAdminCurrency(selectedOrder.codCharge)}` : ""}</span>
+                </div>
+                {(selectedOrder.razorpayPaymentId || selectedOrder.razorpayOrderId) && <div>
+                  <p className="eyebrow">PAYMENT REFERENCE</p>
+                  <span>{selectedOrder.razorpayPaymentId || selectedOrder.razorpayOrderId}</span>
+                </div>}
+              </section>
+              {selectedOrder.fulfillmentMethod !== "pickup" && <section className="admin-customer-details admin-delhivery-details"><p className="eyebrow">DELHIVERY SHIPMENT</p>{selectedOrder.delhiveryAwb ? <dl><div><dt>AWB</dt><dd>{selectedOrder.delhiveryAwb}</dd></div><div><dt>Live status</dt><dd>{selectedOrder.delhiveryLiveStatus || (selectedOrder.delhiveryShipmentStatus === "created" ? "Manifested" : "Available")}</dd></div><div><dt>Pickup request</dt><dd>{selectedOrder.delhiveryPickupRequestStatus === "created" ? `Scheduled${selectedOrder.delhiveryPickupRequestId ? ` · ${selectedOrder.delhiveryPickupRequestId}` : ""}` : selectedOrder.delhiveryPickupRequestStatus === "covered" ? "Covered by an existing pickup" : selectedOrder.delhiveryPickupRequestStatus === "pending" ? "Request in progress" : selectedOrder.delhiveryPickupRequestStatus === "failed" ? "Pickup request failed" : "Waiting to schedule"}{selectedOrder.delhiveryPickupRequestDate && <small>{selectedOrder.delhiveryPickupRequestDate}{selectedOrder.delhiveryPickupRequestTime ? ` · ${selectedOrder.delhiveryPickupRequestTime}` : ""}</small>}{selectedOrder.delhiveryPickupRequestError && <small>{selectedOrder.delhiveryPickupRequestError}</small>}</dd></div>{selectedOrder.delhiveryLiveLocation && <div><dt>Location</dt><dd>{selectedOrder.delhiveryLiveLocation}</dd></div>}{selectedOrder.delhiveryLastTrackedAt && <div><dt>Last checked</dt><dd>{formatOrderTime(selectedOrder.delhiveryLastTrackedAt)}</dd></div>}</dl> : <p className="product-detail-meta">{selectedOrder.delhiveryShipmentStatus === "pending" ? "Shipment creation is in progress." : selectedOrder.delhiveryShipmentStatus === "failed" ? "Shipment creation needs attention before tracking can be shown." : "Shipment will be created automatically after payment confirmation."}</p>}{selectedOrder.delhiveryAwb && <a className="module-secondary admin-delhivery-link" href={selectedOrder.delhiveryTrackingUrl || `https://www.delhivery.com/tracking?uniqueIdentifier=${encodeURIComponent(selectedOrder.delhiveryAwb)}`} target="_blank" rel="noreferrer">Open Delhivery tracking ↗</a>}</section>}
+              {selectedOrder.fulfillmentMethod !== "pickup" && selectedOrder.delhiveryAwb && (() => {
+                const liveStatus = selectedOrder.delhiveryLiveStatus || (selectedOrder.delhiveryShipmentStatus === "created" ? "Ready to ship" : "Order received");
+                const currentStage = delhiveryTimelineStageIndex(liveStatus);
+                const scans = selectedOrder.delhiveryScans || [];
+                return <section className="admin-customer-details admin-delhivery-timeline-card"><p className="eyebrow">LIVE DELIVERY TIMELINE</p><ol className="tracking-stage-list" aria-label="Delhivery delivery progress">{delhiveryTimelineStages.map((stage, index) => { const current = index === currentStage; const completed = index < currentStage; const scan = scans.find((candidate) => stage.match.test(`${candidate.status} ${candidate.instructions || ""}`)); const date = scan?.date || (current ? selectedOrder.delhiveryLiveStatusDate : index === 0 ? selectedOrder.delhiveryShipmentCreatedAt || selectedOrder.createdAt : index === 1 ? selectedOrder.delhiveryPickupRequestDate : ""); const detail = current ? index === 2 && selectedOrder.delhiveryLiveLocation ? `Moving through ${selectedOrder.delhiveryLiveLocation}.` : index === 3 ? "Your parcel is out for delivery today." : index === 4 ? "Your order has been delivered." : index === 1 ? "Pickup has been scheduled with Delhivery." : "Your parcel is being prepared." : completed ? "Completed" : "Waiting for update"; return <li className={`${completed ? "completed " : ""}${current ? "current" : "upcoming"}`} aria-current={current ? "step" : undefined} key={stage.key}><span className="tracking-stage-dot" /><div><strong>{stage.label}</strong><small>{detail}</small>{date && <time>{delhiveryTimelineDate(date)}</time>}</div></li>; })}</ol>{scans.length > 0 && <div className="tracking-scan-summary"><strong>Latest courier scan</strong><span>{scans[0].status}{scans[0].location ? ` · ${scans[0].location}` : ""}</span>{scans[0].date && <time>{delhiveryTimelineDate(scans[0].date)}</time>}</div>}</section>;
+              })()}
               <section className="admin-customer-details"><p className="eyebrow">CUSTOMER &amp; ORDER IDS</p><dl><div><dt>Order ID</dt><dd>{selectedOrder.id}</dd></div><div className="admin-customer-account"><dt>Customer Account ID</dt><dd>{selectedOrder.userId || "Legacy / guest order"}</dd></div><div><dt>Name</dt><dd>{selectedOrder.customerName || "Not provided"}</dd></div><div><dt>Login mobile</dt><dd>{selectedOrder.userPhone || selectedOrder.phone || "Not provided"}</dd></div><div><dt>Email</dt><dd>{selectedOrder.email || selectedOrder.userEmail || "Not provided"}</dd></div><div><dt>WhatsApp</dt><dd>{selectedOrder.phone || "Not provided"}</dd></div><div><dt>Fulfilment</dt><dd>{selectedOrder.fulfillmentMethod === "pickup" ? `Pickup from ${selectedOrder.pickupHubName || "hub"}` : "Delivery"}</dd></div><div className="admin-customer-address"><dt>{selectedOrder.fulfillmentMethod === "pickup" ? "Pickup hub / place" : "Delivery address"}</dt><dd>{selectedOrder.fulfillmentMethod === "pickup" ? `${selectedOrder.pickupHubName || "Hub"} · ${selectedOrder.pickupHubPlace || selectedOrder.address || "Place not saved"}` : selectedOrder.address || "Not provided"}</dd></div></dl>{selectedOrder.razorpayPaymentId && <button className="module-secondary admin-restore-payment-details" type="button" onClick={() => void restoreOrderDetailsFromRazorpay()}>Restore delivery details from Razorpay</button>}</section>
               {Array.isArray(selectedOrder.items) && selectedOrder.items.length ? <section className="admin-order-items"><p className="eyebrow">ITEMS IN THIS ORDER · {selectedOrder.items.length} LINES</p><div>{selectedOrder.items.map((rawItem, itemIndex) => { const item = normalizeOrderItemForDisplay(rawItem, itemIndex); const product = getOrderedProduct(item); const displayName = getOrderedItemDisplayName(item, product); const size = item.size || item.name.match(/(?:^| · )Size (.+)$/i)?.[1] || ""; const variant = item.variantName || (item.name.includes(" · ") ? item.name.split(" · ").slice(1).filter((part) => !/^Size /i.test(part)).join(" · ") : ""); const promotion = item.promotion; const promotionRole = promotion?.role === "free" ? "FREE ITEM" : promotion?.role === "bundle" ? "BUNDLE ITEM" : "PAID ITEM"; const selectedVariant = size ? product?.variants.find((candidate) => String(candidate.size || candidate.name).trim().replace(/^size\s+/i, "").toLowerCase() === size.trim().replace(/^size\s+/i, "").toLowerCase()) : variant ? product?.variants.find((candidate) => candidate.name.trim().toLowerCase() === variant.trim().toLowerCase()) : undefined; const selectionStock = selectedVariant?.stock ?? product?.stock; const displayImage = item.variantImage || selectedVariant?.image || item.image || product?.image; const imageAlt = variant ? `${displayName} variant` : displayName; return <article key={`${selectedOrder.id}-${item.productId || item.name}-${variant}-${size}-${promotion?.groupId || "legacy"}-${itemIndex}`}><>{displayImage ? <button className="admin-order-image-button" type="button" onClick={() => setEnlargedOrderImage({ src: displayImage, alt: imageAlt })} aria-label={`Enlarge ${imageAlt}`}><img src={displayImage} alt={imageAlt} /></button> : <span className="admin-order-item-placeholder" aria-hidden="true">✦</span>}</><span><strong>{displayName}</strong>{promotion && <small className={`admin-order-promotion ${promotion.role === "free" ? "is-free" : ""}`}>{promotionRole} · {promotion.label}</small>}{product ? <><small>{product.category} · SKU {product.sku}</small><small>Current {size ? `size ${size}` : variant ? "variant" : "product"} stock: {selectionStock} · {product.status}</small></> : <small>Product no longer in the catalog</small>}{variant && <small>Selected variant: {variant}{displayImage ? " · Variant image shown" : ""}</small>}{size && <small>Selected size: {size}</small>}{promotion && promotion.regularPrice !== promotion.linePrice && <small>Regular value: {formatAdminCurrency(promotion.regularPrice)} · Allocated price: {item.price}</small>}<em>Quantity ordered: {item.quantity}</em></span><b>{item.price}</b></article>; })}</div></section> : <section className="admin-order-items admin-order-item-repair"><p className="eyebrow">ADD MISSING ORDER DETAILS</p><p>This older paid order has no saved product information. Select the product and variant to restore its order record.</p><div className="admin-order-item-repair-fields"><label>Product<select value={orderItemDraft.productId} onChange={(event) => { const product = catalogProducts.find((candidate) => candidate.id === event.target.value); setOrderItemDraft({ productId: event.target.value, variantName: "", quantity: "1", price: product ? `₹${product.price.toLocaleString("en-IN")}` : "" }); }}><option value="">Select product</option>{catalogProducts.map((product) => <option key={product.id} value={product.id}>{product.name} · {product.sku}</option>)}</select></label>{draftProduct?.variants.length ? <label>Variant<select value={orderItemDraft.variantName} onChange={(event) => setOrderItemDraft((current) => ({ ...current, variantName: event.target.value }))}><option value="">Select variant</option>{draftProduct.variants.map((variant, index) => <option key={`${variant.name}-${index}`} value={variant.name}>{variant.name || `Option ${index + 1}`}</option>)}</select></label> : null}<label>Quantity<input type="number" min="1" value={orderItemDraft.quantity} onChange={(event) => setOrderItemDraft((current) => ({ ...current, quantity: event.target.value }))} /></label><label>Price<input value={orderItemDraft.price} onChange={(event) => setOrderItemDraft((current) => ({ ...current, price: event.target.value }))} placeholder="₹0" /></label></div>{draftProduct && <div className="admin-order-item-repair-preview">{orderItemDraft.variantName && draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image ? <img src={draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image} alt="Selected variant preview" /> : draftProduct.image ? <img src={draftProduct.image} alt="Selected product preview" /> : null}<span>{orderItemDraft.variantName ? `Selected variant: ${orderItemDraft.variantName}` : "Select a variant if applicable"}</span></div>}<button className="module-primary" type="button" onClick={addMissingOrderItem}>Add to this order</button></section>}
               <div className="order-status-editor">
@@ -6272,11 +6506,13 @@ function OrdersRecoveryWorkspace({
       </div>
       {loading ? <p className="empty-filter">Loading orders…</p> : orders.length ? <div className="order-list orders-recovery-list">
         {orders.map((order) => <div key={order.id}>
-          <span>
-            <strong>{order.id}</strong>
-            <small>{order.date} · {order.customerName}</small>
-            <small className="order-list-products">{order.items?.map((item) => item.name).join(", ") || "No saved item details"}</small>
-          </span>
+           <span>
+             <strong>{order.id}</strong>
+             <small>{order.date} · {order.customerName}</small>
+             <small className="order-list-products">{order.items?.map((item) => item.name).join(", ") || "No saved item details"}</small>
+             <small className="order-list-products">Payment: {orderPaymentLabel(order)}</small>
+             <small className="order-list-products">Fulfilment: {orderFulfillmentLabel(order)}</small>
+           </span>
           <i className={`status-pill ${safeOrderStatus(order.status).toLowerCase()}`}>{safeOrderStatus(order.status)}</i>
           <b>{order.total}</b>
         </div>)}
@@ -6847,6 +7083,57 @@ const categorySectionDetails: Array<{
   },
 ];
 
+// Older catalog snapshots may not contain this standalone luxury category,
+// even though the storefront still exposes it as a supported filter.
+const legacyLuxuryCategory: AdminCategory = {
+  name: "Luxurious",
+  pieces: 0,
+  image: "",
+  section: "luxury",
+};
+const legacyNormalNecklacesLCategory: AdminCategory = {
+  name: "Necklaces L",
+  pieces: 0,
+  image: "",
+  section: "normal",
+};
+
+const renamedProductCategory = (
+  value: string,
+  previousName: string,
+  nextName: string,
+  previousSection: CategorySection,
+  nextSection: CategorySection,
+) => {
+  const previousBase = baseProductCategory(previousName);
+  const nextBase = baseProductCategory(nextName);
+  const previousValue = previousSection === "luxury" ? `${previousBase} · LX` : previousName.trim();
+  const nextValue = nextSection === "luxury" ? `${nextBase} · LX` : nextName.trim();
+  return value.trim().toLowerCase() === previousValue.toLowerCase() ? nextValue : value;
+};
+
+const updateLocalProductCategories = (
+  previousName: string,
+  nextName: string,
+  previousSection: CategorySection,
+  nextSection: CategorySection,
+) => {
+  const stored = window.localStorage.getItem("fanzzy-products");
+  if (!stored) return;
+  try {
+    const parsed = JSON.parse(stored) as Array<{ category?: unknown }>;
+    if (!Array.isArray(parsed)) return;
+    window.localStorage.setItem("fanzzy-products", JSON.stringify(parsed.map((product) => ({
+      ...product,
+      category: typeof product.category === "string"
+        ? renamedProductCategory(product.category, previousName, nextName, previousSection, nextSection)
+        : product.category,
+    }))));
+  } catch {
+    // Ignore an invalid local cache; the shared catalog remains authoritative.
+  }
+};
+
 function CategoryWorkspace({
   onNotify,
 }: {
@@ -6912,7 +7199,7 @@ function CategoryWorkspace({
         }
       }
       if (active && !remote.error && remote.data) {
-        const knownCategories = mergeCatalogCategories(sharedCategories, localCategories);
+        const knownCategories = mergeCatalogCategories(sharedCategories, localCategories, [legacyNormalNecklacesLCategory, legacyLuxuryCategory]);
         const categoryIdentity = (name: string, section: CategorySection = "normal") => `${name.trim().toLowerCase()}::${section}`;
         const localCategoryByIdentity = new Map(knownCategories.map((category) => [categoryIdentity(category.name, category.section), category]));
         const localCategoryByExactName = new Map<string, AdminCategory | null>();
@@ -6941,7 +7228,7 @@ function CategoryWorkspace({
       }
       if (active) {
         const nextCategories = mergeCategoriesFromProducts(
-          inferLegacyCategorySections([...sharedCategories, ...localCategories]),
+          inferLegacyCategorySections([...sharedCategories, ...localCategories, legacyNormalNecklacesLCategory, legacyLuxuryCategory]),
           productsRemote.data || [],
         );
         if (nextCategories.length) setCategories(nextCategories);
@@ -7040,10 +7327,16 @@ function CategoryWorkspace({
     const remoteError = await renameCatalogCategory(
       selectedCategory.name,
       updatedCategory,
+      selectedCategory.section,
     );
     const nextCategories = categories.map((category) =>
-      category.name === selectedCategory.name ? updatedCategory : category,
+      category.name === selectedCategory.name && category.section === selectedCategory.section ? updatedCategory : category,
     );
+    updateLocalProductCategories(selectedCategory.name, updatedCategory.name, selectedCategory.section, updatedCategory.section);
+    setCategoryProducts((current) => current?.map((product) => ({
+      ...product,
+      category: renamedProductCategory(product.category, selectedCategory.name, updatedCategory.name, selectedCategory.section, updatedCategory.section),
+    })) || current);
     setCategories(nextCategories);
     persistCategories(nextCategories);
     setSelectedCategory(updatedCategory);
@@ -7372,6 +7665,447 @@ class OrdersWorkspaceBoundary extends Component<{
   }
 }
 
+const normalizeBarcodeValue = (value: string) => value.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+
+type PosCatalogSource = Omit<Partial<AdminProduct>, "price" | "cost" | "status"> & {
+  price?: string | number;
+  cost?: string | number;
+  status?: string;
+};
+
+function PosWorkspace({
+  onNotify,
+  request = 0,
+}: {
+  onNotify: (message: string) => void;
+  request?: number;
+}) {
+  const [products, setProducts] = useState<AdminProduct[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [inputValue, setInputValue] = useState("");
+  const [productSearch, setProductSearch] = useState("");
+  const [cart, setCart] = useState<Record<string, number>>({});
+  const [lastProduct, setLastProduct] = useState<AdminProduct | null>(null);
+  const [error, setError] = useState("");
+  const [customerName, setCustomerName] = useState("");
+  const [customerPhone, setCustomerPhone] = useState("");
+  const [discountValue, setDiscountValue] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState<PosPaymentMethod>("Cash");
+  const [checkoutBusy, setCheckoutBusy] = useState(false);
+  const [lastSale, setLastSale] = useState<OrderRecord | null>(null);
+  const [posQr, setPosQr] = useState<PosQrState>({ status: "idle" });
+  const [posQrRefresh, setPosQrRefresh] = useState(0);
+  const posQrRef = useRef<PosQrState>({ status: "idle" });
+  const posQrRequestRef = useRef(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const lookupProductRef = useRef<(value: string) => void>(() => undefined);
+  const lastAutoLookupRef = useRef("");
+
+  useEffect(() => {
+    let active = true;
+    const loadProducts = async () => {
+      const [remote, barcodeRemote] = await Promise.all([
+        fetchCatalogProducts(),
+        fetchStoreSetting("productBarcodes"),
+      ]);
+      if (!active) return;
+      let barcodeMap: Record<string, string> = {};
+      try {
+        const parsed = JSON.parse(barcodeRemote.value || "{}");
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          barcodeMap = Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+        }
+      } catch {
+        barcodeMap = {};
+      }
+      let localCatalog: PosCatalogSource[] = [];
+      try {
+        const stored = JSON.parse(window.localStorage.getItem("fanzzy-products") || "[]");
+        if (Array.isArray(stored)) localCatalog = stored as PosCatalogSource[];
+      } catch {
+        localCatalog = [];
+      }
+      const localBarcodeMap = new Map(localCatalog.map((product) => [String(product.sku || ""), String(product.barcode || "")]));
+      const catalog = (remote.data?.length ? remote.data : localCatalog) as PosCatalogSource[];
+      const usedFallbackBarcodes = new Set<string>();
+      setProducts(catalog.filter((product) => !isDemoProduct(product)).map((product) => {
+        const sku = String(product.sku || "");
+        const barcode = barcodeMap[sku] || localBarcodeMap.get(sku) || String(product.barcode || "") || createProductBarcode(sku || String(product.name || "product"), usedFallbackBarcodes);
+        const status: AdminProduct["status"] = product.status === "Published" || product.status === "Low stock" ? product.status : "Draft";
+        usedFallbackBarcodes.add(barcode);
+        return {
+          name: String(product.name || "Unnamed product"),
+          sku,
+          createdAt: product.createdAt,
+          category: String(product.category || "Uncategorised"),
+          stock: Math.max(0, Number(product.stock) || 0),
+          price: typeof product.price === "string" ? product.price : formatAdminCurrency(Number(product.price) || 0),
+          cost: typeof product.cost === "string" ? product.cost : formatAdminCurrency(Number(product.cost) || 0),
+          status,
+          image: String(product.image || adminPlaceholderImage),
+          hoverImage: String(product.hoverImage || product.image || adminPlaceholderImage),
+          compareAt: Number(product.compareAt) || undefined,
+          barcode,
+          variants: product.variants,
+          sizes: product.sizes,
+          sizeStock: product.sizeStock,
+          variantType: product.variantType,
+        };
+      }).filter((product) => product.sku));
+      setLoading(false);
+    };
+    void loadProducts();
+    const syncProducts = () => { void loadProducts(); };
+    window.addEventListener("fanzzy-products-updated", syncProducts);
+    window.addEventListener("storage", syncProducts);
+    return () => {
+      active = false;
+      window.removeEventListener("fanzzy-products-updated", syncProducts);
+      window.removeEventListener("storage", syncProducts);
+    };
+  }, []);
+
+  const addProduct = (product: AdminProduct) => {
+    if (upiPaymentActive) {
+      setError("Switch away from UPI before changing this sale, or complete the confirmed payment.");
+      return;
+    }
+    const currentQuantity = cart[product.sku] || 0;
+    if (product.status === "Draft" || product.stock <= 0) {
+      setError(`${product.name} is out of stock and cannot be added.`);
+      return;
+    }
+    if (currentQuantity >= product.stock) {
+      setError(`Only ${product.stock} ${product.name} available.`);
+      return;
+    }
+    setCart((current) => ({ ...current, [product.sku]: (current[product.sku] || 0) + 1 }));
+    setLastProduct(product);
+    setLastSale(null);
+    setError("");
+    setInputValue("");
+    lastAutoLookupRef.current = "";
+    onNotify(`${product.name} added to POS cart`);
+    window.requestAnimationFrame(() => inputRef.current?.focus());
+  };
+
+  const lookupProduct = (value: string) => {
+    const rawValue = value.trim();
+    if (!rawValue) {
+      setError("Enter or scan a barcode first.");
+      return;
+    }
+    const normalized = normalizeBarcodeValue(rawValue);
+    lastAutoLookupRef.current = normalized;
+    const match = products.find((product) => normalizeBarcodeValue(product.barcode || "") === normalized)
+      || products.find((product) => normalizeBarcodeValue(product.sku) === normalized);
+    if (!match) {
+      setError(`No product found for barcode “${rawValue}”.`);
+      return;
+    }
+    addProduct(match);
+  };
+  useEffect(() => {
+    lookupProductRef.current = lookupProduct;
+  });
+  useEffect(() => {
+    const normalized = normalizeBarcodeValue(inputValue);
+    if (loading || !normalized || lastAutoLookupRef.current === normalized) return;
+    const hasExactMatch = products.some((product) => normalizeBarcodeValue(product.barcode || "") === normalized)
+      || products.some((product) => normalizeBarcodeValue(product.sku) === normalized);
+    if (!hasExactMatch) return;
+    lookupProductRef.current(inputValue);
+  }, [inputValue, loading, products]);
+  useEffect(() => {
+    if (request > 0) inputRef.current?.focus();
+  }, [request]);
+
+  const cartLines = useMemo(() => Object.entries(cart).flatMap(([sku, quantity]) => {
+    const product = products.find((candidate) => candidate.sku === sku);
+    return product && quantity > 0 ? [{ product, quantity }] : [];
+  }), [cart, products]);
+  const cartUnits = cartLines.reduce((total, line) => total + line.quantity, 0);
+  const subtotal = cartLines.reduce((total, line) => total + parseMoney(line.product.price) * line.quantity, 0);
+  const discount = Math.min(subtotal, Math.max(0, Number(discountValue) || 0));
+  const total = Math.max(0, subtotal - discount);
+  const qrPaymentFingerprint = cartLines.map(({ product, quantity }) => `${product.sku}:${quantity}`).sort().join("|");
+  const upiPaymentActive = paymentMethod === "UPI" && (posQr.status === "loading" || posQr.status === "ready" || posQr.status === "paid");
+  const upiPaymentConfirmed = paymentMethod === "UPI" && posQr.status === "paid" && Boolean(posQr.paymentId);
+  const visibleProducts = useMemo(() => {
+    const query = productSearch.trim().toLowerCase();
+    return products.filter((product) => !query || `${product.name} ${product.sku} ${product.barcode || ""} ${product.category}`.toLowerCase().includes(query)).slice(0, 24);
+  }, [productSearch, products]);
+
+  useEffect(() => {
+    const requestNumber = ++posQrRequestRef.current;
+    const previousQr = posQrRef.current;
+    if (previousQr.id && previousQr.status !== "paid") {
+      void fetch(`${adminRazorpayApiUrl("pos-qr")}?id=${encodeURIComponent(previousQr.id)}`, { method: "DELETE" }).catch(() => undefined);
+    }
+    posQrRef.current = { status: "idle" };
+
+    if (paymentMethod !== "UPI" || !qrPaymentFingerprint || total < 1) {
+      const idleTimer = window.setTimeout(() => setPosQr({ status: "idle" }), 0);
+      return () => window.clearTimeout(idleTimer);
+    }
+
+    const timer = window.setTimeout(async () => {
+      const loadingState: PosQrState = { status: "loading" };
+      posQrRef.current = loadingState;
+      setPosQr(loadingState);
+      try {
+        const response = await fetch(adminRazorpayApiUrl("pos-qr"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ amount: Math.round(total * 100), reference: `POS-${Date.now()}` }),
+        });
+        const payload = await response.json() as { id?: string; imageUrl?: string; amount?: number; closeBy?: number; error?: string };
+        if (!response.ok || !payload.id || !payload.imageUrl) throw new Error(payload.error || "Could not create the Razorpay UPI QR code.");
+        if (posQrRequestRef.current !== requestNumber) {
+          void fetch(`${adminRazorpayApiUrl("pos-qr")}?id=${encodeURIComponent(payload.id)}`, { method: "DELETE" }).catch(() => undefined);
+          return;
+        }
+        const readyState: PosQrState = { status: "ready", id: payload.id, imageUrl: payload.imageUrl, amount: payload.amount || Math.round(total * 100), closeBy: payload.closeBy };
+        posQrRef.current = readyState;
+        setPosQr(readyState);
+      } catch (qrError) {
+        if (posQrRequestRef.current !== requestNumber) return;
+        const rawMessage = qrError instanceof Error ? qrError.message : "Could not create the Razorpay UPI QR code.";
+        const message = /requested url|not found|not enabled|feature/i.test(rawMessage)
+          ? "Razorpay UPI QR Codes is not enabled for this merchant account. Ask Razorpay Support to activate QR Codes."
+          : rawMessage;
+        const errorState: PosQrState = { status: "error", message };
+        posQrRef.current = errorState;
+        setPosQr(errorState);
+      }
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [paymentMethod, posQrRefresh, qrPaymentFingerprint, total]);
+
+  useEffect(() => {
+    if (posQr.status !== "ready" || !posQr.id) return;
+    let active = true;
+    let checking = false;
+    const checkPayment = async () => {
+      if (checking) return;
+      checking = true;
+      try {
+        const response = await fetch(`${adminRazorpayApiUrl("pos-qr")}?id=${encodeURIComponent(posQr.id!)}`, { cache: "no-store" });
+        const payload = await response.json() as { paid?: boolean; paymentId?: string; amount?: number; status?: string; error?: string };
+        if (!response.ok) throw new Error(payload.error || "Could not check the UPI payment.");
+        if (!active || !payload.paid || !payload.paymentId) return;
+        if (Number(payload.amount) !== Number(posQr.amount)) {
+          const mismatchState: PosQrState = { ...posQr, status: "error", message: "Razorpay reported a payment with a different amount. Do not complete this sale." };
+          posQrRef.current = mismatchState;
+          setPosQr(mismatchState);
+          return;
+        }
+        const paidState: PosQrState = { ...posQr, status: "paid", paymentId: payload.paymentId };
+        posQrRef.current = paidState;
+        setPosQr(paidState);
+        onNotify(`UPI payment received · ${payload.paymentId}`);
+      } catch {
+        // Keep the active QR visible and retry. A transient status check must
+        // never make the cashier generate a second QR for the same sale.
+      } finally {
+        checking = false;
+      }
+    };
+    void checkPayment();
+    const interval = window.setInterval(() => void checkPayment(), 2500);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [onNotify, posQr]);
+
+  useEffect(() => () => {
+    const currentQr = posQrRef.current;
+    if (currentQr.id && currentQr.status !== "paid") {
+      void fetch(`${adminRazorpayApiUrl("pos-qr")}?id=${encodeURIComponent(currentQr.id)}`, { method: "DELETE", keepalive: true }).catch(() => undefined);
+    }
+  }, []);
+
+  const updateQuantity = (product: AdminProduct, delta: number) => {
+    if (upiPaymentActive) {
+      setError("Switch away from UPI before changing quantities, or complete the confirmed payment.");
+      return;
+    }
+    const nextQuantity = Math.max(0, Math.min(product.stock, (cart[product.sku] || 0) + delta));
+    setCart((current) => {
+      const next = { ...current };
+      if (nextQuantity === 0) delete next[product.sku];
+      else next[product.sku] = nextQuantity;
+      return next;
+    });
+    if (nextQuantity === 0 && lastProduct?.sku === product.sku) setLastProduct(null);
+    setError("");
+  };
+
+  const clearSale = () => {
+    if (upiPaymentConfirmed) {
+      setError("This UPI payment is already received. Complete the sale before starting another bill.");
+      return;
+    }
+    setCart({});
+    setDiscountValue("");
+    setCustomerName("");
+    setCustomerPhone("");
+    setLastProduct(null);
+    setError("");
+    setLastSale(null);
+    window.requestAnimationFrame(() => inputRef.current?.focus());
+  };
+
+  const choosePaymentMethod = (method: PosPaymentMethod) => {
+    if (upiPaymentConfirmed && method !== "UPI") {
+      setError("This UPI payment is already received. Complete the sale before changing payment method.");
+      return;
+    }
+    setPaymentMethod(method);
+    setError("");
+  };
+
+  const completeSale = async () => {
+    if (!cartLines.length || checkoutBusy) return;
+    if (paymentMethod === "UPI" && !upiPaymentConfirmed) {
+      setError(posQr.status === "error" ? posQr.message || "Could not create the UPI QR code." : "Ask the customer to scan the Razorpay QR and wait for payment confirmation.");
+      return;
+    }
+    const unavailable = cartLines.find(({ product, quantity }) => product.status === "Draft" || quantity > product.stock);
+    if (unavailable) {
+      setError(`${unavailable.product.name} does not have enough stock.`);
+      return;
+    }
+    setCheckoutBusy(true);
+    setError("");
+    try {
+      if (isSupabaseReady) {
+        const stockResult = await decrementCatalogStock(cartLines.map(({ product, quantity }) => ({ sku: product.sku, quantity })));
+        if (stockResult.error) throw stockResult.error;
+      }
+      const soldQuantities = new Map(cartLines.map(({ product, quantity }) => [product.sku, quantity]));
+      const nextProducts = products.map((product) => {
+        const sold = soldQuantities.get(product.sku) || 0;
+        if (!sold) return product;
+        const stock = Math.max(0, product.stock - sold);
+        return { ...product, stock, status: stock <= 0 ? "Draft" as const : stock < 10 ? "Low stock" as const : "Published" as const };
+      });
+      setProducts(nextProducts);
+      persistCatalog(nextProducts);
+
+      const now = new Date();
+      const token = globalThis.crypto?.randomUUID?.().replace(/-/g, "").slice(-6).toUpperCase() || String(Date.now()).slice(-6);
+      const order: OrderRecord = {
+        id: `#FZ-POS-${token}`,
+        invoiceNumber: `POS-${token}`,
+        date: now.toISOString().slice(0, 10),
+        createdAt: now.toISOString(),
+        status: "Delivered",
+        total: formatAdminCurrency(total),
+        customerName: customerName.trim() || "Walk-in customer",
+        phone: customerPhone.trim(),
+        address: "In-store POS sale",
+        fulfillmentMethod: "pickup",
+        pickupHubName: "In-store POS",
+        paymentMethod: paymentMethod === "Cash" ? "cod" : "online",
+        paymentStatus: paymentMethod === "Cash" ? "cod_collected" : "paid",
+        posPaymentMethod: paymentMethod,
+        posSale: true,
+        razorpayPaymentId: paymentMethod === "UPI" ? posQr.paymentId : undefined,
+        razorpayQrCodeId: paymentMethod === "UPI" ? posQr.id : undefined,
+        coupon: discount > 0 ? "POS discount" : undefined,
+        couponDiscount: discount,
+        inventoryAdjusted: true,
+        items: cartLines.map(({ product, quantity }) => ({
+          productId: product.sku,
+          productName: product.name,
+          name: product.billName || product.name,
+          quantity,
+          price: product.price,
+          image: product.image,
+        })),
+      };
+      let localOrders: OrderRecord[] = [];
+      try {
+        const parsed = JSON.parse(window.localStorage.getItem("fanzzy-orders") || "[]") as OrderRecord[];
+        if (Array.isArray(parsed)) localOrders = parsed;
+      } catch {
+        localOrders = [];
+      }
+      const remoteOrders = await fetchStoreOrders<OrderRecord>();
+      const mergedOrders = new Map<string, OrderRecord>();
+      remoteOrders.data?.forEach((candidate) => { if (candidate?.id) mergedOrders.set(candidate.id, candidate); });
+      localOrders.forEach((candidate) => { if (candidate?.id && !mergedOrders.has(candidate.id)) mergedOrders.set(candidate.id, candidate); });
+      mergedOrders.set(order.id, order);
+      const nextOrders = [order, ...Array.from(mergedOrders.values()).filter((candidate) => candidate.id !== order.id)];
+      window.localStorage.setItem("fanzzy-orders", JSON.stringify(nextOrders));
+      const orderSaveError = await saveStoreOrders(nextOrders);
+      window.dispatchEvent(new Event("fanzzy-orders-updated"));
+      setCart({});
+      setDiscountValue("");
+      setCustomerName("");
+      setCustomerPhone("");
+      setLastProduct(null);
+      posQrRef.current = { status: "idle" };
+      setPosQr({ status: "idle" });
+      setLastSale(order);
+      onNotify(orderSaveError ? `${order.id} completed and saved on this device` : `${order.id} sale completed`);
+    } catch (saleError) {
+      setError(saleError instanceof Error ? saleError.message : "Could not complete this POS sale.");
+    } finally {
+      setCheckoutBusy(false);
+      window.requestAnimationFrame(() => inputRef.current?.focus());
+    }
+  };
+
+  return (
+    <section className="panel module-workspace pos-workspace" aria-labelledby="pos-workspace-title">
+      <div className="pos-workspace-head">
+        <div><p className="eyebrow">LIVE POINT OF SALE</p><h2 id="pos-workspace-title">Counter POS</h2><p>Scan a barcode to add products instantly, take payment, and complete an in-store sale.</p></div>
+        <span className="pos-live-badge"><i /> Scanner ready</span>
+      </div>
+      <div className="pos-layout">
+        <div className="pos-catalog-panel">
+          <div className="pos-scan-box">
+            <span className="pos-scan-icon">▣</span>
+            <label htmlFor="pos-barcode-input"><small>LIVE BARCODE SCANNER</small><strong>{loading ? "Loading catalog…" : "Scan barcode"}</strong></label>
+            <input id="pos-barcode-input" ref={inputRef} value={inputValue} onChange={(event) => setInputValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); lookupProduct(inputValue); } }} placeholder={upiPaymentActive ? "UPI payment in progress" : "Barcode / SKU"} autoComplete="off" spellCheck={false} disabled={upiPaymentActive} />
+            <button className="module-primary" type="button" onClick={() => lookupProduct(inputValue)} disabled={upiPaymentActive}>Add</button>
+          </div>
+          {error && <p className="pos-error" role="alert">{error}</p>}
+          {lastProduct && <div className="pos-last-scan"><img src={lastProduct.image} alt="" /><span><small>LAST ITEM ADDED</small><strong>{lastProduct.name}</strong><em>{lastProduct.barcode} · {lastProduct.price}</em></span><b>✓</b></div>}
+          <div className="pos-product-tools"><div><p className="eyebrow">QUICK ADD</p><h3>Products</h3></div><input value={productSearch} onChange={(event) => setProductSearch(event.target.value)} placeholder="Search name, SKU or barcode…" /></div>
+          <div className="pos-product-grid">
+            {visibleProducts.map((product) => <button type="button" className="pos-product-card" key={product.sku} onClick={() => addProduct(product)} disabled={upiPaymentActive || product.status === "Draft" || product.stock <= 0}><span className="pos-product-card-image">{product.image ? <img src={product.image} alt="" /> : <i>✦</i>}<em>{product.stock > 0 ? `${product.stock} in stock` : "Out of stock"}</em></span><span><strong>{product.name}</strong><small>{product.sku} · {product.category}</small><b>{product.price}</b></span></button>)}
+            {!loading && !visibleProducts.length && <div className="pos-no-products">No matching products found.</div>}
+          </div>
+        </div>
+        <aside className="pos-cart-panel">
+          <div className="pos-cart-head"><div><p className="eyebrow">CURRENT SALE</p><h3>{cartUnits ? `${cartUnits} item${cartUnits === 1 ? "" : "s"}` : "New sale"}</h3></div>{cartUnits > 0 && <button type="button" onClick={clearSale} disabled={upiPaymentConfirmed}>Clear</button>}</div>
+          <div className="pos-cart-lines">
+            {cartLines.length ? cartLines.map(({ product, quantity }) => <article className="pos-cart-line" key={product.sku}><div className="pos-cart-line-image">{product.image ? <img src={product.image} alt="" /> : <span>✦</span>}</div><div><strong>{product.name}</strong><small>{product.sku}</small><div className="pos-quantity"><button type="button" onClick={() => updateQuantity(product, -1)} aria-label={`Decrease ${product.name}`} disabled={upiPaymentActive}>−</button><span>{quantity}</span><button type="button" onClick={() => updateQuantity(product, 1)} aria-label={`Increase ${product.name}`} disabled={upiPaymentActive}>+</button></div></div><span><b>{formatAdminCurrency(parseMoney(product.price) * quantity)}</b><button type="button" onClick={() => updateQuantity(product, -quantity)} disabled={upiPaymentActive}>Remove</button></span></article>) : <div className="pos-empty-cart"><span>▣</span><strong>Ready to scan</strong><small>Scan a barcode or tap a product to begin the sale.</small></div>}
+          </div>
+          <div className="pos-customer-fields"><label>Customer name <input value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="Walk-in customer" /></label><label>Mobile number <input value={customerPhone} onChange={(event) => setCustomerPhone(event.target.value.replace(/\D/g, "").slice(0, 10))} inputMode="numeric" placeholder="Optional" /></label></div>
+          <div className="pos-payment-section"><span>Payment method</span><div>{(["Cash", "UPI", "Card"] as PosPaymentMethod[]).map((method) => <button type="button" key={method} className={paymentMethod === method ? "active" : ""} onClick={() => choosePaymentMethod(method)}>{method}</button>)}</div></div>
+          {paymentMethod === "UPI" && cartLines.length > 0 && <section className={`pos-upi-qr pos-upi-qr-${posQr.status}`} aria-live="polite">
+            {posQr.status === "loading" && <><span className="pos-upi-qr-loader" /><div><strong>Creating Razorpay QR…</strong><small>The QR will include the exact bill amount.</small></div></>}
+            {posQr.status === "error" && <><span className="pos-upi-qr-error">!</span><div><strong>QR unavailable</strong><small>{posQr.message}</small><button type="button" onClick={() => setPosQrRefresh((current) => current + 1)}>Retry</button></div></>}
+            {(posQr.status === "ready" || posQr.status === "paid") && posQr.imageUrl && <>
+              <img src={posQr.imageUrl} alt={`Razorpay UPI QR for ${formatAdminCurrency(total)}`} />
+              <div><small>RAZORPAY UPI</small><strong>{posQr.status === "paid" ? "Payment received" : `Scan to pay ${formatAdminCurrency(total)}`}</strong><span>{posQr.status === "paid" ? `Confirmed · ${posQr.paymentId}` : "Waiting for payment confirmation…"}</span></div>
+              <b className={posQr.status === "paid" ? "is-paid" : ""}>{posQr.status === "paid" ? "✓" : "•••"}</b>
+            </>}
+          </section>}
+          <div className="pos-totals"><label><span>Subtotal</span><strong>{formatAdminCurrency(subtotal)}</strong></label><label><span>Discount</span><span className="pos-discount-input">₹<input value={discountValue} onChange={(event) => setDiscountValue(event.target.value.replace(/[^0-9.]/g, ""))} inputMode="decimal" placeholder="0" disabled={upiPaymentActive} /></span></label><label className="pos-grand-total"><span>Total</span><strong>{formatAdminCurrency(total)}</strong></label><small>Prices are inclusive of applicable GST.</small></div>
+          <button className="pos-pay-button" type="button" disabled={!cartLines.length || checkoutBusy || (paymentMethod === "UPI" && !upiPaymentConfirmed)} onClick={() => void completeSale()}>{checkoutBusy ? "Completing sale…" : paymentMethod === "UPI" ? upiPaymentConfirmed ? `Complete ${formatAdminCurrency(total)} · UPI paid` : posQr.status === "loading" ? "Creating Razorpay QR…" : `Waiting for UPI payment · ${formatAdminCurrency(total)}` : `Pay ${formatAdminCurrency(total)} · ${paymentMethod}`} <span>→</span></button>
+          {lastSale && <div className="pos-sale-complete"><span>✓</span><div><strong>Sale completed</strong><small>{lastSale.id} · {lastSale.total}</small></div><button type="button" onClick={() => void printOrderBill(lastSale)}>Print receipt</button></div>}
+        </aside>
+      </div>
+    </section>
+  );
+}
+
 function ProductLibraryWorkspace({
   onNotify,
   productScannerRequest = 0,
@@ -7403,6 +8137,7 @@ function ProductLibraryWorkspace({
   const [productSupplierFilter, setProductSupplierFilter] = useState("all");
   const [catalogCategories, setCatalogCategories] = useState<Array<{ name: string; pieces: number; image?: string; section?: CategorySection }>>([]);
   const [scannerOpen, setScannerOpen] = useState(false);
+  const [printingBarcodeSku, setPrintingBarcodeSku] = useState<string | null>(null);
   const [editValues, setEditValues] = useState({
     name: "",
     category: "",
@@ -7844,7 +8579,7 @@ function ProductLibraryWorkspace({
         }
       }
       if (active && !remote.error && remote.data !== null) {
-        const mapped: AdminProduct[] = remote.data.filter((product) => !isDemoProduct(product)).map((product) => {
+        const mappedCatalog: AdminProduct[] = remote.data.filter((product) => !isDemoProduct(product)).map((product) => {
           const savedAdjustments = imageAdjustmentsMap[product.sku];
           const variants = variantsMap[product.sku]?.length ? variantsMap[product.sku] : localVariantsMap[product.sku] || [];
           const sizes = sizesMap[product.sku]?.length
@@ -7893,6 +8628,9 @@ function ProductLibraryWorkspace({
           hoverImageAdjustments: normalizeImageAdjustments(savedAdjustments?.hoverImage),
         };
         });
+        const barcodeResult = ensureProductBarcodes(mappedCatalog);
+        const mapped = barcodeResult.products;
+        if (barcodeResult.changed) void saveProductBarcodes(mapped);
         // Supabase is the shared catalog. Never merge stale local records back
         // into it, otherwise a product deleted on one device can be resurrected
         // by an older localStorage snapshot on another device.
@@ -7925,7 +8663,7 @@ function ProductLibraryWorkspace({
           }
         >;
         if (active && Array.isArray(parsed) && parsed.length) {
-          const mapped = parsed
+          const mappedCatalog = parsed
               .filter(
                 (product) =>
                   typeof product.name === "string" && product.name.trim() && !isDemoProduct(product),
@@ -7977,6 +8715,9 @@ function ProductLibraryWorkspace({
            variants: localVariants,
                 };
               });
+          const barcodeResult = ensureProductBarcodes(mappedCatalog);
+          const mapped = barcodeResult.products;
+          if (barcodeResult.changed) void saveProductBarcodes(mapped);
           setProducts(mapped);
           persistCatalog(mapped);
           if (shouldApplyNonLuxuryMargin) window.localStorage.setItem(nonLuxuryMarginMigrationKey, "true");
@@ -8226,12 +8967,31 @@ function ProductLibraryWorkspace({
     setSelectedProduct(null);
     setIsEditing(false);
   };
+  const printBarcode = async (product: AdminProduct) => {
+    if (printingBarcodeSku) return;
+    if (!product.barcode?.trim()) return onNotify("This product does not have a barcode yet");
+    setPrintingBarcodeSku(product.sku);
+    try {
+      await printProductBarcode({ productName: product.name, barcode: product.barcode, price: product.price, copies: 1 });
+      onNotify(`${product.name} barcode sent to the printer`);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "Could not print the barcode label");
+    } finally {
+      setPrintingBarcodeSku(null);
+    }
+  };
   const saveProduct = async () => {
     if (!newProduct.name.trim()) return onNotify("Add a product name");
     if (!newProduct.supplierName.trim()) return onNotify("Select a supplier bill before saving the product");
     const productSku =
       newProduct.sku.trim() ||
       createSku(newProduct.name, newProduct.category, products);
+    const requestedBarcode = newProduct.barcode.trim();
+    if (requestedBarcode && products.some((product) => product.barcode?.trim() === requestedBarcode)) {
+      return onNotify("That barcode is already assigned to another product");
+    }
+    const usedBarcodes = new Set(products.map((product) => product.barcode?.trim()).filter((barcode): barcode is string => Boolean(barcode)));
+    const productBarcode = requestedBarcode || createProductBarcode(productSku, usedBarcodes);
     let productImage = newProductImage;
     let productHoverImage = newProductHoverImage;
     let imageSavedLocally = false;
@@ -8287,7 +9047,7 @@ function ProductLibraryWorkspace({
        status: hasSellableStock(newProduct.stock, newProduct.variantType, newProductSizes, newProductSizeStock, newProduct.variants) ? "Published" : "Draft",
       image: productImage,
       hoverImage: productHoverImage,
-      barcode: newProduct.barcode.trim(),
+      barcode: productBarcode,
       hsnCode: newProduct.hsnCode.trim(),
       billName: newProduct.billName.trim(),
       supplierName,
@@ -8553,6 +9313,16 @@ function ProductLibraryWorkspace({
   const saveEdit = async () => {
     if (!selectedProduct || !editValues.name.trim())
       return onNotify("Product name is required");
+    const editedSku = editValues.sku.trim() || selectedProduct.sku;
+    const requestedBarcode = editValues.barcode.trim();
+    if (requestedBarcode && products.some((product) => product.sku !== selectedProduct.sku && product.barcode?.trim() === requestedBarcode)) {
+      return onNotify("That barcode is already assigned to another product");
+    }
+    const usedBarcodes = new Set(products
+      .filter((product) => product.sku !== selectedProduct.sku)
+      .map((product) => product.barcode?.trim())
+      .filter((barcode): barcode is string => Boolean(barcode)));
+    const productBarcode = requestedBarcode || createProductBarcode(editedSku, usedBarcodes);
     let image = editValues.image || selectedProduct.image;
     let hoverImage = editValues.hoverImage || selectedProduct.image;
     let remoteImageError = false;
@@ -8595,11 +9365,11 @@ function ProductLibraryWorkspace({
       price: normalizeWholeSellingPrice(editValues.price.trim() || "₹0"),
       cost: editValues.cost.trim() || "₹0",
       stock: Number(editValues.stock) || 0,
-      sku: editValues.sku.trim() || selectedProduct.sku,
+      sku: editedSku,
        status: hasSellableStock(editValues.stock, editValues.variantType, editProductSizes, editProductSizeStock, editValues.variants) ? "Published" : "Draft",
       image,
       hoverImage,
-      barcode: editValues.barcode.trim(),
+      barcode: productBarcode,
       hsnCode: editValues.hsnCode.trim(),
       billName: editValues.billName.trim(),
       supplierName,
@@ -8692,7 +9462,7 @@ function ProductLibraryWorkspace({
     const billNameColumn = findColumn(["bill name", "invoice name", "billing name"]);
     const supplierNameColumn = findColumn(["supplier bill", "supplier name", "supplier", "vendor name"]);
     const sizesColumn = findColumn(["sizes", "size", "available sizes"]);
-    const imported = rows
+    const importedRows = rows
       .map((row, index): AdminProduct | null => {
         const name = nameColumn >= 0 ? row[nameColumn]?.trim() : "";
         if (!name) return null;
@@ -8730,6 +9500,7 @@ function ProductLibraryWorkspace({
         };
       })
       .filter((product): product is AdminProduct => product !== null);
+    const imported = ensureProductBarcodes([...products, ...importedRows]).products.slice(products.length);
     if (!imported.length) onNotify("No valid product rows found in CSV");
     else {
       const remoteErrors = await Promise.all(
@@ -9030,9 +9801,10 @@ function ProductLibraryWorkspace({
                 <input
                   value={newProduct.barcode}
                   onChange={(event) => updateField("barcode", event.target.value)}
-                  placeholder="Scan or enter barcode"
+                  placeholder="Scan, enter, or leave blank for automatic"
                   inputMode="numeric"
                 />
+                <small className="field-help">Every product receives a unique barcode automatically when this is left blank.</small>
               </label>
               <label>
                 HSN code
@@ -9217,11 +9989,14 @@ function ProductLibraryWorkspace({
               <span className="product-row-thumb">
                 <img src={product.image} alt="" />
               </span>
-              <strong>{product.name}</strong>
-              <small>
-                {product.stock === 0 ? "Draft" : `${product.stock} in stock`} ·{" "}
-                {product.category}{product.barcode ? ` · Barcode ${product.barcode}` : ""}
-              </small>
+              <span className="product-row-copy">
+                <strong>{product.name}</strong>
+                <small>
+                  {product.stock === 0 ? "Draft" : `${product.stock} in stock`} ·{" "}
+                  {product.category} · SKU {product.sku}
+                </small>
+              </span>
+              <ProductBarcode value={product.barcode || createProductBarcode(product.sku, new Set())} />
             </button>
             <div className="product-row-actions">
               <button
@@ -9250,6 +10025,15 @@ function ProductLibraryWorkspace({
                 title="Delete product"
               >
                 <Trash2 size={15} strokeWidth={1.8} aria-hidden="true" />
+              </button>
+              <button
+                className="barcode-print-action"
+                onClick={() => void printBarcode(product)}
+                aria-label={`Print barcode for ${product.name}`}
+                title={printingBarcodeSku === product.sku ? "Printing barcode" : "Print barcode"}
+                disabled={printingBarcodeSku !== null}
+              >
+                <Printer size={15} strokeWidth={1.8} aria-hidden="true" />
               </button>
             </div>
           </div>
@@ -9462,9 +10246,10 @@ function ProductLibraryWorkspace({
                     barcode: event.target.value,
                   }))
                 }
-                placeholder="Scan or enter barcode"
+                placeholder="Scan, enter, or leave blank for automatic"
                   inputMode="numeric"
                 />
+                <small className="field-help">Clear this field to create a new unique internal barcode.</small>
               </label>
               <label>
                 HSN code
@@ -9664,6 +10449,14 @@ function ProductLibraryWorkspace({
                 onClick={() => startEditing(selectedProduct)}
               >
                 Edit product
+              </button>
+              <button
+                className="module-secondary barcode-print-detail-action"
+                onClick={() => void printBarcode(selectedProduct)}
+                disabled={printingBarcodeSku !== null}
+              >
+                <Printer size={15} strokeWidth={1.8} aria-hidden="true" />
+                {printingBarcodeSku === selectedProduct.sku ? "Printing…" : "Print barcode"}
               </button>
               <button
                 className="module-secondary"

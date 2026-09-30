@@ -14,8 +14,8 @@ const thermalLogoImagePath = join(process.cwd(), "public", "fanzzy-mark-thermal.
 const qrMarker = "<<FANZZY_QR>>";
 let printerWorker = null;
 let printerWorkerReady = null;
+let printerWorkerName = "";
 let printerWorkerQrPath = "";
-let printerWorkerBuffer = "";
 const printerWorkerRequests = [];
 const defaultBillDesign = {
   showLogo: true,
@@ -160,36 +160,42 @@ const runPowerShell = (scriptPath, receiptPath, printerName, logoPath, logoCache
 });
 
 const ensurePrinterWorker = (printerName, qrPath) => {
-  if (printerWorker && printerWorker.exitCode === null && printerWorkerReady && printerWorkerQrPath === qrPath) return printerWorkerReady;
-  if (printerWorker && printerWorker.exitCode === null && printerWorkerQrPath !== qrPath) {
+  if (printerWorker && printerWorker.exitCode === null && printerWorkerReady && printerWorkerName === printerName && printerWorkerQrPath === qrPath) return printerWorkerReady;
+  if (printerWorker && printerWorker.exitCode === null && (printerWorkerName !== printerName || printerWorkerQrPath !== qrPath)) {
     printerWorker.kill();
     printerWorker = null;
     printerWorkerReady = null;
+    printerWorkerName = "";
     printerWorkerQrPath = "";
   }
-  printerWorker = spawn("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", printerWorkerScript, printerName, qrPath], { windowsHide: true });
+  const worker = spawn("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", printerWorkerScript, printerName, qrPath], { windowsHide: true });
+  printerWorker = worker;
+  printerWorkerName = printerName;
   printerWorkerQrPath = qrPath;
-  printerWorkerBuffer = "";
-  printerWorkerReady = new Promise((resolve, reject) => {
+  let workerBuffer = "";
+  const readyPromise = new Promise((resolve, reject) => {
     const fail = (error) => {
-      printerWorkerReady = null;
+      if (printerWorker === worker) printerWorkerReady = null;
       while (printerWorkerRequests.length) printerWorkerRequests.shift().reject(error);
       reject(error);
     };
-    printerWorker.once("error", fail);
-    printerWorker.once("close", (code) => {
+    worker.once("error", fail);
+    worker.once("close", (code) => {
       if (code !== 0) fail(new Error(`Printer worker exited with code ${code ?? "unknown"}`));
       else {
-        printerWorkerReady = null;
+        if (printerWorker === worker) printerWorkerReady = null;
         while (printerWorkerRequests.length) printerWorkerRequests.shift().reject(new Error("Printer worker closed"));
       }
-      printerWorker = null;
-      printerWorkerQrPath = "";
+      if (printerWorker === worker) {
+        printerWorker = null;
+        printerWorkerName = "";
+        printerWorkerQrPath = "";
+      }
     });
-    printerWorker.stdout.on("data", (chunk) => {
-      printerWorkerBuffer += chunk.toString();
-      const lines = printerWorkerBuffer.split(/\r?\n/);
-      printerWorkerBuffer = lines.pop() || "";
+    worker.stdout.on("data", (chunk) => {
+      workerBuffer += chunk.toString();
+      const lines = workerBuffer.split(/\r?\n/);
+      workerBuffer = lines.pop() || "";
       for (const line of lines) {
         if (line === "READY") resolve();
         else if (line === "OK") printerWorkerRequests.shift()?.resolve();
@@ -197,7 +203,8 @@ const ensurePrinterWorker = (printerName, qrPath) => {
       }
     });
   });
-  return printerWorkerReady;
+  printerWorkerReady = readyPromise;
+  return readyPromise;
 };
 
 const sendThroughPrinterWorker = async (payload, printerName, qrPath) => {
@@ -207,6 +214,102 @@ const sendThroughPrinterWorker = async (payload, printerName, qrPath) => {
     printerWorker.stdin.write(`${payload.toString("base64")}\n`);
   });
 };
+
+const labelRate = (price) => {
+  const amount = text(price).replace(/[^0-9.,]/g, "").trim();
+  return amount ? `Rs. ${amount}` : "";
+};
+
+const makeBarcodeLabel = ({ productName, barcode, price, copies }) => {
+  const esc = 0x1b;
+  const gs = 0x1d;
+  const cleanName = text(productName).slice(0, 32) || "Fanzzy product";
+  const rate = labelRate(price);
+  const digits = text(barcode).replace(/\D/g, "");
+  const eanBody = digits.length === 13 ? digits.slice(0, 12) : digits.length === 12 ? digits : "";
+  const ean8Body = digits.length === 8 ? digits.slice(0, 7) : "";
+  const count = Math.min(100, Math.max(1, Math.floor(Number(copies) || 1)));
+  const chunks = [Buffer.from([esc, 0x40])];
+  for (let index = 0; index < count; index += 1) {
+    chunks.push(
+      Buffer.from([esc, 0x61, 0x01, esc, 0x45, 0x01]),
+      Buffer.from(`${cleanName}\n`, "ascii"),
+      ...(rate ? [Buffer.from(`${rate}\n`, "ascii")] : []),
+      Buffer.from([esc, 0x45, 0x00, gs, 0x48, 0x02, gs, 0x66, 0x00, gs, 0x68, 0x60, gs, 0x77, 0x02]),
+    );
+    if (eanBody) chunks.push(Buffer.concat([Buffer.from([gs, 0x6b, 0x02]), Buffer.from(eanBody, "ascii")]));
+    else if (ean8Body) chunks.push(Buffer.concat([Buffer.from([gs, 0x6b, 0x03]), Buffer.from(ean8Body, "ascii")]));
+    else chunks.push(Buffer.from(`${text(barcode).slice(0, 24)}\n`, "ascii"));
+    chunks.push(Buffer.from([0x0a, 0x0a, esc, 0x64, 0x04, gs, 0x56, 0x42, 0x00]));
+  }
+  return Buffer.concat(chunks);
+};
+
+const makeTscBarcodeLabel = ({ productName, barcode, price }) => {
+  const cleanName = text(productName).replace(/["\r\n]/g, " ").replace(/\s+/g, " ").trim().slice(0, 24) || "Fanzzy product";
+  const rate = labelRate(price).slice(0, 14);
+  const cleanBarcode = text(barcode).replace(/["\r\n]/g, "").trim().slice(0, 32);
+  const digits = cleanBarcode.replace(/\D/g, "");
+  const barcodeType = digits.length === 12 || digits.length === 13 ? "EAN13" : digits.length === 7 || digits.length === 8 ? "EAN8" : "128";
+  const barcodeContent = barcodeType === "EAN13" ? digits.slice(0, 12) : barcodeType === "EAN8" ? digits.slice(0, 7) : cleanBarcode;
+  const printedBarcode = digits || cleanBarcode;
+  // The 81 x 12 mm jewellery tag has a 54 mm printable panel followed by
+  // a 27 mm fastening tail. Keep every field inside the first 432 dots
+  // (54 mm at the TTP-244 Pro's 203 dpi) instead of printing on the tail.
+  return Buffer.from([
+    "SIZE 81 mm,12 mm",
+    "GAP 2 mm,0 mm",
+    "SPEED 3",
+    "DENSITY 8",
+    "DIRECTION 1",
+    "REFERENCE 0,0",
+    "CLS",
+    `TEXT 12,8,"1",0,1,1,"${cleanName}"`,
+    ...(rate ? [`TEXT 308,8,"1",0,1,1,"${rate}"`] : []),
+    `BARCODE 12,26,"${barcodeType}",28,0,0,2,4,"${barcodeContent}"`,
+    `TEXT 56,60,"1",0,1,1,"${printedBarcode}"`,
+    "PRINT 1,1",
+    "",
+  ].join("\r\n"), "ascii");
+};
+
+const printBarcodeLabel = async (productName, barcode, price, copies, requestedPrinter) => {
+  const configured = text(requestedPrinter);
+  const printerName = (configured === "Essae PR 55" ? defaultPrinter : configured) || defaultPrinter;
+  const payload = /\bTSC\b|TTP[- ]?244/i.test(printerName)
+    ? makeTscBarcodeLabel({ productName, barcode, price, copies })
+    : makeBarcodeLabel({ productName, barcode, price, copies });
+  await sendThroughPrinterWorker(payload, printerName, "");
+  return printerName;
+};
+
+const listWindowsPrinters = () => new Promise((resolve, reject) => {
+  const command = [
+    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
+    "$printers = @(Get-Printer | Sort-Object Name | ForEach-Object { [PSCustomObject]@{ name = $_.Name; status = [string]$_.PrinterStatus; portName = $_.PortName; driverName = $_.DriverName } })",
+    "ConvertTo-Json -InputObject $printers -Compress",
+  ].join("; ");
+  const child = spawn("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], { windowsHide: true });
+  let output = "";
+  let errorOutput = "";
+  const timeout = setTimeout(() => child.kill(), 5000);
+  child.stdout.on("data", (chunk) => { output += chunk.toString(); });
+  child.stderr.on("data", (chunk) => { errorOutput += chunk.toString(); });
+  child.once("error", (error) => {
+    clearTimeout(timeout);
+    reject(error);
+  });
+  child.once("close", (code) => {
+    clearTimeout(timeout);
+    if (code !== 0) return reject(new Error(errorOutput.trim() || "Could not list Windows printers."));
+    try {
+      const printers = JSON.parse(output || "[]");
+      resolve(Array.isArray(printers) ? printers : [printers]);
+    } catch {
+      reject(new Error("Windows returned an invalid printer list."));
+    }
+  });
+});
 
 const printOrder = async (order, requestedPrinter, design) => {
   const configured = text(requestedPrinter);
@@ -335,7 +438,7 @@ try {
 const send = (response, status, payload) => {
   response.writeHead(status, {
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
     "Content-Type": "application/json",
   });
@@ -345,11 +448,28 @@ const send = (response, status, payload) => {
 const server = createServer(async (request, response) => {
   if (request.method === "OPTIONS") return send(response, 204, {});
   if (request.method === "GET" && request.url === "/health") return send(response, 200, { ok: true, printerName: defaultPrinter });
-  if (request.method !== "POST" || request.url !== "/print") return send(response, 404, { error: "Not found" });
+  if (request.method === "GET" && request.url === "/printers") {
+    try {
+      return send(response, 200, { printers: await listWindowsPrinters() });
+    } catch (error) {
+      return send(response, 500, { error: error instanceof Error ? error.message : "Could not list Windows printers." });
+    }
+  }
+  if (request.method !== "POST" || !["/print", "/print-barcode", "/prepare-printer"].includes(request.url || "")) return send(response, 404, { error: "Not found" });
   try {
     let body = "";
     for await (const chunk of request) body += chunk;
     const payload = JSON.parse(body);
+    if (request.url === "/prepare-printer") {
+      const printerName = text(payload.printerName) || defaultPrinter;
+      await ensurePrinterWorker(printerName, "");
+      return send(response, 200, { ready: true, printerName });
+    }
+    if (request.url === "/print-barcode") {
+      if (!text(payload.productName) || !text(payload.barcode)) return send(response, 400, { error: "Product name and barcode are required." });
+      const printerName = await printBarcodeLabel(payload.productName, payload.barcode, payload.price, payload.copies, payload.printerName);
+      return send(response, 200, { printed: true, printerName });
+    }
     if (!payload.order?.id) return send(response, 400, { error: "Order details are required." });
     const printerName = await printOrder(payload.order, payload.printerName, payload.design);
     return send(response, 200, { printed: true, printerName });
@@ -360,5 +480,4 @@ const server = createServer(async (request, response) => {
 
 server.listen(port, "127.0.0.1", () => {
   console.log(`Fanzzy printer bridge listening on http://127.0.0.1:${port}`);
-  void ensurePrinterWorker(defaultPrinter, qrImagePath).catch(() => undefined);
 });

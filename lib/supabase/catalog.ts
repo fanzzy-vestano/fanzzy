@@ -266,7 +266,11 @@ export async function removeCatalogCategory(name: string) {
   return error;
 }
 
-export async function renameCatalogCategory(previousName: string, category: CatalogCategory) {
+export async function renameCatalogCategory(
+  previousName: string,
+  category: CatalogCategory,
+  previousSection: CatalogCategorySection = category.section || "normal",
+) {
   if (!supabase) return new Error("Supabase is not configured");
   const updates: Record<string, unknown> = { name: category.name };
   if (category.pieces !== undefined) updates.pieces = category.pieces;
@@ -277,9 +281,22 @@ export async function renameCatalogCategory(previousName: string, category: Cata
   if (error && /section|column/i.test(error.message || "")) {
     delete updates.section;
     const legacyResult = await supabase.from("categories").update(updates).eq("name", previousName);
-    return legacyResult.error;
+    if (legacyResult.error) return legacyResult.error;
+  } else if (error) {
+    return error;
   }
-  return error;
+
+  // Normal and Luxury can share the same display name. Keep the selected
+  // section isolated when moving its products to a renamed category.
+  const previousBase = previousName.replace(/\s*·\s*lx\s*$/i, "").trim();
+  const nextBase = category.name.replace(/\s*·\s*lx\s*$/i, "").trim();
+  const wasLuxury = previousSection === "luxury" || /\s*·\s*lx\s*$/i.test(previousName.trim());
+  const isLuxury = category.section === "luxury";
+  const from = wasLuxury ? `${previousBase} · LX` : previousName.trim();
+  const to = isLuxury ? `${nextBase} · LX` : category.name.trim();
+  if (!from || !to || from.toLowerCase() === to.toLowerCase()) return null;
+  const productResult = await supabase.from("products").update({ category: to }).eq("category", from);
+  return productResult.error;
 }
 
 export async function fetchStoreSetting(key: keyof typeof settingKeys) {

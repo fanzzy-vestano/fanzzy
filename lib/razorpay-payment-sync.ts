@@ -43,6 +43,7 @@ type StoredOrder = {
   delhiveryLiveStatusDate?: string;
   delhiveryLiveLocation?: string;
   delhiveryLastTrackedAt?: string;
+  delhiveryScans?: Array<{ status: string; date?: string; location?: string; instructions?: string }>;
   couponDiscount?: number;
   promotionDiscount?: number;
   shippingTotal?: number;
@@ -217,7 +218,9 @@ const pickupRequestAlreadyCoversWarehouse = (error: unknown) =>
 
 async function ensureDelhiveryPickupRequest(orders: StoredOrder[], order: StoredOrder) {
   if (!isDeliveryOrderReadyForPickup(order)) return;
-  if (order.delhiveryPickupRequestStatus === "pending") return;
+  // A pending request with an error is a previous failed attempt. Allow the
+  // next payment/admin sync to retry it after the Delhivery wallet is topped up.
+  if (order.delhiveryPickupRequestStatus === "pending" && !order.delhiveryPickupRequestError) return;
 
   const schedule = delhiveryPickupSchedule();
   if (order.delhiveryPickupRequestStatus === "created" && (order.delhiveryPickupRequestDate || "") >= schedule.currentDate) return;
@@ -284,7 +287,8 @@ async function ensureDelhiveryShipment(orders: StoredOrder[], order: StoredOrder
     order.delhiveryTrackingUrl = shipment.trackingUrl;
     order.delhiveryShipmentStatus = "created";
     order.delhiveryShipmentCreatedAt = new Date().toISOString();
-    if (order.status === "Processing") order.status = "Shipped";
+    // Creating a Delhivery shipment only means the label/waybill exists. Keep
+    // the order in Processing until the warehouse actually dispatches it.
     delete order.delhiveryShipmentError;
   } catch (error) {
     order.delhiveryShipmentStatus = "failed";
@@ -647,6 +651,7 @@ export async function refreshDelhiveryOrderTracking(orderId: string, waybill: st
     order.delhiveryLiveStatusType = tracking.statusType;
     order.delhiveryLiveStatusDate = tracking.statusDate;
     order.delhiveryLiveLocation = tracking.location;
+    order.delhiveryScans = tracking.scans;
     order.delhiveryLastTrackedAt = new Date().toISOString();
     if (/delivered/i.test(tracking.status)) {
       order.status = "Delivered";
