@@ -104,6 +104,7 @@ type RefundRequestStatus = "Requested" | "Approved" | "Rejected" | "Refunded";
 type RefundRequest = { id: string; orderId: string; userId: string; customerName: string; phone: string; amount: string; status: RefundRequestStatus; reason: string; createdAt: string; updatedAt?: string };
 type MarketingRecord = { kind: "Campaign" | "Coupon" | "Newsletter"; name: string; detail: string; status: "Active" | "Scheduled" | "Draft"; code?: string; discount?: string; offerType?: "bogo"; buyQuantity?: number; getQuantity?: number; eligibleProductIds?: string[] };
 type PromotionCartLine = { groupId: string; offerId: string; role: "paid" | "free" | "bundle"; label: string; regularPrice: number; linePrice: number };
+type DelhiveryScan = { status: string; date?: string; location?: string; instructions?: string };
 type OrderStatus = "Processing" | "Packed" | "Shipped" | "Delivered" | "Cancelled";
 type CustomerOrder = {
   id: string;
@@ -150,6 +151,7 @@ type CustomerOrder = {
   delhiveryLiveStatusDate?: string;
   delhiveryLiveLocation?: string;
   delhiveryLastTrackedAt?: string;
+  delhiveryScans?: DelhiveryScan[];
   items?: Array<{ name: string; productName?: string; quantity: number; price: string; regularPrice?: number; productId?: string; image?: string; variantName?: string; variantImage?: string; size?: string; hsnCode?: string; supplierName?: string; vendorId?: string | null; vendorName?: string; vendorSlug?: string; promotion?: PromotionCartLine }>;
 };
 type AssistantMessage = { role: "user" | "assistant"; text: string; productIds?: string[] };
@@ -1448,7 +1450,7 @@ export default function Home() {
         try {
           const response = await fetch("/api/delhivery/track", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: id, waybill }), cache: "no-store" });
           if (!response.ok) return null;
-          const body = await response.json() as { tracking?: { status?: string; statusType?: string; statusDate?: string; location?: string } };
+          const body = await response.json() as { tracking?: { status?: string; statusType?: string; statusDate?: string; location?: string; scans?: DelhiveryScan[] } };
           return body.tracking ? { id, tracking: body.tracking } : null;
         } catch {
           return null;
@@ -1461,7 +1463,7 @@ export default function Home() {
       setOrders((current) => current.map((order) => {
         const tracking = byOrder.get(order.id);
         if (!tracking) return order;
-        return { ...order, delhiveryLiveStatus: tracking.status || order.delhiveryLiveStatus, delhiveryLiveStatusType: tracking.statusType || order.delhiveryLiveStatusType, delhiveryLiveStatusDate: tracking.statusDate || order.delhiveryLiveStatusDate, delhiveryLiveLocation: tracking.location || order.delhiveryLiveLocation, delhiveryLastTrackedAt: trackedAt };
+        return { ...order, delhiveryLiveStatus: tracking.status || order.delhiveryLiveStatus, delhiveryLiveStatusType: tracking.statusType || order.delhiveryLiveStatusType, delhiveryLiveStatusDate: tracking.statusDate || order.delhiveryLiveStatusDate, delhiveryLiveLocation: tracking.location || order.delhiveryLiveLocation, delhiveryScans: tracking.scans?.length ? tracking.scans : order.delhiveryScans, delhiveryLastTrackedAt: trackedAt };
       }));
     };
     void refreshTracking();
