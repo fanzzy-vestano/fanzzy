@@ -1,7 +1,7 @@
 ﻿"use client";
 /* eslint-disable @next/next/no-html-link-for-pages */
 
-import { Component, memo, useEffect, useMemo, useRef, useState, type ChangeEvent, type ErrorInfo } from "react";
+import { Component, memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ErrorInfo } from "react";
 import { Eye, Pencil, Printer, Trash2 } from "lucide-react";
 import QRCode from "react-qr-code";
 import { createProductCategoryResolver, mergeCatalogCategories } from "../../lib/catalog-categories";
@@ -932,11 +932,6 @@ const saveProductBarcodes = async (catalog: AdminProduct[]) => {
   await saveStoreSetting("productBarcodes", JSON.stringify(barcodes));
 };
 
-const barcodeCheckDigit = (body: string) => {
-  const sum = body.split("").reduce((total, digit, index) => total + Number(digit) * (index % 2 === 0 ? 1 : 3), 0);
-  return String((10 - (sum % 10)) % 10);
-};
-
 const barcodeHash = (value: string) => {
   let hash = 2166136261;
   for (let index = 0; index < value.length; index += 1) {
@@ -946,28 +941,32 @@ const barcodeHash = (value: string) => {
   return hash >>> 0;
 };
 
+const isFiveDigitBarcode = (value: string) => /^\d{5}$/.test(value);
+
 const createProductBarcode = (sku: string, usedBarcodes: Set<string>) => {
-  let attempt = 0;
-  while (attempt < 10000) {
-    // 29 is reserved for restricted-circulation/internal-use EAN numbers.
-    const payload = `290${String(barcodeHash(`${sku}:${attempt}`) % 1_000_000_000).padStart(9, "0")}`;
-    const barcode = `${payload}${barcodeCheckDigit(payload)}`;
+  const start = barcodeHash(sku) % 100000;
+  for (let offset = 0; offset < 100000; offset += 1) {
+    const barcode = String((start + offset) % 100000).padStart(5, "0");
     if (!usedBarcodes.has(barcode)) return barcode;
-    attempt += 1;
   }
-  const fallbackBody = `290${String(Date.now() % 1_000_000_000).padStart(9, "0")}`;
-  return `${fallbackBody}${barcodeCheckDigit(fallbackBody)}`;
+  throw new Error("Could not create a unique five-digit barcode: all codes are in use.");
 };
 
 const ensureProductBarcodes = (catalog: AdminProduct[]) => {
+  const preserved = new Map<number, string>();
   const used = new Set<string>();
-  let changed = false;
-  const products = catalog.map((product) => {
+  catalog.forEach((product, index) => {
     const supplied = product.barcode?.trim() || "";
-    const barcode = supplied && !used.has(supplied)
-      ? supplied
-      : createProductBarcode(product.sku || product.name, used);
-    used.add(barcode);
+    if (isFiveDigitBarcode(supplied) && !used.has(supplied)) {
+      preserved.set(index, supplied);
+      used.add(supplied);
+    }
+  });
+  let changed = false;
+  const products = catalog.map((product, index) => {
+    const supplied = product.barcode?.trim() || "";
+    const barcode = preserved.get(index) || createProductBarcode(product.sku || product.name, used);
+    if (!preserved.has(index)) used.add(barcode);
     if (barcode !== supplied) changed = true;
     return barcode === product.barcode ? product : { ...product, barcode };
   });
@@ -1000,6 +999,91 @@ const ProductBarcode = memo(function ProductBarcode({ value }: { value: string }
       </svg> : <span className="product-barcode-fallback" aria-hidden="true" />}
       <small>{value}</small>
     </span>
+  );
+});
+type ProductLibraryRowAction = "select" | "copies" | "open" | "edit" | "delete" | "print";
+type ProductLibraryRowActionHandler = (action: ProductLibraryRowAction, product: AdminProduct, value?: boolean | string) => void;
+type ProductLibraryRowProps = {
+  product: AdminProduct;
+  index: number;
+  isSelected: boolean;
+  multiBarcodeMode: boolean;
+  selectedCopies?: number;
+  printingMultipleBarcodes: boolean;
+  printingBarcode: boolean;
+  barcodePrintDisabled: boolean;
+  onAction: ProductLibraryRowActionHandler;
+};
+const ProductLibraryRow = memo(function ProductLibraryRow({
+  product,
+  index,
+  isSelected,
+  multiBarcodeMode,
+  selectedCopies,
+  printingMultipleBarcodes,
+  printingBarcode,
+  barcodePrintDisabled,
+  onAction,
+}: ProductLibraryRowProps) {
+  const barcode = product.barcode || createProductBarcode(product.sku, new Set());
+  return (
+    <div className={`product-list-row${isSelected ? " selected" : ""}${multiBarcodeMode ? " barcode-multi-select" : ""}`}>
+      {multiBarcodeMode && <div className="barcode-row-selector">
+        <label>
+          <input
+            type="checkbox"
+            checked={Boolean(selectedCopies)}
+            onChange={(event) => onAction("select", product, event.target.checked)}
+            disabled={printingMultipleBarcodes}
+            aria-label={`Select ${product.name} barcode`}
+          />
+          <span>Select</span>
+        </label>
+        {selectedCopies && <label className="barcode-copy-count">
+          <span>Labels</span>
+          <input
+            type="number"
+            min="1"
+            max="100"
+            step="1"
+            value={selectedCopies}
+            onChange={(event) => onAction("copies", product, event.target.value)}
+            onWheel={(event) => event.currentTarget.blur()}
+            disabled={printingMultipleBarcodes}
+            aria-label={`Label quantity for ${product.name}`}
+          />
+        </label>}
+      </div>}
+      <button className="product-list-main" onClick={() => onAction("open", product)}>
+        <span className="module-row-number">{String(index + 1).padStart(2, "0")}</span>
+        <span className="product-row-thumb"><img src={product.image} alt="" /></span>
+        <span className="product-row-copy">
+          <strong>{product.name}</strong>
+          <small>{product.stock === 0 ? "Draft" : `${product.stock} in stock`} · {product.category} · SKU {product.sku}</small>
+        </span>
+        {multiBarcodeMode ? <span className="barcode-row-value">{barcode}</span> : <ProductBarcode value={barcode} />}
+      </button>
+      <div className="product-row-actions">
+        <button onClick={() => onAction("open", product)} aria-label={`View ${product.name}`} title="View product">
+          <Eye size={15} strokeWidth={1.8} aria-hidden="true" />
+        </button>
+        <button onClick={() => onAction("edit", product)} aria-label={`Edit ${product.name}`} title="Edit product">
+          <Pencil size={15} strokeWidth={1.8} aria-hidden="true" />
+        </button>
+        <button className="delete-action" onClick={() => onAction("delete", product)} aria-label={`Delete ${product.name}`} title="Delete product">
+          <Trash2 size={15} strokeWidth={1.8} aria-hidden="true" />
+        </button>
+        <button
+          className="barcode-print-action"
+          onClick={() => onAction("print", product)}
+          aria-label={`Print barcode for ${product.name}`}
+          title={printingBarcode ? "Printing barcode" : "Print barcode"}
+          disabled={barcodePrintDisabled}
+        >
+          <Printer size={15} strokeWidth={1.8} aria-hidden="true" />
+        </button>
+      </div>
+    </div>
   );
 });
 const saveProductHsnCodes = async (catalog: AdminProduct[]) => {
@@ -7731,7 +7815,7 @@ function PosWorkspace({
       const localBarcodeMap = new Map(localCatalog.map((product) => [String(product.sku || ""), String(product.barcode || "")]));
       const catalog = (remote.data?.length ? remote.data : localCatalog) as PosCatalogSource[];
       const usedFallbackBarcodes = new Set<string>();
-      setProducts(catalog.filter((product) => !isDemoProduct(product)).map((product) => {
+      const mappedProducts = catalog.filter((product) => !isDemoProduct(product)).map((product) => {
         const sku = String(product.sku || "");
         const barcode = barcodeMap[sku] || localBarcodeMap.get(sku) || String(product.barcode || "") || createProductBarcode(sku || String(product.name || "product"), usedFallbackBarcodes);
         const status: AdminProduct["status"] = product.status === "Published" || product.status === "Low stock" ? product.status : "Draft";
@@ -7754,7 +7838,10 @@ function PosWorkspace({
           sizeStock: product.sizeStock,
           variantType: product.variantType,
         };
-      }).filter((product) => product.sku));
+      }).filter((product) => product.sku);
+      const barcodeResult = ensureProductBarcodes(mappedProducts);
+      if (barcodeResult.changed) void saveProductBarcodes(barcodeResult.products);
+      setProducts(barcodeResult.products);
       setLoading(false);
     };
     void loadProducts();
@@ -9031,6 +9118,9 @@ function ProductLibraryWorkspace({
       newProduct.sku.trim() ||
       createSku(newProduct.name, newProduct.category, products);
     const requestedBarcode = newProduct.barcode.trim();
+    if (requestedBarcode && !isFiveDigitBarcode(requestedBarcode)) {
+      return onNotify("Barcode must be exactly five digits, or leave it blank to generate one automatically.");
+    }
     if (requestedBarcode && products.some((product) => product.barcode?.trim() === requestedBarcode)) {
       return onNotify("That barcode is already assigned to another product");
     }
@@ -9359,6 +9449,9 @@ function ProductLibraryWorkspace({
       return onNotify("Product name is required");
     const editedSku = editValues.sku.trim() || selectedProduct.sku;
     const requestedBarcode = editValues.barcode.trim();
+    if (requestedBarcode && !isFiveDigitBarcode(requestedBarcode)) {
+      return onNotify("Barcode must be exactly five digits, or leave it blank to generate one automatically.");
+    }
     if (requestedBarcode && products.some((product) => product.sku !== selectedProduct.sku && product.barcode?.trim() === requestedBarcode)) {
       return onNotify("That barcode is already assigned to another product");
     }
@@ -9604,6 +9697,23 @@ function ProductLibraryWorkspace({
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
     onNotify(`${products.length} product${products.length === 1 ? "" : "s"} exported`);
   };
+  const productRowActionRef = useRef<ProductLibraryRowActionHandler>(() => undefined);
+  productRowActionRef.current = (action, product, value) => {
+    if (action === "select") toggleBarcodeSelection(product, value === true);
+    else if (action === "copies") updateBarcodeCopies(product.sku, String(value || ""));
+    else if (action === "open") {
+      setSelectedProduct(product);
+      setIsAdding(false);
+      setIsEditing(false);
+      onNotify(`${product.name} opened`);
+    } else if (action === "edit") startEditing(product);
+    else if (action === "delete") void deleteProduct(product);
+    else if (action === "print") void printBarcode(product);
+  };
+  const handleProductRowAction = useCallback<ProductLibraryRowActionHandler>(
+    (action, product, value) => productRowActionRef.current(action, product, value),
+    [],
+  );
   const scannerPanel = <ProductImageScanner products={products} promotionOffers={promotionOffers} onClose={() => setScannerOpen(false)} onView={(product) => { setScannerOpen(false); setSelectedProduct(product); setIsAdding(false); setIsEditing(false); }} onEdit={(product) => { setScannerOpen(false); startEditing(product); }} onUpdateStock={(product) => { setScannerOpen(false); startEditing(product); }} onAddNew={(file, preview) => { setScannerOpen(false); openAddProduct(file, preview); }} />;
   if (scannerOnly) {
     return (
@@ -9857,10 +9967,12 @@ function ProductLibraryWorkspace({
                 <input
                   value={newProduct.barcode}
                   onChange={(event) => updateField("barcode", event.target.value)}
-                  placeholder="Scan, enter, or leave blank for automatic"
+                  placeholder="5 digits, or blank for automatic"
                   inputMode="numeric"
+                  maxLength={5}
+                  pattern="[0-9]{5}"
                 />
-                <small className="field-help">Every product receives a unique barcode automatically when this is left blank.</small>
+                <small className="field-help">Enter exactly five digits or leave blank to generate a unique five-digit barcode.</small>
               </label>
               <label>
                 HSN code
@@ -10052,101 +10164,18 @@ function ProductLibraryWorkspace({
       </div>}
       <div className="module-list">
         {filteredProducts.map((product, index) => (
-          <div
+          <ProductLibraryRow
             key={product.sku}
-            className={`product-list-row${selectedProduct?.sku === product.sku ? " selected" : ""}${multiBarcodeMode ? " barcode-multi-select" : ""}`}
-          >
-            {multiBarcodeMode && <div className="barcode-row-selector">
-              <label>
-                <input
-                  type="checkbox"
-                  checked={Boolean(selectedBarcodeCopies[product.sku])}
-                  onChange={(event) => toggleBarcodeSelection(product, event.target.checked)}
-                  disabled={printingMultipleBarcodes}
-                  aria-label={`Select ${product.name} barcode`}
-                />
-                <span>Select</span>
-              </label>
-              {selectedBarcodeCopies[product.sku] && <label className="barcode-copy-count">
-                <span>Labels</span>
-                <input
-                  type="number"
-                  min="1"
-                  max="100"
-                  step="1"
-                  value={selectedBarcodeCopies[product.sku]}
-                  onChange={(event) => updateBarcodeCopies(product.sku, event.target.value)}
-                  onWheel={(event) => event.currentTarget.blur()}
-                  disabled={printingMultipleBarcodes}
-                  aria-label={`Label quantity for ${product.name}`}
-                />
-              </label>}
-            </div>}
-            <button
-              className="product-list-main"
-              onClick={() => {
-                setSelectedProduct(product);
-                setIsAdding(false);
-                setIsEditing(false);
-                onNotify(`${product.name} opened`);
-              }}
-            >
-              <span className="module-row-number">
-                {String(index + 1).padStart(2, "0")}
-              </span>
-              <span className="product-row-thumb">
-                <img src={product.image} alt="" />
-              </span>
-              <span className="product-row-copy">
-                <strong>{product.name}</strong>
-                <small>
-                  {product.stock === 0 ? "Draft" : `${product.stock} in stock`} ·{" "}
-                  {product.category} · SKU {product.sku}
-                </small>
-              </span>
-              {multiBarcodeMode
-                ? <span className="barcode-row-value">{product.barcode || createProductBarcode(product.sku, new Set())}</span>
-                : <ProductBarcode value={product.barcode || createProductBarcode(product.sku, new Set())} />}
-            </button>
-            <div className="product-row-actions">
-              <button
-                onClick={() => {
-                  setSelectedProduct(product);
-                  setIsAdding(false);
-                  setIsEditing(false);
-                  onNotify(`${product.name} opened`);
-                }}
-                aria-label={`View ${product.name}`}
-                title="View product"
-              >
-                <Eye size={15} strokeWidth={1.8} aria-hidden="true" />
-              </button>
-              <button
-                onClick={() => startEditing(product)}
-                aria-label={`Edit ${product.name}`}
-                title="Edit product"
-              >
-                <Pencil size={15} strokeWidth={1.8} aria-hidden="true" />
-              </button>
-              <button
-                className="delete-action"
-                onClick={() => deleteProduct(product)}
-                aria-label={`Delete ${product.name}`}
-                title="Delete product"
-              >
-                <Trash2 size={15} strokeWidth={1.8} aria-hidden="true" />
-              </button>
-              <button
-                className="barcode-print-action"
-                onClick={() => void printBarcode(product)}
-                aria-label={`Print barcode for ${product.name}`}
-                title={printingBarcodeSku === product.sku ? "Printing barcode" : "Print barcode"}
-                disabled={printingBarcodeSku !== null || printingMultipleBarcodes}
-              >
-                <Printer size={15} strokeWidth={1.8} aria-hidden="true" />
-              </button>
-            </div>
-          </div>
+            product={product}
+            index={index}
+            isSelected={selectedProduct?.sku === product.sku}
+            multiBarcodeMode={multiBarcodeMode}
+            selectedCopies={selectedBarcodeCopies[product.sku]}
+            printingMultipleBarcodes={printingMultipleBarcodes}
+            printingBarcode={printingBarcodeSku === product.sku}
+            barcodePrintDisabled={printingBarcodeSku !== null || printingMultipleBarcodes}
+            onAction={handleProductRowAction}
+          />
         ))}
         {filteredProducts.length === 0 && (
           <div className="product-library-empty">
@@ -10356,10 +10385,12 @@ function ProductLibraryWorkspace({
                     barcode: event.target.value,
                   }))
                 }
-                placeholder="Scan, enter, or leave blank for automatic"
+                placeholder="5 digits, or blank for automatic"
                   inputMode="numeric"
+                  maxLength={5}
+                  pattern="[0-9]{5}"
                 />
-                <small className="field-help">Clear this field to create a new unique internal barcode.</small>
+                <small className="field-help">Enter exactly five digits or leave blank to generate a unique five-digit barcode.</small>
               </label>
               <label>
                 HSN code

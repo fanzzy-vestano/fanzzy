@@ -244,7 +244,10 @@ const makeBarcodeLabel = ({ productName, barcode, price, copies }) => {
     );
     if (eanBody) chunks.push(Buffer.concat([Buffer.from([gs, 0x6b, 0x02]), Buffer.from(eanBody, "ascii")]));
     else if (ean8Body) chunks.push(Buffer.concat([Buffer.from([gs, 0x6b, 0x03]), Buffer.from(ean8Body, "ascii")]));
-    else chunks.push(Buffer.from(`${text(barcode).slice(0, 24)}\n`, "ascii"));
+    else if (/^\d{5}$/.test(text(barcode))) {
+      const code128 = Buffer.from(`{B${digits}`, "ascii");
+      chunks.push(Buffer.concat([Buffer.from([gs, 0x6b, 0x49, code128.length]), code128]));
+    } else chunks.push(Buffer.from(`${text(barcode).slice(0, 24)}\n`, "ascii"));
     chunks.push(Buffer.from([0x0a, 0x0a, esc, 0x64, 0x04, gs, 0x56, 0x42, 0x00]));
   }
   return Buffer.concat(chunks);
@@ -266,7 +269,7 @@ const makeTscBarcodeLabel = ({ productName, sku, barcode, price, copies }) => {
   // Match the supplied BarTender/TSC jewellery-label PRN exactly. Coordinates
   // are measured from the right because every printable object is rotated 180°.
   return Buffer.from([
-    "SIZE 79.5 mm, 12 mm",
+    "SIZE 82 mm, 12 mm",
     "DIRECTION 0,0",
     "REFERENCE 0,0",
     "OFFSET 0 mm",
@@ -491,6 +494,7 @@ const server = createServer(async (request, response) => {
     }
     if (request.url === "/print-barcode") {
       if (!text(payload.productName) || !text(payload.barcode)) return send(response, 400, { error: "Product name and barcode are required." });
+      if (!/^\d{5}$/.test(text(payload.barcode))) return send(response, 400, { error: "Barcode must be exactly five digits." });
       const printerName = await printBarcodeLabel(payload.productName, payload.barcode, payload.price, payload.copies, payload.printerName);
       return send(response, 200, { printed: true, printerName });
     }
@@ -498,6 +502,7 @@ const server = createServer(async (request, response) => {
       const items = Array.isArray(payload.items) ? payload.items.filter((item) => text(item?.productName) && text(item?.barcode)) : [];
       const printedLabels = items.reduce((sum, item) => sum + Math.min(100, Math.max(1, Math.floor(Number(item.copies) || 1))), 0);
       if (!items.length) return send(response, 400, { error: "Select at least one product with a barcode." });
+      if (items.some((item) => !/^\d{5}$/.test(text(item.barcode)))) return send(response, 400, { error: "Every barcode must be exactly five digits." });
       if (items.length > 500 || printedLabels > 1000) return send(response, 400, { error: "A barcode batch can contain up to 500 products or 1000 labels." });
       const printerName = await printBarcodeLabels(items, payload.printerName);
       return send(response, 200, { printed: true, printerName, printedProducts: items.length, printedLabels });

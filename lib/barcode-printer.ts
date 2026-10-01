@@ -25,6 +25,7 @@ export async function printProductBarcode(input: ProductBarcodePrintInput) {
   if (typeof window === "undefined") throw new Error("Barcode printing is only available in the browser.");
   const barcode = String(input.barcode || "").trim();
   if (!barcode) throw new Error("This product does not have a barcode yet.");
+  if (!/^\d{5}$/.test(barcode)) throw new Error("Barcode must be exactly five digits. Refresh the product catalog to update old barcodes.");
   const savedPrinter = selectedPrinterName();
   const response = await fetch("http://127.0.0.1:3002/print-barcode", {
     method: "POST",
@@ -49,6 +50,9 @@ export async function printProductBarcodes(inputs: ProductBarcodePrintInput[]) {
     copies: Math.min(100, Math.max(1, Math.floor(Number(input.copies) || 1))),
   }));
   if (!jobs.length) throw new Error("Select at least one product with a barcode.");
+  if (jobs.some((input) => !/^\d{5}$/.test(String(input.barcode || "").trim()))) {
+    throw new Error("Every barcode must be exactly five digits. Refresh the product catalog to update old barcodes.");
+  }
 
   const savedPrinter = selectedPrinterName();
   const batchResponse = await fetch("http://127.0.0.1:3002/print-barcodes", {
