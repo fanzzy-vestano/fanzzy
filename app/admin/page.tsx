@@ -3882,7 +3882,7 @@ function SettingsWorkspace({
     setPrinterListStatus("loading");
     setPrinterListMessage("Checking printers connected to this computer…");
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 6000);
+    const timeout = window.setTimeout(() => controller.abort(), 20000);
     try {
       const response = await fetch("http://127.0.0.1:3002/printers", { cache: "no-store", signal: controller.signal });
       const payload = await response.json().catch(() => ({})) as { printers?: LocalPrinterOption[]; error?: string };
@@ -3896,8 +3896,8 @@ function SettingsWorkspace({
     } catch (error) {
       setPrinterListStatus("error");
       setPrinterListMessage(error instanceof Error && error.name === "AbortError"
-        ? "The local printer service did not respond. Start the Fanzzy app locally, then refresh."
-        : "The local printer service is unavailable. Start the Fanzzy app locally, then refresh.");
+        ? "Printer discovery timed out. Check that the Fanzzy printer bridge is running on this computer, then refresh."
+        : "The Fanzzy printer bridge is unavailable on this computer. Start it, then refresh.");
     } finally {
       window.clearTimeout(timeout);
     }
