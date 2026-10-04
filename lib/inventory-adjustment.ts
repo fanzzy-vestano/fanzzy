@@ -156,8 +156,13 @@ export async function adjustOrderInventory(
         else baseQuantities.set(sku, (baseQuantities.get(sku) || 0) + quantity);
         return;
       }
+      const available = Math.floor(Number(selectedVariant.stock));
+      if (mode === "decrement" && requireAvailable && available < quantity) {
+        unresolvedProductIds.add(rawSku || sku);
+        return;
+      }
       variants[variantsKey] = productVariants.map((variant, index) => index === variantIndex
-        ? { ...variant, stock: Math.max(0, Math.floor(Number(variant.stock) - quantity)) }
+        ? { ...variant, stock: stockAfterAdjustment(available, quantity, mode) }
         : variant);
       variantsChanged = true;
       return;
