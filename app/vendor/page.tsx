@@ -156,6 +156,7 @@ function VendorLogin({ error, onSuccess }: { error?: string; onSuccess: () => vo
 export default function VendorDashboardPage() {
   const [data, setData] = useState<Dashboard | null>(null);
   const [error, setError] = useState("");
+  const [dashboardLoading, setDashboardLoading] = useState(true);
   const [tab, setTab] = useState("Dashboard");
   const [form, setForm] = useState<VendorProductForm>(emptyProductForm);
   const [editingSku, setEditingSku] = useState<string | null>(null);
@@ -175,13 +176,28 @@ export default function VendorDashboardPage() {
   const categoryInputRef = useRef<HTMLInputElement>(null);
   const [editingCategory, setEditingCategory] = useState("");
 
-  const load = () => vendorApiFetch("/vendor/dashboard", { cache: "no-store" }).then(async (response) => {
-    const body = await response.json() as Dashboard & { error?: string };
-    if (!response.ok) throw new Error(body.error || "Vendor authentication required.");
-    setError("");
-    setData(body);
-  }).catch((caught) => setError(caught instanceof Error ? caught.message : "Could not load dashboard."));
+  const load = async () => {
+    try {
+      const response = await vendorApiFetch("/vendor/dashboard", { cache: "no-store" });
+      const body = await response.json() as Dashboard & { error?: string };
+      if (response.status === 401) {
+        clearVendorSessionToken();
+        setData(null);
+        setError("");
+        return;
+      }
+      if (!response.ok) throw new Error(body.error || "Could not load dashboard.");
+      setError("");
+      setData(body);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not load dashboard.");
+    } finally {
+      setDashboardLoading(false);
+    }
+  };
 
+  // Loading the remote vendor session is the intended external synchronization.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void load(); }, []);
 
   useEffect(() => {
@@ -525,8 +541,8 @@ export default function VendorDashboardPage() {
 
   const logout = async () => { await vendorApiFetch("/vendor-auth/logout", { method: "POST" }).catch(() => undefined); clearVendorSessionToken(); window.location.assign("/vendor"); };
 
-  if (error && !data) return <VendorLogin error={error} onSuccess={() => void load()} />;
-  if (!data) return <main className="vendor-portal"><p>Loading vendor portal…</p></main>;
+  if (dashboardLoading && !data) return <main className="vendor-portal"><p>Loading vendor portal…</p></main>;
+  if (!data) return <VendorLogin error={error} onSuccess={() => { setDashboardLoading(true); void load(); }} />;
 
   const stats = data.stats || {};
   const navItems = ["Dashboard", "Products", "Add Product", "Inventory", "Categories", "Offers", "Orders", "Sales Reports", "Commission", "Payouts", "Notifications", "Profile", "Bank Details"];
