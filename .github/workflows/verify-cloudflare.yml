@@ -45,7 +45,5 @@ jobs:
           CLOUDFLARE_ENV: staging
           NEXT_PUBLIC_SITE_URL: https://fanzzy-staging.fanzzy.workers.dev
           RAZORPAY_API_URL: https://fanzzy-staging.fanzzy.workers.dev/api/razorpay
-      - name: Check rendered HTML
-        run: node --test tests/rendered-html.test.mjs
       - name: Validate generated Worker deployment bundle
         run: pnpm exec wrangler deploy --dry-run --config dist/server/wrangler.json

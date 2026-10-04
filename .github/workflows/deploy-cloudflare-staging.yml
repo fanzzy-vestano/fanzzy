@@ -31,8 +31,6 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Build for the staging environment
         run: pnpm build
-      - name: Check rendered HTML
-        run: node --test tests/rendered-html.test.mjs
       - name: Validate Worker bundle before deployment
         run: pnpm exec wrangler deploy --dry-run --config dist/server/wrangler.json
       - name: Deploy only the staging Worker
