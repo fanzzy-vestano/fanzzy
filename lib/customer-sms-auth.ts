@@ -58,6 +58,9 @@ const getCookie = (request: Request, name: string) => request.headers.get("cooki
   .map((part) => part.trim().split("="))
   .find(([key]) => key === name)?.slice(1).join("=");
 
+const getBearerToken = (request: Request) =>
+  request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim() || "";
+
 const cookie = (name: string, value: string, maxAge: number) =>
   `${name}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${isProduction ? "; Secure" : ""}`;
 
@@ -181,4 +184,8 @@ export const clearCustomerAuthCookies = () => [
   cookie(sessionCookie, "", 0),
 ];
 
-export const getCustomerSession = (request: Request) => decode<CustomerSmsIdentity>(getCookie(request, sessionCookie));
+export const getCustomerSession = (request: Request) => {
+  const decoded = decode<CustomerSmsIdentity & { kind?: string; expiresAt?: number }>(getBearerToken(request) || getCookie(request, sessionCookie));
+  if (!decoded || (decoded.expiresAt !== undefined && decoded.expiresAt <= Date.now())) return null;
+  return { id: decoded.id, phone: decoded.phone };
+};

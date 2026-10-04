@@ -184,7 +184,11 @@ export function encryptConfidential(value: string) {
   const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
   return `${iv.toString("base64url")}.${cipher.getAuthTag().toString("base64url")}.${encrypted.toString("base64url")}`;
 }
-const cookieValue = (request: Request) => request.headers.get("cookie")?.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${VENDOR_COOKIE}=`))?.slice(VENDOR_COOKIE.length + 1) || "";
+const cookieValue = (request: Request) => {
+  const bearer = request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
+  if (bearer) return bearer;
+  return request.headers.get("cookie")?.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${VENDOR_COOKIE}=`))?.slice(VENDOR_COOKIE.length + 1) || "";
+};
 export const clearVendorSessionCookie = () => `${VENDOR_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${process.env.NODE_ENV === "production" ? "; Secure" : ""}`;
 export const createVendorSessionCookie = (token: string) => `${VENDOR_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MAX_AGE}; HttpOnly; SameSite=Lax${process.env.NODE_ENV === "production" ? "; Secure" : ""}`;
 
@@ -227,7 +231,7 @@ export async function loginVendor(email: string, password: string, request: Requ
   loginAttempts.delete(attemptKey);
   const token = randomBytes(32).toString("base64url");
   await rest("vendor_sessions", "", { privileged: true, method: "POST", body: [{ vendor_user_id: user!.id, vendor_id: vendor!.id, token_hash: hashToken(token), session_version: vendor!.session_version, expires_at: new Date(Date.now() + SESSION_MAX_AGE * 1000).toISOString() }] });
-  return { vendor, cookie: createVendorSessionCookie(token) };
+  return { vendor, token, cookie: createVendorSessionCookie(token) };
 }
 
 export async function logoutVendor(request: Request) {
@@ -445,12 +449,117 @@ export async function getVendorProducts(vendorId: string, privileged = true) {
   return enrichedProducts;
 }
 
+type VendorCategoryRecord = { name: string; image?: string };
+
+const vendorCategorySettingKey = (vendorId: string) => `vendor_categories:${vendorId}`;
+
+const parseVendorCategoryRecords = (value: string | undefined): VendorCategoryRecord[] => {
+  try {
+    const parsed = JSON.parse(value || "[]") as unknown;
+    if (!Array.isArray(parsed)) return [];
+    const seen = new Set<string>();
+    return parsed.flatMap((entry) => {
+      const record = typeof entry === "string" ? { name: entry } : entry && typeof entry === "object" ? entry as Record<string, unknown> : null;
+      const name = String(record?.name || "").trim();
+      const key = name.toLowerCase();
+      if (!name || key === "uncategorised" || seen.has(key)) return [];
+      seen.add(key);
+      const image = String(record?.image || "").trim();
+      return [{ name, ...(image ? { image } : {}) }];
+    });
+  } catch {
+    return [];
+  }
+};
+
+async function getVendorCategoryRecords(vendorId: string, products?: Array<Record<string, unknown>>) {
+  const rows = await rest<Array<{ value?: string }>>(
+    "store_settings",
+    `key=eq.${encodeURIComponent(vendorCategorySettingKey(vendorId))}&select=value`,
+    { privileged: true },
+  );
+  if (rows[0]) return parseVendorCategoryRecords(rows[0].value);
+
+  const source = products || await rest<Array<Record<string, unknown>>>(
+    "products",
+    `vendor_id=eq.${encodeURIComponent(vendorId)}&select=category`,
+    { privileged: true },
+  );
+  return parseVendorCategoryRecords(JSON.stringify(source.map((product) => ({ name: product.category }))));
+}
+
+async function persistVendorCategoryRecords(vendorId: string, categories: VendorCategoryRecord[]) {
+  await rest(
+    "store_settings",
+    "on_conflict=key",
+    {
+      privileged: true,
+      method: "POST",
+      body: [{ key: vendorCategorySettingKey(vendorId), value: JSON.stringify(categories), updated_at: new Date().toISOString() }],
+      headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+    },
+  );
+}
+
+export async function saveVendorCategory(vendorId: string, data: Record<string, unknown>) {
+  const name = String(data.name || "").replace(/\s+/g, " ").trim();
+  const previousName = String(data.previousName || "").trim();
+  const image = String(data.image || "").trim();
+  if (!name) throw new VendorDataError("Category name is required.", 400);
+  if (name.length > 80) throw new VendorDataError("Category name must be 80 characters or fewer.", 400);
+  if (name.toLowerCase() === "uncategorised") throw new VendorDataError("Uncategorised is reserved for products without a category.", 400);
+
+  const categories = await getVendorCategoryRecords(vendorId);
+  const duplicate = categories.find((category) => category.name.toLowerCase() === name.toLowerCase() && category.name.toLowerCase() !== previousName.toLowerCase());
+  if (duplicate) throw new VendorDataError("This category already exists for your vendor account.", 409);
+
+  let nextCategories: VendorCategoryRecord[];
+  if (previousName) {
+    const current = categories.find((category) => category.name.toLowerCase() === previousName.toLowerCase());
+    if (!current) throw new VendorDataError("Category not found for your vendor account.", 404);
+    nextCategories = categories.map((category) => category.name.toLowerCase() === previousName.toLowerCase()
+      ? { name, ...((image || current.image) ? { image: image || current.image } : {}) }
+      : category);
+    if (previousName !== name) {
+      await rest(
+        "products",
+        `vendor_id=eq.${encodeURIComponent(vendorId)}&category=eq.${encodeURIComponent(current.name)}`,
+        { privileged: true, method: "PATCH", body: { category: name, updated_at: new Date().toISOString() }, headers: { Prefer: "return=minimal" } },
+      );
+    }
+  } else {
+    nextCategories = [...categories, { name, ...(image ? { image } : {}) }];
+  }
+
+  await persistVendorCategoryRecords(vendorId, nextCategories);
+  await audit("vendor", vendorId, vendorId, previousName ? "vendor.category_updated" : "vendor.category_created", "category", name, previousName ? { previousName } : {});
+  return nextCategories.map((category) => category.name);
+}
+
+export async function deleteVendorCategory(vendorId: string, nameInput: string) {
+  const name = String(nameInput || "").trim();
+  if (!name) throw new VendorDataError("Category name is required.", 400);
+  const categories = await getVendorCategoryRecords(vendorId);
+  const current = categories.find((category) => category.name.toLowerCase() === name.toLowerCase());
+  if (!current) throw new VendorDataError("Category not found for your vendor account.", 404);
+  const nextCategories = categories.filter((category) => category.name.toLowerCase() !== name.toLowerCase());
+  await persistVendorCategoryRecords(vendorId, nextCategories);
+  await audit("vendor", vendorId, vendorId, "vendor.category_deleted", "category", current.name);
+  return nextCategories.map((category) => category.name);
+}
+
 export async function saveVendorProduct(vendorId: string, data: Record<string, unknown>, admin = false) {
   const name = String(data.name || "").trim();
   if (!name) throw new VendorDataError("Product name is required.", 400);
   const vendorRows = await rest<Array<Pick<VendorRecord, "id" | "slug" | "status" | "automatic_approval">>>("vendors", `id=eq.${encodeURIComponent(vendorId)}&select=id,slug,status,automatic_approval`, { privileged: true });
   const vendor = vendorRows[0];
   if (!vendor) throw new VendorDataError("Vendor not found.", 404);
+  let productCategory = String(data.category || "Uncategorised").trim() || "Uncategorised";
+  if (!admin && productCategory.toLowerCase() !== "uncategorised") {
+    const allowedCategory = (await getVendorCategoryRecords(vendorId)).find((category) => category.name.toLowerCase() === productCategory.toLowerCase());
+    if (!allowedCategory) throw new VendorDataError("Choose a category created for your vendor account.", 400);
+    productCategory = allowedCategory.name;
+  }
   let sku = String(data.sku || "").trim();
   if (!sku) {
     const vendorCode = String(vendor.slug || "vendor").replace(/[^a-z0-9]/gi, "").slice(0, 10).toUpperCase() || "VENDOR";
@@ -466,7 +575,7 @@ export async function saveVendorProduct(vendorId: string, data: Record<string, u
   if (skuRows[0] && skuRows[0].vendor_id !== vendorId) throw new VendorDataError("This SKU already belongs to another catalog product.", 409);
   const requestedStatus = String(data.vendor_status || "Draft") as VendorProductStatus;
   const vendorStatus = admin ? requestedStatus : vendor.automatic_approval ? "Approved" : requestedStatus === "Approved" ? "Pending Approval" : requestedStatus;
-  const rows = await rest<Array<Record<string, unknown>>>("products", "", { privileged: true, method: "POST", body: [{ sku, name, category: String(data.category || "Uncategorised").trim(), stock: Math.max(0, Math.floor(Number(data.stock) || 0)), price: Math.max(0, numericProductValue(data.price)), cost: Math.max(0, numericProductValue(data.cost)), status: vendorStatus === "Approved" ? "Published" : "Draft", image: String(data.image || ""), hover_image: String(data.hover_image || data.image || ""), compare_at: data.compare_at == null ? null : numericProductValue(data.compare_at), tag: data.tag || null, tone: data.tone || null, vendor_id: vendorId, vendor_status: vendorStatus, vendor_rejection_reason: data.vendor_rejection_reason || null, public_vendor_visible: vendorStatus === "Approved", low_stock_limit: Math.max(0, Math.floor(Number(data.low_stock_limit) || 5)), updated_at: new Date().toISOString() }], headers: { Prefer: "resolution=merge-duplicates,return=representation" } });
+  const rows = await rest<Array<Record<string, unknown>>>("products", "", { privileged: true, method: "POST", body: [{ sku, name, category: productCategory, stock: Math.max(0, Math.floor(Number(data.stock) || 0)), price: Math.max(0, numericProductValue(data.price)), cost: Math.max(0, numericProductValue(data.cost)), status: vendorStatus === "Approved" ? "Published" : "Draft", image: String(data.image || ""), hover_image: String(data.hover_image || data.image || ""), compare_at: data.compare_at == null ? null : numericProductValue(data.compare_at), tag: data.tag || null, tone: data.tone || null, vendor_id: vendorId, vendor_status: vendorStatus, vendor_rejection_reason: data.vendor_rejection_reason || null, public_vendor_visible: vendorStatus === "Approved", low_stock_limit: Math.max(0, Math.floor(Number(data.low_stock_limit) || 5)), updated_at: new Date().toISOString() }], headers: { Prefer: "resolution=merge-duplicates,return=representation" } });
   if (!rows[0]) throw new VendorDataError("Product could not be saved.");
   await saveVendorProductMetadata(sku, data);
   return rows[0];
@@ -480,9 +589,15 @@ export async function updateVendorProduct(vendorId: string, sku: string, data: R
   if (!existing[0] || !vendorRows[0]) throw new VendorDataError("Product not found for this vendor.", 404);
   const requestedStatus = String(data.vendor_status || existing[0].vendor_status || "Draft") as VendorProductStatus;
   const vendorStatus = admin ? requestedStatus : vendorRows[0].automatic_approval ? "Approved" : "Pending Approval";
+  let productCategory = String(data.category || "Uncategorised").trim() || "Uncategorised";
+  if (!admin && productCategory.toLowerCase() !== "uncategorised") {
+    const allowedCategory = (await getVendorCategoryRecords(vendorId)).find((category) => category.name.toLowerCase() === productCategory.toLowerCase());
+    if (!allowedCategory) throw new VendorDataError("Choose a category created for your vendor account.", 400);
+    productCategory = allowedCategory.name;
+  }
   const patch: Record<string, unknown> = {
     name: String(data.name || "").trim(),
-    category: String(data.category || "Uncategorised").trim(),
+    category: productCategory,
     stock: Math.max(0, Math.floor(Number(data.stock) || 0)),
     price: numericProductValue(data.price),
     cost: numericProductValue(data.cost),
@@ -589,15 +704,15 @@ export async function reviewVendorProduct(vendorId: string, sku: string, decisio
 }
 
 export async function getVendorDashboard(vendorId: string) {
-  const [vendorRows, products, orders, payouts, notifications, categoryRows, offerRows] = await Promise.all([
+  const [vendorRows, products, orders, payouts, notifications, offerRows] = await Promise.all([
     rest<VendorRecord[]>("vendors", `id=eq.${encodeURIComponent(vendorId)}&select=*`, { privileged: true }),
     getVendorProducts(vendorId),
     rest<Array<Record<string, unknown>>>("vendor_orders", `vendor_id=eq.${encodeURIComponent(vendorId)}&select=*&order=created_at.desc`, { privileged: true }),
     rest<Array<Record<string, unknown>>>("vendor_payouts", `vendor_id=eq.${encodeURIComponent(vendorId)}&select=*&order=created_at.desc`, { privileged: true }),
     rest<Array<Record<string, unknown>>>("vendor_notifications", `vendor_id=eq.${encodeURIComponent(vendorId)}&select=id,kind,title,body,read_at,created_at&order=created_at.desc&limit=20`, { privileged: true }),
-    rest<Array<{ name?: string }>>("categories", "select=name&order=sort_order.asc", { privileged: true }).catch(() => []),
     rest<Array<{ value?: string }>>("store_settings", "key=eq.promotional_offers&select=value", { privileged: true }).catch(() => []),
   ]);
+  const categories = (await getVendorCategoryRecords(vendorId, products)).map((category) => category.name);
   let offers: Array<Record<string, unknown>> = [];
   try {
     const parsed = JSON.parse(offerRows[0]?.value || "[]") as unknown;
@@ -610,7 +725,7 @@ export async function getVendorDashboard(vendorId: string) {
   const commission = orders.reduce((sum, order) => sum + amount(order.commission_amount), 0);
   const net = orders.reduce((sum, order) => sum + amount(order.vendor_net_amount), 0);
   const statuses = (status: string) => orders.filter((order) => order.status === status).length;
-  return { vendor: vendorRows[0], products, orders, payouts, notifications, categories: categoryRows.map((category) => String(category.name || "")).filter(Boolean), offers, stats: { grossSales: gross, commission, netEarnings: net, totalOrders: orders.length, newOrders: statuses("New"), processingOrders: statuses("Processing"), deliveredOrders: statuses("Delivered"), cancelledOrders: statuses("Cancelled"), returnedOrders: statuses("Returned"), totalProducts: products.length, activeProducts: products.filter((product) => product.vendor_status === "Approved").length, lowStockProducts: products.filter((product) => Number(product.stock) <= Number(product.low_stock_limit || 5)).length, outOfStockProducts: products.filter((product) => Number(product.stock) <= 0).length } };
+  return { vendor: vendorRows[0], products, orders, payouts, notifications, categories, offers, stats: { grossSales: gross, commission, netEarnings: net, totalOrders: orders.length, newOrders: statuses("New"), processingOrders: statuses("Processing"), deliveredOrders: statuses("Delivered"), cancelledOrders: statuses("Cancelled"), returnedOrders: statuses("Returned"), totalProducts: products.length, activeProducts: products.filter((product) => product.vendor_status === "Approved").length, lowStockProducts: products.filter((product) => Number(product.stock) <= Number(product.low_stock_limit || 5)).length, outOfStockProducts: products.filter((product) => Number(product.stock) <= 0).length } };
 }
 
 export async function updateVendorOrder(vendorId: string, orderId: string, status: VendorOrderStatus, courier?: { name?: string; awb?: string; url?: string }) {

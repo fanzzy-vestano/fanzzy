@@ -34,12 +34,15 @@ export default function PwaInstall({ basePath = "" }: { basePath?: string }) {
   const [installEvent, setInstallEvent] = useState<InstallPromptEvent | null>(null);
   const [visible, setVisible] = useState(false);
   const [showInstructions, setShowInstructions] = useState(false);
-  const [isIos, setIsIos] = useState(false);
+  const [isIos] = useState(() => typeof navigator !== "undefined" && /iphone|ipad|ipod/i.test(navigator.userAgent));
 
   useEffect(() => {
     if ("serviceWorker" in navigator) {
       const registerWorker = () => {
-        void navigator.serviceWorker.register(`${basePath}/sw.js`, { scope: `${basePath || ""}/` }).catch(() => undefined);
+        void navigator.serviceWorker.register(`${basePath}/sw.js`, {
+          scope: `${basePath || ""}/`,
+          updateViaCache: "none",
+        }).then((registration) => registration.update()).catch(() => undefined);
       };
       window.addEventListener("load", registerWorker, { once: true });
       if (document.readyState === "complete") registerWorker();
@@ -52,9 +55,6 @@ export default function PwaInstall({ basePath = "" }: { basePath?: string }) {
       return;
     }
     if (hasCompletedInstall()) return;
-
-    const iosDevice = /iphone|ipad|ipod/i.test(window.navigator.userAgent);
-    setIsIos(iosDevice);
 
     const handleInstallPrompt = (event: Event) => {
       event.preventDefault();

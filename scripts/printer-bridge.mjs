@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
+import { existsSync } from "node:fs";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -12,6 +13,7 @@ const printerWorkerScript = join(process.cwd(), "scripts", "printer-worker.ps1")
 const qrImagePath = join(process.cwd(), "public", "vestano-retail-qr-code.png");
 const thermalLogoImagePath = join(process.cwd(), "public", "fanzzy-mark-thermal.png");
 const qrMarker = "<<FANZZY_QR>>";
+const barcodePrintPreviews = new Map();
 let printerWorker = null;
 let printerWorkerReady = null;
 let printerWorkerName = "";
@@ -33,6 +35,125 @@ const defaultBillDesign = {
 
 const text = (value) => String(value ?? "").replace(/[\r\n]+/g, " ").trim();
 const money = (value) => text(value).replace(/^₹/, "Rs.");
+const escapeHtml = (value) => String(value ?? "")
+  .replace(/&/g, "&amp;")
+  .replace(/</g, "&lt;")
+  .replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;")
+  .replace(/'/g, "&#39;");
+
+// Code 128 bar/space widths for values 0-106. Barcode previews use Code 128B
+// so the browser prints a real, scanner-readable barcode without a font.
+const code128Patterns = [
+  "212222", "222122", "222221", "121223", "121322", "131222", "122213", "122312", "132212", "221213",
+  "221312", "231212", "112232", "122132", "122231", "113222", "123122", "123221", "223211", "221132",
+  "221231", "213212", "223112", "312131", "311222", "321122", "321221", "312212", "322112", "322211",
+  "212123", "212321", "232121", "111323", "131123", "131321", "112313", "132113", "132311", "211313",
+  "231113", "231311", "112133", "112331", "132131", "113123", "113321", "133121", "313121", "211331",
+  "231131", "213113", "213311", "213131", "311123", "311321", "331121", "312113", "312311", "332111",
+  "314111", "221411", "431111", "111224", "111422", "121124", "121421", "141122", "141221", "112214",
+  "112412", "122114", "122411", "142112", "142211", "241211", "221114", "413111", "241112", "134111",
+  "111242", "121142", "121241", "114212", "124112", "124211", "411212", "421112", "421211", "212141",
+  "214121", "412121", "111143", "111341", "131141", "114113", "114311", "411113", "411311", "113141",
+  "114131", "311141", "411131", "211412", "211214", "211232", "2331112",
+];
+
+const browserBarcodeSvg = (value) => {
+  const dataCodes = Array.from(value, (character) => character.charCodeAt(0) - 32);
+  const checksum = (104 + dataCodes.reduce((sum, code, index) => sum + code * (index + 1), 0)) % 103;
+  const codes = [104, ...dataCodes, checksum, 106];
+  const quietZone = 10;
+  let x = quietZone;
+  const bars = [];
+  for (const code of codes) {
+    const pattern = code128Patterns[code];
+    for (let index = 0; index < pattern.length; index += 1) {
+      const width = Number(pattern[index]);
+      if (index % 2 === 0) bars.push(`<rect x="${x}" y="0" width="${width}" height="34" />`);
+      x += width;
+    }
+  }
+  return `<svg class="barcode-bars" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${x + quietZone} 34" preserveAspectRatio="none" role="img" aria-label="Barcode ${escapeHtml(value)}"><g fill="#000">${bars.join("")}</g></svg>`;
+};
+
+const browserLabelPrice = (value) => {
+  const raw = text(value);
+  if (!raw) return "";
+  const amount = Number(raw.replace(/[^\d.-]/g, ""));
+  return Number.isFinite(amount) ? `FRP :${amount.toFixed(2)}` : "";
+};
+
+const browserLabelMarkup = (item) => {
+  const barcode = text(item.barcode);
+  const price = browserLabelPrice(item.price);
+  return `<section class="label">
+    <div class="label-copy">
+      <strong class="brand">fanZZy</strong>
+      <span class="product-name">${escapeHtml(text(item.productName) || "Fanzzy product")}</span>
+      ${price ? `<span class="price">${escapeHtml(price)}</span>` : ""}
+    </div>
+    <div class="barcode-block">
+      ${browserBarcodeSvg(barcode)}
+      <span class="barcode-number">${escapeHtml(barcode)}</span>
+    </div>
+  </section>`;
+};
+
+const browserPrintDocument = (items) => {
+  const labels = items.flatMap((item) => Array.from({ length: Math.min(100, Math.max(1, Math.floor(Number(item.copies) || 1))) }, () => browserLabelMarkup(item)));
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><title>Fanzzy barcode labels</title>
+<style>
+  @page { size: 82mm 12mm; margin: 0; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #fff; color: #000; }
+  body { font-family: Arial, Helvetica, sans-serif; }
+  .label { width: 82mm; height: 12mm; padding: 1mm 2.2mm; display: grid; grid-template-columns: minmax(0, 32mm) minmax(0, 1fr); align-items: center; column-gap: 2.2mm; overflow: hidden; break-after: page; page-break-after: always; }
+  .label:last-child { break-after: auto; page-break-after: auto; }
+  .label-copy { min-width: 0; display: flex; flex-direction: column; justify-content: center; line-height: 1.05; }
+  .brand { font-size: 8pt; letter-spacing: .2pt; }
+  .product-name { margin-top: .35mm; max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 6.5pt; }
+  .price { margin-top: .45mm; font-size: 6.5pt; font-weight: 700; }
+  .barcode-block { min-width: 0; display: flex; flex-direction: column; align-items: stretch; justify-content: center; }
+  .barcode-bars { display: block; width: 100%; height: 6.1mm; shape-rendering: crispEdges; }
+  .barcode-number { margin-top: .15mm; text-align: center; font-size: 6.5pt; letter-spacing: 1.2pt; line-height: 1; }
+  @media screen { body { visibility: hidden; } }
+  @media print { html, body { width: 82mm; background: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+</style></head><body>${labels.join("")}<script>
+  addEventListener("afterprint", () => close(), { once: true });
+  focus();
+  print();
+</script></body></html>`;
+};
+
+const openBrowserBarcodePrint = (items) => {
+  const previewId = randomUUID();
+  barcodePrintPreviews.set(previewId, { markup: browserPrintDocument(items), expiresAt: Date.now() + 5 * 60_000 });
+  for (const [id, preview] of barcodePrintPreviews) {
+    if (preview.expiresAt < Date.now()) barcodePrintPreviews.delete(id);
+  }
+  const previewUrl = `http://127.0.0.1:${port}/print-preview/${previewId}`;
+  const browserCandidates = [
+    join(process.env.ProgramFiles || "", "Google", "Chrome", "Application", "chrome.exe"),
+    join(process.env["ProgramFiles(x86)"] || "", "Google", "Chrome", "Application", "chrome.exe"),
+    join(process.env.LOCALAPPDATA || "", "Google", "Chrome", "Application", "chrome.exe"),
+    join(process.env["ProgramFiles(x86)"] || "", "Microsoft", "Edge", "Application", "msedge.exe"),
+    join(process.env.ProgramFiles || "", "Microsoft", "Edge", "Application", "msedge.exe"),
+  ];
+  const browserExecutable = browserCandidates.find((candidate) => candidate && existsSync(candidate));
+  const child = browserExecutable
+    ? spawn(browserExecutable, [`--app=${previewUrl}`, "--no-first-run"], {
+      windowsHide: true,
+      detached: true,
+      stdio: "ignore",
+    })
+    : spawn("explorer.exe", [previewUrl], {
+    windowsHide: true,
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+};
 const parseMoney = (value) => {
   let normalized = text(value).replace(/[^\d,.-]/g, "");
   if (!normalized) return Number.NaN;
@@ -238,6 +359,7 @@ const makeBarcodeLabel = ({ productName, barcode, price, copies }) => {
   for (let index = 0; index < count; index += 1) {
     chunks.push(
       Buffer.from([esc, 0x61, 0x01, esc, 0x45, 0x01]),
+      Buffer.from("fanZZy\n", "ascii"),
       Buffer.from(`${cleanName}\n`, "ascii"),
       ...(rate ? [Buffer.from(`${rate}\n`, "ascii")] : []),
       Buffer.from([esc, 0x45, 0x00, gs, 0x48, 0x02, gs, 0x66, 0x00, gs, 0x68, 0x60, gs, 0x77, 0x02]),
@@ -253,9 +375,8 @@ const makeBarcodeLabel = ({ productName, barcode, price, copies }) => {
   return Buffer.concat(chunks);
 };
 
-const makeTscBarcodeLabel = ({ productName, sku, barcode, price, copies }) => {
+const makeTscBarcodeLabel = ({ productName, barcode, price, copies }) => {
   const cleanName = text(productName).replace(/["\r\n]/g, " ").replace(/\s+/g, " ").trim().slice(0, 22) || "Fanzzy product";
-  const cleanSku = text(sku).replace(/["\r\n]/g, " ").replace(/\s+/g, " ").trim().slice(0, 22);
   const rate = labelFrp(price).slice(0, 18);
   const cleanBarcode = text(barcode).replace(/["\r\n]/g, "").trim().slice(0, 32);
   const digits = cleanBarcode.replace(/\D/g, "");
@@ -282,8 +403,8 @@ const makeTscBarcodeLabel = ({ productName, sku, barcode, price, copies }) => {
     "CODEPAGE 1252",
     `TEXT 411,43,"ROMAN.TTF",180,1,12,"${printedBarcode}"`,
     ...(rate ? [`TEXT 587,31,"ROMAN.TTF",180,1,8,"${rate}"`] : []),
-    `TEXT 619,91,"ROMAN.TTF",180,1,8,"${cleanName}"`,
-    ...(cleanSku ? [`TEXT 619,64,"ROMAN.TTF",180,1,8,"${cleanSku}"`] : []),
+    `TEXT 619,91,"ROMAN.TTF",180,1,9,"fanZZy"`,
+    `TEXT 619,64,"ROMAN.TTF",180,1,8,"${cleanName}"`,
     `PRINT 1,${count}`,
     "",
   ].join("\r\n"), "ascii");
@@ -475,6 +596,21 @@ const send = (response, status, payload) => {
 const server = createServer(async (request, response) => {
   if (request.method === "OPTIONS") return send(response, 204, {});
   if (request.method === "GET" && request.url === "/health") return send(response, 200, { ok: true, printerName: defaultPrinter });
+  if (request.method === "GET" && request.url?.startsWith("/print-preview/")) {
+    const previewId = request.url.slice("/print-preview/".length).split(/[?#]/, 1)[0];
+    const preview = barcodePrintPreviews.get(previewId);
+    if (!preview || preview.expiresAt < Date.now()) {
+      barcodePrintPreviews.delete(previewId);
+      response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
+      return response.end("This barcode print preview has expired.");
+    }
+    response.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store, no-cache, must-revalidate",
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:",
+    });
+    return response.end(preview.markup);
+  }
   if (request.method === "GET" && request.url === "/printers") {
     try {
       return send(response, 200, { printers: await listWindowsPrinters() });
@@ -495,8 +631,8 @@ const server = createServer(async (request, response) => {
     if (request.url === "/print-barcode") {
       if (!text(payload.productName) || !text(payload.barcode)) return send(response, 400, { error: "Product name and barcode are required." });
       if (!/^\d{5}$/.test(text(payload.barcode))) return send(response, 400, { error: "Barcode must be exactly five digits." });
-      const printerName = await printBarcodeLabel(payload.productName, payload.barcode, payload.price, payload.copies, payload.printerName);
-      return send(response, 200, { printed: true, printerName });
+      openBrowserBarcodePrint([payload]);
+      return send(response, 200, { printed: true, printerName: text(payload.printerName) || defaultPrinter, printDialog: true });
     }
     if (request.url === "/print-barcodes") {
       const items = Array.isArray(payload.items) ? payload.items.filter((item) => text(item?.productName) && text(item?.barcode)) : [];
@@ -504,8 +640,8 @@ const server = createServer(async (request, response) => {
       if (!items.length) return send(response, 400, { error: "Select at least one product with a barcode." });
       if (items.some((item) => !/^\d{5}$/.test(text(item.barcode)))) return send(response, 400, { error: "Every barcode must be exactly five digits." });
       if (items.length > 500 || printedLabels > 1000) return send(response, 400, { error: "A barcode batch can contain up to 500 products or 1000 labels." });
-      const printerName = await printBarcodeLabels(items, payload.printerName);
-      return send(response, 200, { printed: true, printerName, printedProducts: items.length, printedLabels });
+      openBrowserBarcodePrint(items);
+      return send(response, 200, { printed: true, printerName: text(payload.printerName) || defaultPrinter, printedProducts: items.length, printedLabels, printDialog: true });
     }
     if (!payload.order?.id) return send(response, 400, { error: "Order details are required." });
     const printerName = await printOrder(payload.order, payload.printerName, payload.design);

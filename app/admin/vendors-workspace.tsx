@@ -3,6 +3,7 @@
 import { Eye, EyeOff } from "lucide-react";
 import { useEffect, useState } from "react";
 import { uploadStoreImage } from "../../lib/supabase/catalog";
+import { adminApiFetch } from "../../lib/site-api-client";
 
 type Vendor = {
   id: string;
@@ -108,7 +109,7 @@ export default function AdminVendorsWorkspace({ onNotify }: { onNotify: (message
   const [logoPreview, setLogoPreview] = useState("");
   const [coverPreview, setCoverPreview] = useState("");
 
-  const load = () => fetch("/api/admin/vendors", { cache: "no-store" }).then(async (response) => {
+  const load = () => adminApiFetch("/admin/vendors", { cache: "no-store" }).then(async (response) => {
     const body = await response.json() as { vendors?: Vendor[]; error?: string };
     if (!response.ok) throw new Error(body.error || "Could not load vendors");
     setVendors(body.vendors || []);
@@ -117,7 +118,7 @@ export default function AdminVendorsWorkspace({ onNotify }: { onNotify: (message
   const loadCommissions = async () => {
     setCommissionLoading(true);
     try {
-      const response = await fetch("/api/admin/vendor-commissions", { cache: "no-store" });
+      const response = await adminApiFetch("/admin/vendor-commissions", { cache: "no-store" });
       const body = await response.json() as { rules?: CommissionRule[]; error?: string };
       if (!response.ok) throw new Error(body.error || "Could not load commission rules");
       setCommissionRules(body.rules || []);
@@ -131,7 +132,7 @@ export default function AdminVendorsWorkspace({ onNotify }: { onNotify: (message
   const loadPayouts = async () => {
     setPayoutLoading(true);
     try {
-      const response = await fetch("/api/admin/vendor-payouts", { cache: "no-store" });
+      const response = await adminApiFetch("/admin/vendor-payouts", { cache: "no-store" });
       const body = await response.json() as { payouts?: VendorPayout[]; error?: string };
       if (!response.ok) throw new Error(body.error || "Could not load payouts");
       setPayouts(body.payouts || []);
@@ -145,7 +146,7 @@ export default function AdminVendorsWorkspace({ onNotify }: { onNotify: (message
   const loadReport = async () => {
     setReportLoading(true);
     try {
-      const response = await fetch("/api/admin/vendor-reports", { cache: "no-store" });
+      const response = await adminApiFetch("/admin/vendor-reports", { cache: "no-store" });
       const body = await response.json() as VendorReport & { error?: string };
       if (!response.ok) throw new Error(body.error || "Could not load vendor report");
       setReport(body);
@@ -165,7 +166,7 @@ export default function AdminVendorsWorkspace({ onNotify }: { onNotify: (message
     setDetailLoading(true);
     try {
       const endpoint = nextTab === "Vendor Products" ? "products" : "orders";
-      const response = await fetch(`/api/admin/vendors/${encodeURIComponent(vendor.id)}/${endpoint}`, { cache: "no-store" });
+      const response = await adminApiFetch(`/admin/vendors/${encodeURIComponent(vendor.id)}/${endpoint}`, { cache: "no-store" });
       const body = await response.json() as { products?: VendorProduct[]; orders?: VendorOrder[]; error?: string };
       if (!response.ok) throw new Error(body.error || `Could not load vendor ${endpoint}`);
       if (nextTab === "Vendor Products") setVendorProducts(body.products || []);
@@ -230,7 +231,7 @@ export default function AdminVendorsWorkspace({ onNotify }: { onNotify: (message
         if (upload.error || !upload.url) return setError("Could not upload the vendor cover image. Please try again.");
         coverUrl = upload.url;
       }
-      const response = await fetch("/api/admin/vendors", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...form, logoUrl, coverUrl, commissionPercentage: Number(form.commissionPercentage) }) });
+      const response = await adminApiFetch("/admin/vendors", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ...form, logoUrl, coverUrl, commissionPercentage: Number(form.commissionPercentage) }) });
       const body = await response.json().catch(() => ({})) as { error?: string };
       if (!response.ok) return setError(body.error || `Could not create vendor (${response.status}).`);
       setForm(empty);
@@ -268,7 +269,7 @@ export default function AdminVendorsWorkspace({ onNotify }: { onNotify: (message
   };
 
   const update = async (id: string, body: Record<string, unknown>, message: string) => {
-    const response = await fetch(`/api/admin/vendors/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const response = await adminApiFetch(`/admin/vendors/${encodeURIComponent(id)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     const result = await response.json() as { error?: string };
     if (!response.ok) return setError(result.error || "Could not update vendor");
     onNotify(message);
@@ -279,7 +280,7 @@ export default function AdminVendorsWorkspace({ onNotify }: { onNotify: (message
     if (!window.confirm(`Delete ${vendor.business_name}? Products will remain in the catalog and order history will be preserved without this vendor link.`)) return;
     setError("");
     try {
-      const response = await fetch(`/api/admin/vendors/${encodeURIComponent(vendor.id)}`, { method: "DELETE" });
+      const response = await adminApiFetch(`/admin/vendors/${encodeURIComponent(vendor.id)}`, { method: "DELETE" });
       const body = await response.json() as { deleted?: { businessName?: string }; error?: string };
       if (!response.ok) return setError(body.error || "Could not delete vendor");
       if (selected?.id === vendor.id) setSelected(null);
@@ -295,7 +296,7 @@ export default function AdminVendorsWorkspace({ onNotify }: { onNotify: (message
     if (!selected) return;
     const reason = decision === "Rejected" ? (window.prompt("Reason for rejection") || "").trim() : undefined;
     if (decision === "Rejected" && !reason) return;
-    const response = await fetch(`/api/admin/vendors/${encodeURIComponent(selected.id)}/products/${encodeURIComponent(product.sku)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ decision, reason }) });
+    const response = await adminApiFetch(`/admin/vendors/${encodeURIComponent(selected.id)}/products/${encodeURIComponent(product.sku)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ decision, reason }) });
     const body = await response.json() as { error?: string };
     if (!response.ok) return setDetailError(body.error || "Could not review product");
     onNotify(`Product ${decision.toLowerCase()}`);
@@ -306,7 +307,7 @@ export default function AdminVendorsWorkspace({ onNotify }: { onNotify: (message
     event.preventDefault();
     setError("");
     try {
-      const response = await fetch("/api/admin/vendor-commissions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(commissionForm) });
+      const response = await adminApiFetch("/admin/vendor-commissions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(commissionForm) });
       const body = await response.json() as { rule?: CommissionRule; error?: string };
       if (!response.ok) throw new Error(body.error || "Could not save commission rule");
       setCommissionForm({ id: "", scopeType: "global", scopeId: "", mode: "percentage", rate: "0", fixedAmount: "0", active: true });
@@ -319,7 +320,7 @@ export default function AdminVendorsWorkspace({ onNotify }: { onNotify: (message
 
   const deleteCommission = async (id: string) => {
     if (!window.confirm("Delete this commission rule?")) return;
-    const response = await fetch(`/api/admin/vendor-commissions?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+    const response = await adminApiFetch(`/admin/vendor-commissions?id=${encodeURIComponent(id)}`, { method: "DELETE" });
     const body = await response.json() as { error?: string };
     if (!response.ok) return setError(body.error || "Could not delete commission rule");
     onNotify("Commission rule deleted");
@@ -337,7 +338,7 @@ export default function AdminVendorsWorkspace({ onNotify }: { onNotify: (message
   const saveSettings = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!settingsVendorId) return setError("Choose a vendor first.");
-    const response = await fetch(`/api/admin/vendors/${encodeURIComponent(settingsVendorId)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(settingsDraft) });
+    const response = await adminApiFetch(`/admin/vendors/${encodeURIComponent(settingsVendorId)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(settingsDraft) });
     const body = await response.json() as { vendor?: Vendor; error?: string };
     if (!response.ok) return setError(body.error || "Could not save vendor settings");
     setSelected(body.vendor || selected);
@@ -358,7 +359,7 @@ export default function AdminVendorsWorkspace({ onNotify }: { onNotify: (message
   const createPayout = async () => {
     if (!payoutVendorId) return setError("Choose a vendor for the payout.");
     if (!payoutOrderIds.length) return setError("Select at least one delivered order.");
-    const response = await fetch("/api/admin/vendor-payouts", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ vendorId: payoutVendorId, orderIds: payoutOrderIds, paymentMethod: payoutForm.paymentMethod, transactionReference: payoutForm.transactionReference, status: "Approved" }) });
+    const response = await adminApiFetch("/admin/vendor-payouts", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ vendorId: payoutVendorId, orderIds: payoutOrderIds, paymentMethod: payoutForm.paymentMethod, transactionReference: payoutForm.transactionReference, status: "Approved" }) });
     const body = await response.json() as { error?: string };
     if (!response.ok) return setError(body.error || "Could not create payout");
     setPayoutOrderIds([]);

@@ -4,7 +4,8 @@
 import { useEffect, useRef, useState } from "react";
 import "../globals.css";
 import "./vendor.css";
-import { removeCatalogCategory, renameCatalogCategory, saveCatalogCategory, uploadStoreImage } from "../../lib/supabase/catalog";
+import { uploadStoreImage } from "../../lib/supabase/catalog";
+import { clearVendorSessionToken, saveVendorSessionToken, siteApiFetch, vendorApiFetch } from "../../lib/site-api-client";
 
 type Vendor = {
   business_name?: string;
@@ -132,13 +133,15 @@ function VendorLogin({ error, onSuccess }: { error?: string; onSuccess: () => vo
     setLoading(true);
     setLoginError("");
     try {
-      const response = await fetch("/api/vendor-auth/login", {
+      const response = await siteApiFetch("/vendor-auth/login", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ email, password }),
       });
-      const body = await response.json() as { error?: string };
+      const body = await response.json() as { error?: string; sessionToken?: string };
       if (!response.ok) throw new Error(body.error || "Could not sign in");
+      if (!body.sessionToken) throw new Error("The vendor session could not be created.");
+      saveVendorSessionToken(body.sessionToken);
       onSuccess();
     } catch (caught) {
       setLoginError(caught instanceof Error ? caught.message : "Could not sign in");
@@ -172,7 +175,7 @@ export default function VendorDashboardPage() {
   const categoryInputRef = useRef<HTMLInputElement>(null);
   const [editingCategory, setEditingCategory] = useState("");
 
-  const load = () => fetch("/api/vendor/dashboard", { cache: "no-store" }).then(async (response) => {
+  const load = () => vendorApiFetch("/vendor/dashboard", { cache: "no-store" }).then(async (response) => {
     const body = await response.json() as Dashboard & { error?: string };
     if (!response.ok) throw new Error(body.error || "Vendor authentication required.");
     setError("");
@@ -346,7 +349,7 @@ export default function VendorDashboardPage() {
         variants: form.variants,
         variantType: form.variantType,
       };
-      const response = await fetch(editingSku ? `/api/vendor/products/${encodeURIComponent(editingSku)}` : "/api/vendor/products", { method: editingSku ? "PATCH" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+      const response = await vendorApiFetch(editingSku ? `/vendor/products/${encodeURIComponent(editingSku)}` : "/vendor/products", { method: editingSku ? "PATCH" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
       const body = await response.json() as { error?: string; product?: { vendor_status?: string } };
       const approvedAutomatically = body.product?.vendor_status === "Approved";
       const successMessage = approvedAutomatically
@@ -372,7 +375,7 @@ export default function VendorDashboardPage() {
     setImageUploading(true);
     setMessage("Preparing image…");
     try {
-      let image = await makeLocalImage(file);
+      const image = await makeLocalImage(file);
       setForm((current) => ({ ...current, image }));
       setImageFileName(file.name);
       setImageFile(file);
@@ -432,10 +435,13 @@ export default function VendorDashboardPage() {
         const upload = await uploadStoreImage(categoryFile, "categories");
         if (upload.url && !upload.error) image = upload.url;
       }
-      const remoteError = previousName
-        ? await renameCatalogCategory(previousName, categoryImage ? { name, image } : { name })
-        : await saveCatalogCategory({ name, pieces: 0, image });
-      if (remoteError) throw remoteError;
+      const response = await vendorApiFetch("/vendor/categories", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, previousName, image }),
+      });
+      const body = await response.json() as { error?: string; categories?: string[] };
+      if (!response.ok) throw new Error(body.error || "Could not save category.");
       setCategoryName("");
       setCategoryImage("");
       setCategoryFile(null);
@@ -467,8 +473,13 @@ export default function VendorDashboardPage() {
     setCategorySaving(true);
     setMessage("");
     try {
-      const remoteError = await removeCatalogCategory(category);
-      if (remoteError) throw remoteError;
+      const response = await vendorApiFetch("/vendor/categories", {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: category }),
+      });
+      const body = await response.json() as { error?: string; categories?: string[] };
+      if (!response.ok) throw new Error(body.error || "Could not delete category.");
       if (editingCategory.toLowerCase() === category.toLowerCase()) {
         setEditingCategory("");
         setCategoryName("");
@@ -506,13 +517,13 @@ export default function VendorDashboardPage() {
 
   const deleteProduct = async (sku: string, name: string) => {
     if (!window.confirm(`Delete ${name}? This cannot be undone.`)) return;
-    const response = await fetch(`/api/vendor/products/${encodeURIComponent(sku)}`, { method: "DELETE" });
+    const response = await vendorApiFetch(`/vendor/products/${encodeURIComponent(sku)}`, { method: "DELETE" });
     const body = await response.json() as { error?: string };
     setMessage(response.ok ? `${name} deleted.` : body.error || "Could not delete product.");
     if (response.ok) void load();
   };
 
-  const logout = async () => { await fetch("/api/vendor-auth/logout", { method: "POST" }).catch(() => undefined); window.location.assign("/vendor"); };
+  const logout = async () => { await vendorApiFetch("/vendor-auth/logout", { method: "POST" }).catch(() => undefined); clearVendorSessionToken(); window.location.assign("/vendor"); };
 
   if (error && !data) return <VendorLogin error={error} onSuccess={() => void load()} />;
   if (!data) return <main className="vendor-portal"><p>Loading vendor portal…</p></main>;
@@ -527,6 +538,9 @@ export default function VendorDashboardPage() {
   const availablePayout = payoutEligibleOrders.reduce((sum, order) => sum + (Number(order.vendor_net_amount) || 0), 0);
   const totalPayouts = data.payouts.reduce((sum, payout) => sum + (Number(payout.amount) || 0), 0);
   const paidPayouts = data.payouts.filter((payout) => String(payout.status) === "Paid").reduce((sum, payout) => sum + (Number(payout.amount) || 0), 0);
+  const displayedOrders = tab === "Returns"
+    ? data.orders.filter((order) => /return|refund/i.test(String(order.status || "")))
+    : data.orders;
 
   return <main className="vendor-portal"><aside className="vendor-sidebar"><a href="/" className="wordmark"><img src="/fanzzy-mark.png" alt="Fanzzy" className="brand-logo" /></a><p className="vendor-sidebar-name">{data.vendor?.business_name}</p>{navItems.map((item) => <button className={tab === item ? "active" : ""} key={item} onClick={() => { if (item === "Add Product" && editingSku) closeProductEditor(); setTab(item); }}>{item}</button>)}<button onClick={() => void logout()}>Logout ↪</button></aside><section className="vendor-portal-content"><header className="vendor-portal-header"><div><p className="eyebrow">VENDOR DASHBOARD</p><h1>{tab}</h1></div><span className="vendor-status">{data.vendor?.status}</span></header>
     {showProductEditor && <div className={editingSku ? "vendor-edit-modal-backdrop" : "vendor-edit-form-shell"} role={editingSku ? "dialog" : undefined} aria-modal={editingSku ? true : undefined} aria-label={editingSku ? `Edit ${form.name || "product"}` : undefined}>
@@ -567,7 +581,7 @@ export default function VendorDashboardPage() {
         </form>
       </div>
     </div>}
-    {(tab === "Categories" || tab === "Add Category") && <section className="vendor-data-card vendor-category-workspace"><div className="vendor-category-heading"><div><h2>{tab === "Add Category" ? editingCategory ? "Edit category" : "Add a category" : "Categories available for vendor products"}</h2><p>{tab === "Add Category" ? editingCategory ? `Update ${editingCategory} for your vendor products.` : "Create a category for your vendor products." : "Choose an existing category or add a new one for your products."}</p></div>{tab === "Categories" && <button className="button button-dark" type="button" onClick={openAddCategory}>+ Add category <span>↗</span></button>}</div>{tab === "Add Category" && <div className="vendor-category-list"><p className="eyebrow">ALL CATEGORIES</p>{categoryChips(data.categories || [])}{!data.categories?.length && <p className="muted">No categories have been configured by admin yet.</p>}</div>}{tab === "Add Category" ? <form className="vendor-category-form" onSubmit={saveCategory}><label>Category name<input value={categoryName} onChange={(event) => setCategoryName(event.target.value)} placeholder="Example: Pendant Sets" required /></label><label className="vendor-image-upload-field">Category image<input ref={categoryInputRef} type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => void chooseCategoryImage(event)} /><small>Optional · PNG, JPG or WebP</small></label>{categoryImage && <div className="vendor-image-preview"><img src={categoryImage} alt="Category preview" /><button type="button" onClick={() => { setCategoryImage(""); setCategoryFile(null); if (categoryInputRef.current) categoryInputRef.current.value = ""; }}>Remove image</button></div>}<div className="vendor-category-form-actions"><button className="button button-dark" type="submit" disabled={categorySaving}>{categorySaving ? "Saving…" : editingCategory ? "Update category" : "Save category"} <span>↗</span></button><button className="button vendor-category-cancel" type="button" onClick={closeCategoryEditor}>Cancel</button></div></form> : <>{categoryChips(data.categories || [])}{!data.categories?.length && <p className="muted">No categories have been configured by admin yet.</p>}</>}{message && <p className="vendor-message">{message}</p>}</section>}
+    {(tab === "Categories" || tab === "Add Category") && <section className="vendor-data-card vendor-category-workspace"><div className="vendor-category-heading"><div><h2>{tab === "Add Category" ? editingCategory ? "Edit category" : "Add a category" : "Your product categories"}</h2><p>{tab === "Add Category" ? editingCategory ? `Update ${editingCategory} for your vendor products.` : "Create a category for your vendor products." : "Only categories created for your vendor account appear here."}</p></div>{tab === "Categories" && <button className="button button-dark" type="button" onClick={openAddCategory}>+ Add category <span>↗</span></button>}</div>{tab === "Add Category" && <div className="vendor-category-list"><p className="eyebrow">YOUR CATEGORIES</p>{categoryChips(data.categories || [])}{!data.categories?.length && <p className="muted">No categories have been added for this vendor yet.</p>}</div>}{tab === "Add Category" ? <form className="vendor-category-form" onSubmit={saveCategory}><label>Category name<input value={categoryName} onChange={(event) => setCategoryName(event.target.value)} placeholder="Example: Pendant Sets" required /></label><label className="vendor-image-upload-field">Category image<input ref={categoryInputRef} type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => void chooseCategoryImage(event)} /><small>Optional · PNG, JPG or WebP</small></label>{categoryImage && <div className="vendor-image-preview"><img src={categoryImage} alt="Category preview" /><button type="button" onClick={() => { setCategoryImage(""); setCategoryFile(null); if (categoryInputRef.current) categoryInputRef.current.value = ""; }}>Remove image</button></div>}<div className="vendor-category-form-actions"><button className="button button-dark" type="submit" disabled={categorySaving}>{categorySaving ? "Saving…" : editingCategory ? "Update category" : "Save category"} <span>↗</span></button><button className="button vendor-category-cancel" type="button" onClick={closeCategoryEditor}>Cancel</button></div></form> : <>{categoryChips(data.categories || [])}{!data.categories?.length && <p className="muted">No categories have been added for this vendor yet.</p>}</>}{message && <p className="vendor-message">{message}</p>}</section>}
     {tab === "Offers" && <section className="vendor-data-card"><h2>Current store offers</h2>{(data.offers || []).map((offer, index) => <div className="vendor-data-row" key={String(offer.id || offer.code || index)}><span><strong>{String(offer.name || offer.title || offer.code || "Offer")}</strong><small>{String(offer.description || offer.detail || offer.status || "Configured by admin")}</small></span></div>)}{!data.offers?.length && <p className="muted">No active offers are available right now.</p>}</section>}
     {tab === "Profile" && <section className="vendor-data-card vendor-details-card vendor-profile-card"><div className="vendor-profile-heading"><div className="vendor-profile-avatar">{(data.vendor?.business_name || "V").slice(0, 1).toUpperCase()}</div><div><p className="eyebrow">ACCOUNT PROFILE</p><h2>{data.vendor?.business_name || "Vendor profile"}</h2><span className="vendor-profile-status">{data.vendor?.status || "Active"}</span></div></div><div className="vendor-profile-grid"><div><span>Owner</span><strong>{data.vendor?.owner_name || "—"}</strong></div><div><span>Login email</span><strong>{data.vendor?.login_email || "—"}</strong></div><div><span>Phone</span><strong>{data.vendor?.phone || "—"}</strong></div><div><span>WhatsApp</span><strong>{data.vendor?.whatsapp || "—"}</strong></div><div className="vendor-profile-field-wide"><span>Address</span><strong>{[data.vendor?.address, data.vendor?.city, data.vendor?.state, data.vendor?.pin_code].filter(Boolean).join(", ") || "—"}</strong></div><div><span>GST number</span><strong>{data.vendor?.gst_number || "—"}</strong></div><div><span>PAN number</span><strong>{data.vendor?.pan_number || "—"}</strong></div></div></section>}
     {tab !== "Add Product" && tab !== "Categories" && tab !== "Add Category" && tab !== "Offers" && tab !== "Profile" && <><div className="vendor-stat-grid">{statItems.map(([label, value]) => <article key={label}><small>{label}</small><strong>{isMoney(label) ? money(value) : String(value ?? 0)}</strong></article>)}</div><section className="vendor-data-card"><h2>{tab === "Products" || tab === "Inventory" ? "My products" : tab === "Orders" ? "Vendor orders" : tab === "Returns" ? "Returns and refunds" : tab === "Payouts" ? "Payout history" : "Recent activity"}</h2>{tab === "Payouts" && <><div className="vendor-payout-summary"><article><small>Available for payout</small><strong>{money(availablePayout)}</strong></article><article><small>Total payouts</small><strong>{money(totalPayouts)}</strong></article><article><small>Paid to date</small><strong>{money(paidPayouts)}</strong></article></div><p className="muted">Delivered orders become available here. Fanzzy admin reviews and creates the payout.</p>{payoutEligibleOrders.map((order) => <div className="vendor-data-row" key={`eligible-${String(order.id)}`}><span><strong>{String(order.sub_order_number)}</strong><small>Delivered · Awaiting payout</small></span><b>{money(order.vendor_net_amount)}</b></div>)}</>}{(tab === "Products" || tab === "Inventory") && data.products.map((product) => <div className="vendor-data-row" key={String(product.sku)}><span><strong>{String(product.name)}</strong><small>{String(product.sku)} · {String(product.vendor_status || "Draft")}</small></span><span className="vendor-row-actions"><b>{String(product.stock)} in stock</b><button className="vendor-edit-button" type="button" onClick={() => startEditingProduct(product)}>Edit</button><button className="vendor-delete-button" type="button" onClick={() => void deleteProduct(String(product.sku), String(product.name))}>Delete</button></span></div>)}{(tab === "Orders" || tab === "Returns") && displayedOrders.map((order) => <div className="vendor-data-row" key={String(order.id)}><span><strong>{String(order.sub_order_number)}</strong><small>{String(order.status)} · {String(order.payment_status)}</small></span><b>{money(order.vendor_net_amount)}</b></div>)}{tab === "Payouts" && data.payouts.map((payout) => <div className="vendor-data-row" key={String(payout.id)}><span><strong>{String(payout.payout_number)}</strong><small>{String(payout.status)}{payout.payment_method ? ` · ${String(payout.payment_method)}` : ""}</small></span><b>{money(payout.amount)}</b></div>)}{tab === "Notifications" && data.notifications.map((notification) => <div className="vendor-data-row" key={notification.id}><span><strong>{notification.title}</strong><small>{notification.body}</small></span></div>)}{(tab === "Returns" ? !displayedOrders.length : tab === "Payouts" ? !payoutEligibleOrders.length && !data.payouts.length : !data.products.length && !data.orders.length && !data.payouts.length) && <p className="muted">{tab === "Returns" ? "No return requests or refunds yet." : tab === "Payouts" ? "No payout records yet." : "No records yet."}</p>}</section></>}

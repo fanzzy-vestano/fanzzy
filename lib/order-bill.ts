@@ -178,16 +178,56 @@ const waitForReceiptImages = async (targetDocument: Document) => {
   );
 };
 
+const printFromHiddenFrame = (markup: string) => {
+  const frame = document.createElement("iframe");
+  frame.setAttribute("aria-hidden", "true");
+  frame.title = "Printable Fanzzy bill";
+  frame.tabIndex = -1;
+  frame.style.position = "fixed";
+  frame.style.right = "100%";
+  frame.style.bottom = "0";
+  frame.style.width = "80mm";
+  frame.style.height = "100mm";
+  frame.style.border = "0";
+  frame.style.opacity = "0";
+  frame.style.pointerEvents = "none";
+  document.body.appendChild(frame);
+
+  const frameWindow = frame.contentWindow;
+  if (!frameWindow) {
+    frame.remove();
+    return false;
+  }
+
+  const cleanup = () => frame.remove();
+  try {
+    frameWindow.document.open();
+    frameWindow.document.write(markup);
+    frameWindow.document.close();
+    frameWindow.addEventListener("afterprint", cleanup, { once: true });
+    frameWindow.focus();
+    // Keep print() in the original click call stack for browsers that block
+    // delayed print dialogs or popups (notably mobile browsers).
+    frameWindow.print();
+    window.setTimeout(cleanup, 60_000);
+    return true;
+  } catch {
+    cleanup();
+    return false;
+  }
+};
+
 export const printOrderBill = async (order: BillOrder) => {
   if (typeof window === "undefined") return false;
+  const markup = printableBillMarkup(order, billDesignSettings(), window.location.origin);
   // Open immediately while the click still has browser user activation. This
   // keeps printing available on mobile browsers that block delayed popups.
   const printWindow = window.open("", "_blank", "popup=yes,width=460,height=760");
-  if (!printWindow) return false;
+  if (!printWindow) return printFromHiddenFrame(markup);
 
   try {
     printWindow.document.open();
-    printWindow.document.write(printableBillMarkup(order, billDesignSettings(), window.location.origin));
+    printWindow.document.write(markup);
     printWindow.document.close();
     await waitForReceiptImages(printWindow.document);
     printWindow.focus();
@@ -196,6 +236,6 @@ export const printOrderBill = async (order: BillOrder) => {
     return true;
   } catch {
     printWindow.close();
-    return false;
+    return printFromHiddenFrame(markup);
   }
 };

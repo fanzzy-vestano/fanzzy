@@ -9,9 +9,12 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "build": "vinext build && node scripts/ensure-build-assets.mjs",
+    "build:pages": "node scripts/build-github-pages.mjs",
     "start": "vinext start",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "typecheck": "tsc --noEmit --incremental false",
+    "test:rendered": "node --test tests/rendered-html.test.mjs",
+    "test": "npm run typecheck && npm run build:pages && npm run test:rendered",
+    "lint": "eslint . --max-warnings 100",
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {

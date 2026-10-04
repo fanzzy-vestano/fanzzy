@@ -1,4 +1,11 @@
 name = "fanzzy-razorpay-api"
-main = "worker/razorpay-api.ts"
+main = "worker/site-api.ts"
 compatibility_date = "2026-08-17"
+compatibility_flags = ["nodejs_compat", "nodejs_compat_populate_process_env"]
 workers_dev = true
+
+[vars]
+NODE_ENV = "production"
+ADMIN_LOGIN_EMAIL = "fanzzy@vestanoretail.com"
+NEXT_PUBLIC_SUPABASE_URL = "https://pdrcrkxeyqxqgpwfxqpu.supabase.co"
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY = "sb_publishable_OTSfS6G2tlrAGINfyY3VGA_yi_3BPAV"

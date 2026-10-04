@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
+import Link from "next/link";
+import { siteApiFetch } from "../../lib/site-api-client";
 
 type TrackingScan = { status: string; date?: string; location?: string; instructions?: string };
 type TrackingResult = {
@@ -61,7 +63,7 @@ export default function TrackOrderPage() {
     if (!result) return;
     const refresh = async () => {
       try {
-        const response = await fetch("/api/orders/track", {
+        const response = await siteApiFetch("/orders/track", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ orderId: result.orderId, phone }),
@@ -83,7 +85,7 @@ export default function TrackOrderPage() {
     setMessage("");
     setResult(null);
     try {
-      const response = await fetch("/api/orders/track", {
+      const response = await siteApiFetch("/orders/track", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ orderId, phone }),
@@ -101,7 +103,7 @@ export default function TrackOrderPage() {
   return (
     <main className="tracking-page">
       <div className="tracking-topbar">
-        <a href="/" className="tracking-back">← Back to Fanzzy</a>
+        <Link href="/" className="tracking-back">← Back to Fanzzy</Link>
         <span className="tracking-mark">fanZZy</span>
       </div>
       <section className="tracking-card" aria-labelledby="tracking-title">

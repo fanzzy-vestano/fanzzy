@@ -156,12 +156,12 @@ const shipmentWaybill = (value: unknown): string => {
   return "";
 };
 
-const responseMessage = (value: unknown, fallback: string) => {
+const responseMessage = (value: unknown, fallback: string): string => {
   if (typeof value === "string" && value.trim()) return value.trim();
   if (value && typeof value === "object") {
     const record = value as Record<string, unknown>;
     for (const key of ["error", "message", "remarks", "status", "rmk"]) {
-      const message = responseMessage(record[key], "");
+      const message: string = responseMessage(record[key], "");
       if (message) return message;
     }
   }

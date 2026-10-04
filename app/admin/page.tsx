@@ -1,5 +1,5 @@
 ﻿"use client";
-/* eslint-disable @next/next/no-html-link-for-pages */
+/* eslint-disable react-hooks/set-state-in-effect, react-hooks/refs */
 
 import { Component, memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ErrorInfo } from "react";
 import { Eye, Pencil, Printer, Trash2 } from "lucide-react";
@@ -26,8 +26,9 @@ import {
   uploadStoreImage,
 } from "../../lib/supabase/catalog";
 import { defaultBillDesignSettings, printOrderBill, type BillDesignSettings } from "../../lib/order-bill";
-import { prepareProductBarcodePrinter, printProductBarcode, printProductBarcodes } from "../../lib/barcode-printer";
+import { printProductBarcode, printProductBarcodes } from "../../lib/barcode-printer";
 import { supabase } from "../../lib/supabase/client";
+import { adminApiFetch } from "../../lib/site-api-client";
 import {
   defaultPromotionForm,
   isPromotionLive,
@@ -232,7 +233,7 @@ const parseRefundRequests = (value: string | null | undefined): RefundRequest[] 
         customerName: typeof request.customerName === "string" ? request.customerName : "Customer",
         phone: typeof request.phone === "string" ? request.phone : "",
         amount: typeof request.amount === "string" ? request.amount : "₹0",
-        status: request.status === "Approved" || request.status === "Rejected" || request.status === "Refunded" ? request.status : "Requested",
+        status: (request.status === "Approved" || request.status === "Rejected" || request.status === "Refunded" ? request.status : "Requested") as RefundRequestStatus,
         reason: typeof request.reason === "string" ? request.reason : "Customer requested a refund",
         createdAt: typeof request.createdAt === "string" ? request.createdAt : new Date().toISOString(),
         updatedAt: typeof request.updatedAt === "string" ? request.updatedAt : undefined,
@@ -1077,7 +1078,7 @@ const ProductLibraryRow = memo(function ProductLibraryRow({
           className="barcode-print-action"
           onClick={() => onAction("print", product)}
           aria-label={`Print barcode for ${product.name}`}
-          title={printingBarcode ? "Printing barcode" : "Print barcode"}
+          title={printingBarcode ? "Opening print options" : "Print barcode"}
           disabled={barcodePrintDisabled}
         >
           <Printer size={15} strokeWidth={1.8} aria-hidden="true" />
@@ -1472,9 +1473,6 @@ function AdminDashboard() {
     const timer = window.setInterval(() => setLiveDate(new Date()), 60 * 1000);
     return () => window.clearInterval(timer);
   }, []);
-  useEffect(() => {
-    void prepareProductBarcodePrinter().catch(() => undefined);
-  }, []);
   const categories = useMemo(
     () => [
       "All categories",
@@ -1596,7 +1594,7 @@ function AdminDashboard() {
       return { id, waybill };
     });
     const refreshDashboardTracking = async () => {
-      await Promise.all(orderWaybills.map(({ id, waybill }) => fetch("/api/delhivery/track", {
+      await Promise.all(orderWaybills.map(({ id, waybill }) => adminApiFetch("/delhivery/track", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ orderId: id, waybill }),
@@ -2390,27 +2388,32 @@ function PurchaseEntryWorkspace({ onNotify }: { onNotify: (message: string) => v
     } catch {
       variantTypeBySku = {};
     }
-    const localCatalogProducts = typeof window !== "undefined" ? (() => {
+    type PurchaseSourceProduct = {
+      name: string;
+      sku: string;
+      category?: string;
+      stock?: number;
+      price?: number;
+      cost?: number;
+      createdAt?: string;
+      supplierName?: string;
+      variants?: Array<{ stock?: number }>;
+      sizeStock?: Record<string, number>;
+      variantType?: ProductVariantType;
+    };
+    const localCatalogProducts: PurchaseSourceProduct[] = typeof window !== "undefined" ? (() => {
       try {
-        const parsed = JSON.parse(window.localStorage.getItem("fanzzy-products") || "[]") as Array<{
-          name?: string;
-          sku?: string;
-          category?: string;
-          stock?: number;
-          price?: number;
-          cost?: number;
-          createdAt?: string;
-          supplierName?: string;
-          variants?: Array<{ stock?: number }>;
-          sizeStock?: Record<string, number>;
-          variantType?: ProductVariantType;
-        }>;
-        return Array.isArray(parsed) ? parsed.filter((product) => product.sku && product.name) : [];
+        const parsed = JSON.parse(window.localStorage.getItem("fanzzy-products") || "[]") as Array<Partial<PurchaseSourceProduct>>;
+        return Array.isArray(parsed)
+          ? parsed.filter((product): product is PurchaseSourceProduct => typeof product.sku === "string" && Boolean(product.sku) && typeof product.name === "string" && Boolean(product.name))
+          : [];
       } catch {
         return [];
       }
     })() : [];
-    const sourceProducts = !catalogRemote.error && catalogRemote.data !== null ? catalogRemote.data : localCatalogProducts;
+    const sourceProducts: PurchaseSourceProduct[] = !catalogRemote.error && catalogRemote.data !== null
+      ? catalogRemote.data.map((product) => ({ ...product }))
+      : localCatalogProducts;
     const storedInitialQuantities = initialQuantitiesRemote.value || (typeof window !== "undefined" ? window.localStorage.getItem(localProductInitialQuantitiesKey) : null);
     const initialQuantities = parseProductInitialQuantities(storedInitialQuantities);
     const localOrders = typeof window !== "undefined" ? (() => { try { return JSON.parse(window.localStorage.getItem("fanzzy-orders") || "[]") as OrderRecord[]; } catch { return []; } })() : [];
@@ -3444,7 +3447,7 @@ function ReportsWorkspace({
           sizeStockMap = {};
         }
       }
-      let next =
+      const next =
         !remote.error && remote.data !== null
           ? remote.data.filter((product) => !isDemoProduct(product)).map((product) => {
               const variants = variantsMap[product.sku]?.length ? variantsMap[product.sku] : product.variants || [];
@@ -3851,7 +3854,6 @@ function ReportsWorkspace({
 }
 
 type SettingsSection = "Store profile" | "Shipping rules" | "Payment methods" | "Printer" | "Bill design" | "Admin roles";
-type LocalPrinterOption = { name: string; status?: string; portName?: string; driverName?: string };
 
 function SettingsWorkspace({
   onNotify,
@@ -3871,37 +3873,8 @@ function SettingsWorkspace({
     returns: "7 days",
   });
   const [payments, setPayments] = useState<PaymentSettings>(defaultPaymentSettings);
-  const [printerName, setPrinterName] = useState("Essae PR-55");
-  const [availablePrinters, setAvailablePrinters] = useState<LocalPrinterOption[]>([]);
-  const [printerListStatus, setPrinterListStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
-  const [printerListMessage, setPrinterListMessage] = useState("");
   const [billDesign, setBillDesign] = useState<BillDesignSettings>(defaultBillDesignSettings);
   const [roles, setRoles] = useState<AdminRole[]>(defaultAdminRoles);
-
-  const loadLocalPrinters = async () => {
-    setPrinterListStatus("loading");
-    setPrinterListMessage("Checking printers connected to this computer…");
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 20000);
-    try {
-      const response = await fetch("http://127.0.0.1:3002/printers", { cache: "no-store", signal: controller.signal });
-      const payload = await response.json().catch(() => ({})) as { printers?: LocalPrinterOption[]; error?: string };
-      if (!response.ok) throw new Error(payload.error || "Could not load printers.");
-      const printers = Array.isArray(payload.printers)
-        ? payload.printers.filter((printer) => typeof printer?.name === "string" && printer.name.trim())
-        : [];
-      setAvailablePrinters(printers);
-      setPrinterListStatus("ready");
-      setPrinterListMessage(printers.length ? `${printers.length} Windows printer${printers.length === 1 ? "" : "s"} found.` : "No Windows printers were found.");
-    } catch (error) {
-      setPrinterListStatus("error");
-      setPrinterListMessage(error instanceof Error && error.name === "AbortError"
-        ? "Printer discovery timed out. Check that the Fanzzy printer bridge is running on this computer, then refresh."
-        : "The Fanzzy printer bridge is unavailable on this computer. Start it, then refresh.");
-    } finally {
-      window.clearTimeout(timeout);
-    }
-  };
 
   useEffect(() => {
     const read = <T,>(key: string, fallback: T): T => {
@@ -3916,16 +3889,7 @@ function SettingsWorkspace({
     setProfile(read("fanzzy-store-profile", profile));
     setShipping(read("fanzzy-shipping-rules", shipping));
     setPayments(parsePaymentSettings(read("fanzzy-payment-methods", defaultPaymentSettings)));
-    setPrinterName(window.localStorage.getItem("fanzzy-printer-name")?.replace("Essae PR 55", "Essae PR-55") || "Essae PR-55");
-    void loadLocalPrinters();
     setBillDesign(read("fanzzy-bill-design", defaultBillDesignSettings));
-    void fetchStoreSetting("printerName").then((remote) => {
-      if (!remote.error && remote.value) {
-        const normalizedPrinter = remote.value.replace("Essae PR 55", "Essae PR-55");
-        setPrinterName(normalizedPrinter);
-        window.localStorage.setItem("fanzzy-printer-name", normalizedPrinter);
-      }
-    });
     void fetchStoreSetting("billDesign").then((remote) => {
       if (!remote.error && remote.value) {
         try {
@@ -3960,9 +3924,6 @@ function SettingsWorkspace({
     window.localStorage.setItem("fanzzy-payment-methods", JSON.stringify(payments));
     void saveStoreSetting("paymentMethods", JSON.stringify(payments));
     window.dispatchEvent(new Event("fanzzy-payment-methods-updated"));
-    window.localStorage.setItem("fanzzy-printer-name", printerName);
-    void prepareProductBarcodePrinter(printerName).catch(() => undefined);
-    void saveStoreSetting("printerName", printerName);
     window.localStorage.setItem("fanzzy-bill-design", JSON.stringify(billDesign));
     void saveStoreSetting("billDesign", JSON.stringify(billDesign));
     window.localStorage.setItem("fanzzy-admin-roles", JSON.stringify(roles));
@@ -3974,7 +3935,7 @@ function SettingsWorkspace({
     if (section === "Store profile") return profile.storeName ? "Configured" : "Needs details";
     if (section === "Shipping rules") return `${Object.values(shipping).filter(Boolean).length} active`;
     if (section === "Payment methods") return `${payments.online || payments.cod ? `${payments.provider} · ${payments.cod ? `COD ₹${payments.codCharge}` : "online only"}` : "No methods active"}`;
-    if (section === "Printer") return printerName || "Needs selection";
+    if (section === "Printer") return "Select when printing";
     if (section === "Bill design") return billDesign.logoText ? `${billDesign.logoText} ready` : "Needs design";
     return "1 full access role";
   };
@@ -4033,14 +3994,11 @@ function SettingsWorkspace({
           </div>}
 
           {selectedSection === "Printer" && <div className="settings-form-grid">
-            <label className="settings-wide">Printer selection<select value={printerName} disabled={printerListStatus === "loading" && !availablePrinters.length} onChange={(event) => { setPrinterName(event.target.value); void prepareProductBarcodePrinter(event.target.value).catch(() => undefined); }}>
-              <option value="">Select a Windows printer</option>
-              {printerName && !availablePrinters.some((printer) => printer.name === printerName) && <option value={printerName}>{printerName} (saved — not currently available)</option>}
-              {availablePrinters.map((printer) => <option key={printer.name} value={printer.name}>{printer.name}{printer.portName ? ` · ${printer.portName}` : ""}</option>)}
-            </select></label>
-            <div className="settings-wide"><button className="module-secondary" type="button" disabled={printerListStatus === "loading"} onClick={() => void loadLocalPrinters()}>{printerListStatus === "loading" ? "Checking printers…" : "Refresh printer list"}</button></div>
-            <p className="settings-help settings-wide">{printerListMessage || "Choose a printer installed on this computer."} The saved printer is used for barcode labels. TSC TTP-244 Pro printers use their native TSPL label format.</p>
-            <p className="settings-help settings-wide">Bills still open the browser print window; choose its Destination there because browsers do not allow a website to silently select a system printer.</p>
+            <div className="settings-wide settings-browser-print">
+              <strong>Printer selection is shown when you print</strong>
+              <p className="settings-help">Bills and barcode labels open the browser print window. Choose the printer, copies, layout, page range, and any other options there, then select Print or Cancel.</p>
+            </div>
+            <p className="settings-help settings-wide">For barcode labels, select the label printer in Destination and use its configured 82 mm × 12 mm paper size. No local printer bridge is required.</p>
           </div>}
 
           {selectedSection === "Bill design" && <div className="settings-form-grid bill-design-settings">
@@ -5012,7 +4970,7 @@ function AgentsWorkspace({
       return Array.isArray(parsed)
         ? parsed
             .filter((agent) => agent?.id && agent?.name && agent?.couponCode)
-            .map((agent) => ({
+            .map((agent): CatalogAgent => ({
               id: String(agent.id),
               name: String(agent.name).trim(),
               phone: String(agent.phone || "").trim(),
@@ -5992,7 +5950,7 @@ function OrdersWorkspace({
   const [phone, setPhone] = useState("");
   const [lastOrdersSync, setLastOrdersSync] = useState<Date | null>(null);
   const [ordersSyncError, setOrdersSyncError] = useState("");
-  const [catalogProducts, setCatalogProducts] = useState<Array<{ id: string; name: string; sku: string; category: string; stock: number; price: number; status: string; image: string; variants: ProductVariant[] }>>([]);
+  const [catalogProducts, setCatalogProducts] = useState<Array<{ id: string; name: string; sku: string; category: string; stock: number; price: number; cost: number; status: string; image: string; variants: ProductVariant[] }>>([]);
   const [orderItemDraft, setOrderItemDraft] = useState({ productId: "", variantName: "", quantity: "1", price: "" });
 
   useEffect(() => {
@@ -6003,7 +5961,7 @@ function OrdersWorkspace({
       try {
       // Recover captured payments even when the customer's browser callback was interrupted.
       if (recoverCapturedPayments) {
-        await fetch("/api/razorpay/sync-payments", { method: "POST" }).catch(() => undefined);
+        await adminApiFetch("/razorpay/sync-payments", { method: "POST" }).catch(() => undefined);
       }
       const localOrders: OrderRecord[] = [];
       try {
@@ -6053,6 +6011,7 @@ function OrdersWorkspace({
           category: product.category,
           stock: product.stock,
           price: product.price,
+          cost: Number(product.cost) || 0,
           status: product.status,
           image: product.image || adminPlaceholderImage,
           variants: Array.isArray(variantsMap[product.sku]) ? variantsMap[product.sku].map((variant, index) => ({ ...variant, name: variant.name || `Option ${index + 1}` })) : [],
@@ -6070,7 +6029,7 @@ function OrdersWorkspace({
     // Render the current orders immediately. Payment recovery is useful, but
     // it should not block the order workspace from opening.
     void syncOrders(false);
-    void fetch("/api/razorpay/sync-payments", { method: "POST" })
+    void adminApiFetch("/razorpay/sync-payments", { method: "POST" })
       .then(() => syncOrders(false))
       .catch(() => undefined);
     // Realtime is the fast path; poll every two seconds as a reliable fallback
@@ -6099,7 +6058,7 @@ function OrdersWorkspace({
     const refreshTracking = async () => {
       const updates = await Promise.all(orderWaybills.map(async ({ id, waybill }) => {
         try {
-          const response = await fetch("/api/delhivery/track", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: id, waybill }), cache: "no-store" });
+          const response = await adminApiFetch("/delhivery/track", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: id, waybill }), cache: "no-store" });
           if (!response.ok) return null;
           const body = await response.json() as { tracking?: { status?: string; statusType?: string; statusDate?: string; location?: string; scans?: DelhiveryScan[] } };
           return body.tracking ? { id, tracking: body.tracking } : null;
@@ -6200,7 +6159,7 @@ function OrdersWorkspace({
     const itemName = (item.productName || item.name.split(" · ")[0]).trim().toLowerCase();
     return catalogProducts.find((product) => product.id === item.productId || product.sku === item.productId || product.name.trim().toLowerCase() === itemName);
   };
-  const getOrderedItemDisplayName = (item: NonNullable<OrderRecord["items"]>[number], product?: AdminProduct) => {
+  const getOrderedItemDisplayName = (item: NonNullable<OrderRecord["items"]>[number], product?: { name: string }) => {
     const productName = item.productName?.trim() || product?.name.trim() || item.name.split(" · ")[0].trim();
     const size = item.size || item.name.match(/(?:^| · )Size (.+)$/i)?.[1] || "";
     const variant = item.variantName || (item.name.includes(" · ") ? item.name.split(" · ").slice(1).filter((part) => !/^Size /i.test(part)).join(" · ") : "");
@@ -6231,7 +6190,7 @@ function OrdersWorkspace({
   const restoreOrderDetailsFromRazorpay = async () => {
     if (!selectedOrder?.razorpayPaymentId) return onNotify("No Razorpay payment is linked to this order");
     try {
-      const response = await fetch("/api/razorpay/restore-order-details", {
+      const response = await adminApiFetch("/razorpay/restore-order-details", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ razorpayPaymentId: selectedOrder.razorpayPaymentId }),
@@ -7227,7 +7186,7 @@ function CategoryWorkspace({
   onNotify: (message: string) => void;
 }) {
   const [categories, setCategories] = useState<AdminCategory[]>([]);
-  const [categoryProducts, setCategoryProducts] = useState<Array<{ category: string }> | null>(null);
+  const [categoryProducts, setCategoryProducts] = useState<Array<{ category: string; vendorId?: string }> | null>(null);
   const [isAdding, setIsAdding] = useState(false);
   const [addingSection, setAddingSection] = useState<CategorySection>("normal");
   const [name, setName] = useState("");
@@ -7247,7 +7206,21 @@ function CategoryWorkspace({
         fetchCatalogProducts(),
         fetchStoreSetting("categoryCatalog"),
       ]);
-      if (active && productsRemote.data) setCategoryProducts(productsRemote.data);
+      const allProducts = productsRemote.data || [];
+      const fanzzyProducts = allProducts.filter((product) => !product.vendorId);
+      const categoryKey = (name: string, section: CategorySection = "normal") => `${baseProductCategory(name).toLowerCase()}::${section}`;
+      const fanzzyCategoryKeys = new Set(fanzzyProducts.map((product) => categoryKey(
+        product.category,
+        isLuxuryProductCategory(product.category) ? "luxury" : "normal",
+      )));
+      const vendorOnlyCategoryKeys = new Set(
+        allProducts
+          .filter((product) => product.vendorId)
+          .map((product) => categoryKey(product.category, isLuxuryProductCategory(product.category) ? "luxury" : "normal"))
+          .filter((key) => !fanzzyCategoryKeys.has(key)),
+      );
+      const isVendorOnlyCategory = (category: { name: string; section?: CategorySection }) => vendorOnlyCategoryKeys.has(categoryKey(category.name, category.section || "normal"));
+      if (active) setCategoryProducts(fanzzyProducts);
       let localCategories: AdminCategory[] = [];
       let sharedCategories: AdminCategory[] = [];
       const stored = window.localStorage.getItem("fanzzy-categories");
@@ -7257,12 +7230,13 @@ function CategoryWorkspace({
           if (Array.isArray(parsed)) {
             localCategories = parsed
               .filter((category) => typeof category.name === "string" && category.name.trim())
-              .map((category) => ({
+              .map((category): AdminCategory => ({
                 name: category.name!.trim(),
                 pieces: Number(category.pieces) || 0,
                 section: category.section === "luxury" ? "luxury" : "normal",
                 image: category.image || "",
-              }));
+              }))
+              .filter((category) => !isVendorOnlyCategory(category));
           }
         } catch {
           window.localStorage.removeItem("fanzzy-categories");
@@ -7274,12 +7248,13 @@ function CategoryWorkspace({
           if (Array.isArray(parsed)) {
             sharedCategories = parsed
               .filter((category) => typeof category.name === "string" && category.name.trim())
-              .map((category) => ({
+              .map((category): AdminCategory => ({
                 name: category.name!.trim(),
                 pieces: Number(category.pieces) || 0,
                 section: category.section === "luxury" ? "luxury" : "normal",
                 image: category.image || "",
-              }));
+              }))
+              .filter((category) => !isVendorOnlyCategory(category));
           }
         } catch {
           // Ignore an invalid shared snapshot and use the catalog table/local cache.
@@ -7295,19 +7270,21 @@ function CategoryWorkspace({
           const previous = localCategoryByExactName.get(key);
           localCategoryByExactName.set(key, previous && previous.section !== category.section ? null : category);
         });
-        const mapped = remote.data.map((category) => ({
-          name: category.name,
-          pieces: category.pieces,
-          section: localCategoryByIdentity.get(categoryIdentity(category.name, category.section || "normal"))?.section || localCategoryByExactName.get(category.name.trim().toLowerCase())?.section || category.section || "normal",
-          image:
-            category.image ||
-            defaultCategoryImages[category.name] ||
-            "",
-        }));
+        const mapped = remote.data
+          .map((category) => ({
+            name: category.name,
+            pieces: category.pieces,
+            section: localCategoryByIdentity.get(categoryIdentity(category.name, category.section || "normal"))?.section || localCategoryByExactName.get(category.name.trim().toLowerCase())?.section || category.section || "normal",
+            image:
+              category.image ||
+              defaultCategoryImages[category.name] ||
+              "",
+          }))
+          .filter((category) => !isVendorOnlyCategory(category));
         const remoteIdentities = new Set(mapped.map((category) => categoryIdentity(category.name, category.section)));
         const nextCategories = mergeCategoriesFromProducts(
           inferLegacyCategorySections([...mapped, ...knownCategories.filter((category) => !remoteIdentities.has(categoryIdentity(category.name, category.section)))]),
-          productsRemote.data || [],
+          fanzzyProducts,
         );
         setCategories(nextCategories);
         persistCategories(nextCategories, false);
@@ -7316,7 +7293,7 @@ function CategoryWorkspace({
       if (active) {
         const nextCategories = mergeCategoriesFromProducts(
           inferLegacyCategorySections([...sharedCategories, ...localCategories, legacyNormalNecklacesLCategory, legacyLuxuryCategory]),
-          productsRemote.data || [],
+          fanzzyProducts,
         );
         if (nextCategories.length) setCategories(nextCategories);
       }
@@ -9072,7 +9049,7 @@ function ProductLibraryWorkspace({
     setPrintingBarcodeSku(product.sku);
     try {
       await printProductBarcode({ productName: product.name, sku: product.sku, barcode: product.barcode, price: product.price, copies: 1 });
-      onNotify(`${product.name} barcode sent to the printer`);
+      onNotify(`${product.name} barcode print options opened`);
     } catch (error) {
       onNotify(error instanceof Error ? error.message : "Could not print the barcode label");
     } finally {
@@ -9103,7 +9080,7 @@ function ProductLibraryWorkspace({
     setPrintingMultipleBarcodes(true);
     try {
       const result = await printProductBarcodes(jobs);
-      onNotify(`${result.printedLabels} barcode label${result.printedLabels === 1 ? "" : "s"} for ${result.printedProducts} product${result.printedProducts === 1 ? "" : "s"} sent to the printer`);
+      onNotify(`${result.printedLabels} barcode label${result.printedLabels === 1 ? "" : "s"} for ${result.printedProducts} product${result.printedProducts === 1 ? "" : "s"} opened in print preview`);
       setSelectedBarcodeCopies({});
     } catch (error) {
       onNotify(error instanceof Error ? error.message : "Could not print the selected barcode labels");
@@ -10158,7 +10135,7 @@ function ProductLibraryWorkspace({
           <button className="module-secondary" type="button" onClick={() => setSelectedBarcodeCopies({})} disabled={!selectedBarcodeProductCount || printingMultipleBarcodes}>Clear</button>
           <button className="module-primary" type="button" onClick={() => void printSelectedBarcodes()} disabled={!selectedBarcodeProductCount || printingMultipleBarcodes || printingBarcodeSku !== null}>
             <Printer size={14} strokeWidth={1.8} aria-hidden="true" />
-            {printingMultipleBarcodes ? "Printing…" : selectedBarcodeLabelCount ? `Print ${selectedBarcodeLabelCount} label${selectedBarcodeLabelCount === 1 ? "" : "s"}` : "Print labels"}
+            {printingMultipleBarcodes ? "Opening print options…" : selectedBarcodeLabelCount ? `Print ${selectedBarcodeLabelCount} label${selectedBarcodeLabelCount === 1 ? "" : "s"}` : "Print labels"}
           </button>
         </div>
       </div>}
@@ -10597,7 +10574,7 @@ function ProductLibraryWorkspace({
                 disabled={printingBarcodeSku !== null || printingMultipleBarcodes}
               >
                 <Printer size={15} strokeWidth={1.8} aria-hidden="true" />
-                {printingBarcodeSku === selectedProduct.sku ? "Printing…" : "Print barcode"}
+                {printingBarcodeSku === selectedProduct.sku ? "Opening print options…" : "Print barcode"}
               </button>
               <button
                 className="module-secondary"

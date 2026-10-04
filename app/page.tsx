@@ -1,5 +1,7 @@
 ﻿"use client";
 
+/* eslint-disable react-hooks/set-state-in-effect, react/no-unescaped-entities */
+
 import { memo, type FormEvent, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   fetchCatalogCategories,
@@ -25,6 +27,7 @@ import {
   saveCustomerAuthTokens,
   saveCustomerAuthUser,
 } from "../lib/customer-auth-client";
+import { customerApiFetch, siteApiFetch } from "../lib/site-api-client";
 import {
   allocateBundlePrices,
   isPromotionLive,
@@ -665,7 +668,7 @@ const ProductCard = memo(function ProductCard({ product, wished, promotions, car
         <div>
           <p className="eyebrow">{product.category}</p>
           <h3>{product.name}</h3>
-          {product.vendorId && product.vendorName && <a className="product-sold-by" href={product.vendorSlug ? `/vendors/${product.vendorSlug}` : "/vendors"}>{product.vendorName}’S PRODUCT</a>}
+          {product.vendorId && product.vendorName && <a className="product-sold-by" href={product.vendorSlug ? `/vendors/store/?slug=${encodeURIComponent(product.vendorSlug)}` : "/vendors"}>{product.vendorName}’S PRODUCT</a>}
         </div>
         {cartQuantity > 0 ? <div className="product-cart-control is-added"><button type="button" onClick={onDecrease} aria-label={`Decrease ${product.name} quantity`}>−</button><span>{cartQuantity}</span><button type="button" onClick={onIncrease} aria-label={`Increase ${product.name} quantity`}>+</button></div> : <button className="add-to-cart-button" type="button" onClick={onAdd} disabled={isOutOfStock} aria-label={isOutOfStock ? `${product.name} is sold out` : `Add ${product.name} to cart`}>Add to cart</button>}
       </div>
@@ -1258,7 +1261,7 @@ export default function Home() {
             customerName: typeof request.customerName === "string" ? request.customerName : "Customer",
             phone: typeof request.phone === "string" ? request.phone : "",
             amount: typeof request.amount === "string" ? request.amount : "₹0",
-            status: request.status === "Approved" || request.status === "Rejected" || request.status === "Refunded" ? request.status : "Requested",
+            status: (request.status === "Approved" || request.status === "Rejected" || request.status === "Refunded" ? request.status : "Requested") as RefundRequestStatus,
             reason: typeof request.reason === "string" ? request.reason : "Customer requested a refund",
             createdAt: typeof request.createdAt === "string" ? request.createdAt : new Date().toISOString(),
             updatedAt: typeof request.updatedAt === "string" ? request.updatedAt : undefined,
@@ -1333,7 +1336,7 @@ export default function Home() {
 
   useEffect(() => {
     let active = true;
-    fetch("/api/vendors", { cache: "no-store" }).then(async (response) => {
+    siteApiFetch("/vendors", { cache: "no-store" }).then(async (response) => {
       if (!response.ok) return;
       const body = await response.json() as { vendors?: StorefrontVendor[] };
       if (active) setVendors(body.vendors || []);
@@ -1388,7 +1391,7 @@ export default function Home() {
         // Recover captured payments on the initial load in the background so it
         // cannot delay the customer’s already available order list.
         if (recoverCapturedPayments) {
-          void fetch("/api/razorpay/sync-payments", { method: "POST" }).catch(() => undefined);
+          void siteApiFetch("/razorpay/sync-payments", { method: "POST" }).catch(() => undefined);
         }
 
         const remote = await fetchStoreOrders<CustomerOrder>();
@@ -1448,7 +1451,7 @@ export default function Home() {
     const refreshTracking = async () => {
       const updates = await Promise.all(orderWaybills.map(async ({ id, waybill }) => {
         try {
-          const response = await fetch("/api/delhivery/track", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: id, waybill }), cache: "no-store" });
+          const response = await siteApiFetch("/delhivery/track", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: id, waybill }), cache: "no-store" });
           if (!response.ok) return null;
           const body = await response.json() as { tracking?: { status?: string; statusType?: string; statusDate?: string; location?: string; scans?: DelhiveryScan[] } };
           return body.tracking ? { id, tracking: body.tracking } : null;
@@ -2801,7 +2804,7 @@ export default function Home() {
       };
       await persistPendingOrder(reservedPendingOrder);
       if (paymentMethod === "cod") {
-        const codResponse = await fetch("/api/orders/confirm-cod", {
+        const codResponse = await customerApiFetch("/orders/confirm-cod", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ fanzzyOrderId: orderId }),
@@ -3050,7 +3053,7 @@ export default function Home() {
       {heroSlides.length > 0 && <section className="hero hero-background" id="top"><div className="hero-slide-layer" key={heroSlides[heroSlideIndex]}><img {...storefrontImageProps(heroSlides[heroSlideIndex], "100vw")} fetchPriority="high" decoding="async" alt="Fanzzy collection highlight" /></div></section>}
 
       <section className="section-block" id="categories"><div className="category-showcase"><div className="category-intro"><h2>Find your <em>signature.</em></h2></div><div className="category-section-grids">{categoryGroups.map(({ section, categories: sectionCategories }) => sectionCategories.length ? <div className={`category-display-group ${section === "luxury" ? "luxury-category-group" : "normal-category-group"}`} key={section}><a className="category-group-heading" href={`${siteBasePath}/collections#${section}`} aria-label={`View all ${section === "luxury" ? "Luxury" : "Everyday Collection"} categories`}><div><h3>{section === "luxury" ? "Luxury Category" : "Everyday Collection"}</h3></div><span className="category-group-link">View <span>↗</span></span></a><div className="category-grid">{sectionCategories.map((category, index) => <button className={`category-card category-${index + 1}`} key={category.name} onClick={() => openCategoryProducts(category.name, section)}><img {...storefrontImageProps(category.image || categoryImageFallback(category.name, index), "(max-width: 640px) 46vw, 24vw")} loading={index < 4 ? "eager" : "lazy"} decoding="async" alt={category.name} /><span className="category-overlay" /><span className="category-info"><strong>{category.name}</strong><small>{getCategoryPieceCount(category)} pieces</small></span></button>)}</div></div> : null)}</div></div></section>
-      {vendors.length > 0 && <section className="section-block vendor-strip-section" aria-labelledby="vendor-strip-title"><div className="vendor-strip-heading"><div><p className="eyebrow">SHOP BY VENDOR</p><h2 id="vendor-strip-title">Meet the <em>makers.</em></h2></div><a className="text-link" href={`${siteBasePath}/vendors`}>View all vendors <span>↗</span></a></div><div className="vendor-strip" role="list">{vendors.map((vendor) => { const image = vendor.logoUrl || vendor.coverUrl; return <a className="vendor-strip-card" href={`${siteBasePath}/vendors/${vendor.slug}`} key={vendor.id} role="listitem"><span className="vendor-strip-logo">{image ? <img loading="lazy" decoding="async" src={image} alt="" /> : <strong>{vendor.businessName.trim().charAt(0).toUpperCase()}</strong>}</span><span className="vendor-strip-copy"><strong>{vendor.businessName}</strong><small>{vendor.featured ? "Featured vendor" : "Explore store"} <span>↗</span></small></span></a>; })}</div></section>}
+      {vendors.length > 0 && <section className="section-block vendor-strip-section" aria-labelledby="vendor-strip-title"><div className="vendor-strip-heading"><div><p className="eyebrow">SHOP BY VENDOR</p><h2 id="vendor-strip-title">Meet the <em>makers.</em></h2></div><a className="text-link" href={`${siteBasePath}/vendors`}>View all vendors <span>↗</span></a></div><div className="vendor-strip" role="list">{vendors.map((vendor) => { const image = vendor.logoUrl || vendor.coverUrl; return <a className="vendor-strip-card" href={`${siteBasePath}/vendors/store/?slug=${encodeURIComponent(vendor.slug)}`} key={vendor.id} role="listitem"><span className="vendor-strip-logo">{image ? <img loading="lazy" decoding="async" src={image} alt="" /> : <strong>{vendor.businessName.trim().charAt(0).toUpperCase()}</strong>}</span><span className="vendor-strip-copy"><strong>{vendor.businessName}</strong><small>{vendor.featured ? "Featured vendor" : "Explore store"} <span>↗</span></small></span></a>; })}</div></section>}
 
       <section className="manifesto"><p className="eyebrow">THE FANZZY STANDARD</p><h2>Jewellery with a point of view.<br /><em>Made for your everyday extraordinary.</em></h2><p className="manifesto-copy">Fanzzy is a study in contrast — soft and sculptural, familiar and unexpected. Every piece is made in small batches with considered materials and a little bit of magic.</p></section>
 

@@ -1,16 +1,19 @@
 "use client";
-/* eslint-disable @next/next/no-html-link-for-pages */
+/* eslint-disable @next/next/no-html-link-for-pages, react-hooks/set-state-in-effect */
 
 import { useEffect, useMemo, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 import "../../globals.css";
 import "../../vendor/vendor.css";
+import { siteApiFetch } from "../../../lib/site-api-client";
 
 type Product = { sku: string; name: string; category: string; price: number; stock: number; image?: string; hover_image?: string; vendor_status?: string };
 type Vendor = { businessName: string; logoUrl?: string; coverUrl?: string; description?: string };
 
 export default function VendorStorePage() {
   const params = useParams<{ slug: string }>();
+  const searchParams = useSearchParams();
+  const slug = params.slug || searchParams.get("slug") || "";
   const [vendor, setVendor] = useState<Vendor | null>(null);
   const [vendorLoading, setVendorLoading] = useState(true);
   const [vendorError, setVendorError] = useState("");
@@ -21,12 +24,16 @@ export default function VendorStorePage() {
   const [addedProducts, setAddedProducts] = useState<Record<string, boolean>>({});
   const [cartActionsVisible, setCartActionsVisible] = useState(false);
   useEffect(() => {
-    if (!params.slug) return;
+    if (!slug) {
+      setVendorLoading(false);
+      setVendorError("This vendor store link is incomplete.");
+      return;
+    }
     let active = true;
     setVendorLoading(true);
     setVendorError("");
 
-    fetch(`/api/vendors/${encodeURIComponent(params.slug)}`, { cache: "no-store" })
+    siteApiFetch(`/vendors/${encodeURIComponent(slug)}`, { cache: "no-store" })
       .then(async (response) => {
         const body = await response.json() as { vendor?: Vendor; products?: Product[]; error?: string };
         if (!response.ok) throw new Error(body.error || "Could not load vendor store.");
@@ -45,7 +52,7 @@ export default function VendorStorePage() {
       });
 
     return () => { active = false; };
-  }, [params.slug]);
+  }, [slug]);
   const addToCart = (product: Product) => {
     if (product.stock <= 0) return;
     try {

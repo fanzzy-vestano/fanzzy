@@ -2,10 +2,7 @@ name: Deploy Fanzzy Pages
 
 on:
   push:
-    branches: [master]
-    paths:
-      - "docs/**"
-      - ".github/workflows/deploy-pages.yml"
+    branches: ["**"]
   workflow_dispatch:
 
 permissions:
@@ -18,20 +15,47 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  verify:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out the published site
-        uses: actions/checkout@v4
+      - name: Check out the application
+        uses: actions/checkout@v5
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Verify types
+        run: pnpm typecheck
+      - name: Verify lint rules
+        run: pnpm lint
+      - name: Build the GitHub Pages export
+        run: pnpm build:pages
+      - name: Verify rendered pages
+        run: pnpm test:rendered
       - name: Configure GitHub Pages
+        if: github.ref == 'refs/heads/master'
         uses: actions/configure-pages@v5
-      - name: Upload the verified static site
+      - name: Upload the verified application
+        if: github.ref == 'refs/heads/master'
         uses: actions/upload-pages-artifact@v4
         with:
           path: docs
+
+  deploy:
+    if: github.ref == 'refs/heads/master'
+    needs: verify
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

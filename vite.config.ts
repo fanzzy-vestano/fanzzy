@@ -5,6 +5,7 @@ import { defineConfig } from "vite";
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 const defaultCustomerAuthApiUrl = "https://pdrcrkxeyqxqgpwfxqpu.supabase.co/functions/v1/customer-auth";
 const defaultRazorpayApiUrl = "https://fanzzy-razorpay-api.fanzzy.workers.dev";
+const defaultSiteApiUrl = "https://fanzzy-razorpay-api.fanzzy.workers.dev";
 
 const localBindingConfig = {
   main: "./worker/index.ts",
@@ -39,6 +40,11 @@ export default defineConfig(async ({ command }) => {
       ),
       "process.env.NEXT_PUBLIC_RAZORPAY_API_URL": JSON.stringify(
         usesExternalPaymentApi ? process.env.RAZORPAY_API_URL?.trim() || defaultRazorpayApiUrl : "",
+      ),
+      "process.env.NEXT_PUBLIC_SITE_API_URL": JSON.stringify(
+        process.env.GITHUB_PAGES === "true"
+          ? process.env.SITE_API_URL?.trim() || defaultSiteApiUrl
+          : "",
       ),
     },
     // The local preview can serve HTTP through a browser proxy that does not
