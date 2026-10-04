@@ -28,7 +28,7 @@ import {
 import { defaultBillDesignSettings, printOrderBill, type BillDesignSettings } from "../../lib/order-bill";
 import { printProductBarcode, printProductBarcodes } from "../../lib/barcode-printer";
 import { supabase } from "../../lib/supabase/client";
-import { adminApiFetch } from "../../lib/site-api-client";
+import { adminApiFetch, usesExternalSiteApi } from "../../lib/site-api-client";
 import {
   defaultPromotionForm,
   isPromotionLive,
@@ -1199,7 +1199,7 @@ const menu = [
 ];
 
 type AdminAuthResponse = { authenticated?: boolean; error?: string; message?: string; resetReady?: boolean };
-const staticPagesMode = process.env.NEXT_PUBLIC_STATIC_BUILD === "true";
+const staticPagesMode = usesExternalSiteApi;
 const adminRecoveryEmail = "fanzzy@vestanoretail.com";
 const readAdminAuthResponse = async (response: Response): Promise<AdminAuthResponse> => {
   const raw = await response.text();

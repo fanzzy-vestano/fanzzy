@@ -1,6 +1,7 @@
 import { supabase } from "./supabase/client";
 
 const externalSiteApiUrl = (process.env.NEXT_PUBLIC_SITE_API_URL ?? "").replace(/\/$/, "");
+export const usesExternalSiteApi = Boolean(externalSiteApiUrl);
 const vendorSessionKey = "fanzzy-vendor-session-token";
 const customerSessionKey = "fanzzy-customer-session-token";
 
