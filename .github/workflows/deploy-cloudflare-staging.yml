@@ -1,0 +1,39 @@
+name: Deploy Fanzzy staging to Cloudflare
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_ENV: staging
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      NEXT_PUBLIC_SITE_URL: https://fanzzy-staging.fanzzy.workers.dev
+      RAZORPAY_API_URL: https://fanzzy-staging.fanzzy.workers.dev/api/razorpay
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build for the staging environment
+        run: pnpm build
+      - name: Check rendered HTML
+        run: node --test tests/rendered-html.test.mjs
+      - name: Validate Worker bundle before deployment
+        run: pnpm exec wrangler deploy --dry-run --config dist/server/wrangler.json
+      - name: Deploy only the staging Worker
+        run: pnpm exec wrangler deploy --config dist/server/wrangler.json
