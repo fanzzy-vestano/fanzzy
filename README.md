@@ -57,4 +57,12 @@ https://pdrcrkxeyqxqgpwfxqpu.supabase.co/functions/v1/customer-auth
 
 Deploy `supabase/functions/customer-auth/index.ts` to the existing Supabase project and configure the function secrets `SANGAMAM_SMS_ACCESS_TOKEN`, `SANGAMAM_SMS_ACCESS_TOKEN_KEY`, and `CUSTOMER_AUTH_SECRET`. The function signs requests to Sangamam FastSMS and sends the approved `FANZZY` transactional DLT template. The optional `SANGAMAM_SMS_HEADER`, `SANGAMAM_SMS_ENTITY_ID`, and `SANGAMAM_SMS_TEMPLATE_ID` secrets override the account defaults in `.env.example`. Keep all provider credentials server-side; never put them in `NEXT_PUBLIC_*` variables or the GitHub Pages build.
 
+## Cloudflare Workers staging
+
+The full app (including `/api/*`) is deployed as a Cloudflare Worker, not as a GitHub Pages static export. `wrangler.jsonc` keeps the production Worker name separate from the `fanzzy-staging` Worker; the staging deploy does not configure a custom domain or change DNS. The existing GitHub Pages workflow still publishes only `docs/`.
+
+To run the GitHub Actions staging deploy, add `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as GitHub Actions repository secrets, then run **Deploy Fanzzy staging to Cloudflare** manually. The API token should be scoped to the Cloudflare account and Worker deployment only. After the staging Worker exists, add application runtime secrets in its Cloudflare dashboard settings using the names in `.env.example`; do not commit them or add them to `NEXT_PUBLIC_*` variables. Public build settings such as Supabase URL/publishable key and analytics IDs belong in GitHub Actions variables, not secrets embedded in source.
+
+The staging build directs Razorpay requests back to the staging app's `/api/razorpay` routes so tests cannot accidentally use the currently configured live Razorpay Worker. Do not perform payment, OTP, shipping-label, refund, payout, or inventory-changing tests until staging has isolated test credentials and a non-production database. Keep the GoDaddy records as they are until the staging route checks and a complete DNS/email-record inventory are approved.
+
 

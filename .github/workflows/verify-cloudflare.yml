@@ -1,0 +1,49 @@
+name: Verify Cloudflare build
+
+on:
+  push:
+    branches: [codex/cloudflare-migration]
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "app/**"
+      - "build/**"
+      - "lib/**"
+      - "worker/**"
+      - "scripts/ensure-build-assets.mjs"
+      - "vite.config.ts"
+      - "wrangler.jsonc"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/verify-cloudflare.yml"
+      - ".github/workflows/deploy-cloudflare-staging.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build Cloudflare Worker and assets
+        run: pnpm build
+        env:
+          CLOUDFLARE_ENV: staging
+          NEXT_PUBLIC_SITE_URL: https://fanzzy-staging.fanzzy.workers.dev
+          RAZORPAY_API_URL: https://fanzzy-staging.fanzzy.workers.dev/api/razorpay
+      - name: Validate generated Worker deployment bundle
+        run: pnpm exec wrangler deploy --dry-run --config dist/server/wrangler.json
