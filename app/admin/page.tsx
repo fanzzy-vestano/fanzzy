@@ -20,6 +20,7 @@ import {
   saveCatalogProduct,
   saveStoreOrders,
   saveStoreSetting,
+  subscribeToCatalogProducts,
   subscribeToStoreSetting,
   type CatalogAgent,
   type ProductVariantType,
@@ -1480,6 +1481,11 @@ function AdminDashboard() {
     ],
     [dashboardProducts],
   );
+  useEffect(() => {
+    if (categoryFilter !== "All categories" && !categories.includes(categoryFilter)) {
+      setCategoryFilter("All categories");
+    }
+  }, [categories, categoryFilter]);
   const shownProducts = useMemo(
     () =>
       dashboardProducts.filter((product) => {
@@ -1544,10 +1550,16 @@ function AdminDashboard() {
     };
     void syncDashboardProducts();
     const refreshDashboardProducts = () => { void syncDashboardProducts(); };
+    const unsubscribeFromCatalogProducts = subscribeToCatalogProducts(() => {
+      window.dispatchEvent(new Event("fanzzy-products-updated"));
+    });
+    window.addEventListener("focus", refreshDashboardProducts);
     window.addEventListener("storage", refreshDashboardProducts);
     window.addEventListener("fanzzy-products-updated", refreshDashboardProducts);
     return () => {
       active = false;
+      unsubscribeFromCatalogProducts();
+      window.removeEventListener("focus", refreshDashboardProducts);
       window.removeEventListener("storage", refreshDashboardProducts);
       window.removeEventListener("fanzzy-products-updated", refreshDashboardProducts);
     };
@@ -8815,6 +8827,15 @@ function ProductLibraryWorkspace({
     },
     [catalogCategories, products, resolveProductCategory],
   );
+  useEffect(() => {
+    if (productCategoryFilter === "all") return;
+    const matchingCategory = categoryOptions.find((category) => category.toLowerCase() === productCategoryFilter.toLowerCase());
+    if (!matchingCategory) {
+      setProductCategoryFilter("all");
+    } else if (matchingCategory !== productCategoryFilter) {
+      setProductCategoryFilter(matchingCategory);
+    }
+  }, [categoryOptions, productCategoryFilter]);
   const productSuppliers = useMemo(
     () => Array.from(new Set([
       ...suppliers.map((supplier) => supplier.name),

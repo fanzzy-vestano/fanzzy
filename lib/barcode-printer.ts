@@ -177,12 +177,6 @@ const openBarcodePrintDialog = (inputs: ProductBarcodePrintInput[]) => {
   }
 };
 
-// Kept for compatibility with older admin bundles. Browser printing does not
-// need a local printer bridge or a prepared printer connection.
-export async function prepareProductBarcodePrinter() {
-  return true;
-}
-
 export async function printProductBarcode(input: ProductBarcodePrintInput) {
   const barcode = validateBarcode(input.barcode);
   const job = { ...input, barcode, copies: normalizedCopies(input.copies) };

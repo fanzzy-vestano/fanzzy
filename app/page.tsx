@@ -9,10 +9,13 @@ import {
   fetchStoreOrders,
   fetchStoreSetting,
   fetchStoreSettings,
+  fetchVendorCategoryNames,
   inferLegacyCategorySections,
   saveStoreOrders,
   saveStoreSetting,
+  subscribeToCatalogProducts,
   subscribeToStoreSetting,
+  subscribeToVendorCategories,
   type CatalogAgent,
   type CatalogCategorySection,
   type ProductVariantType,
@@ -235,9 +238,20 @@ const productCatalogSection = (productCategory: string, categories: StorefrontCa
 };
 const mergeStorefrontCategoriesFromProducts = (
   categories: StorefrontCategory[],
-  products: Array<{ category: string }>,
+  products: Array<{ category: string; vendorId?: string }>,
+  vendorCategoryNames: string[],
 ) => {
-  const nextCategories = dedupeStorefrontCategories(categories);
+  const vendorCategoryNameKeys = new Set(
+    [
+      ...vendorCategoryNames,
+      ...products.filter((product) => product.vendorId).map((product) => product.category),
+    ]
+      .map((name) => baseProductCategory(String(name || "")).toLowerCase())
+      .filter(Boolean),
+  );
+  const nextCategories = dedupeStorefrontCategories(categories).filter(
+    (category) => !vendorCategoryNameKeys.has(baseProductCategory(category.name).toLowerCase()),
+  );
   const categoryByIdentity = new Map(
     nextCategories.map((category, index) => [categoryIdentityKey(category), index]),
   );
@@ -251,6 +265,10 @@ const mergeStorefrontCategoriesFromProducts = (
     const identity = categoryIdentityKey({ name, section });
     productCounts.set(identity, (productCounts.get(identity) || 0) + 1);
     if (categoryByIdentity.has(identity)) return;
+    // Vendor-defined categories belong to that vendor's storefront. Their
+    // products remain visible in All pieces, but the private category name
+    // must not become a filter in Fanzzy's main storefront catalog.
+    if (product.vendorId || vendorCategoryNameKeys.has(name.toLowerCase())) return;
     categoryByIdentity.set(identity, nextCategories.length);
     nextCategories.push({
       name,
@@ -686,8 +704,12 @@ export default function Home() {
   const [products, setProducts] = useState<Product[]>(defaultProducts);
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [categoryRecords, setCategories] = useState(defaultCategories);
+  const [vendorCategoryNames, setVendorCategoryNames] = useState<string[]>([]);
   // Product counts can update later without holding up category images.
-  const categories = useMemo(() => mergeStorefrontCategoriesFromProducts(categoryRecords, products), [categoryRecords, products]);
+  const categories = useMemo(
+    () => mergeStorefrontCategoriesFromProducts(categoryRecords, products, vendorCategoryNames),
+    [categoryRecords, products, vendorCategoryNames],
+  );
   const [vendors, setVendors] = useState<StorefrontVendor[]>([]);
   const [activeCategory, setActiveCategory] = useState("All pieces");
   const [activeCategorySection, setActiveCategorySection] = useState<CatalogCategorySection | "all">("all");
@@ -1134,13 +1156,18 @@ export default function Home() {
       if (!event.key || ["fanzzy-products", localProductVariantsKey, "fanzzy-product-variant-type", "fanzzy-product-sizes", "fanzzy-product-size-stock", "fanzzy-product-image-adjustments", "fanzzy-product-bill-names", "fanzzy-product-supplier-names"].includes(event.key)) runSyncProducts();
     };
     const onProductsUpdated = () => { runSyncProducts(); };
+    const unsubscribeFromCatalogProducts = subscribeToCatalogProducts(runSyncProducts);
+    const refreshProductsOnFocus = () => { runSyncProducts(); };
     const unsubscribeFromProductSettings = (['productVariants', 'productVariantType', 'productSizes', 'productSizeStock', 'productBillNames', 'productSupplierNames'] as const)
       .map((key) => subscribeToStoreSetting(key, () => { void syncProducts().catch(() => undefined); }));
+    window.addEventListener("focus", refreshProductsOnFocus);
     window.addEventListener("storage", onProductsStorage);
     window.addEventListener("fanzzy-products-updated", onProductsUpdated);
     return () => {
       active = false;
+      unsubscribeFromCatalogProducts();
       unsubscribeFromProductSettings.forEach((unsubscribe) => unsubscribe());
+      window.removeEventListener("focus", refreshProductsOnFocus);
       window.removeEventListener("storage", onProductsStorage);
       window.removeEventListener("fanzzy-products-updated", onProductsUpdated);
     };
@@ -1189,10 +1216,12 @@ export default function Home() {
         }
       }
       if (active && localCategories.length) setCategories(dedupeStorefrontCategories(localCategories));
-      const [remote, shared] = await Promise.all([
+      const [remote, shared, vendorCategories] = await Promise.all([
         fetchCatalogCategories(),
         fetchStoreSetting("categoryCatalog"),
+        fetchVendorCategoryNames(),
       ]);
+      if (active && !vendorCategories.error) setVendorCategoryNames(vendorCategories.data);
       let sharedCategories: StorefrontCategory[] = [];
       if (shared.value) {
         try {
@@ -1237,12 +1266,16 @@ export default function Home() {
     };
     const runSyncCategories = () => { void syncCategories().catch(() => undefined); };
     runSyncCategories();
+    const unsubscribeFromVendorCategories = subscribeToVendorCategories(runSyncCategories);
     window.addEventListener("storage", runSyncCategories);
     window.addEventListener("fanzzy-categories-updated", runSyncCategories);
+    window.addEventListener("focus", runSyncCategories);
     return () => {
       active = false;
+      unsubscribeFromVendorCategories();
       window.removeEventListener("storage", runSyncCategories);
       window.removeEventListener("fanzzy-categories-updated", runSyncCategories);
+      window.removeEventListener("focus", runSyncCategories);
     };
   }, []);
 
@@ -1513,6 +1546,19 @@ export default function Home() {
     normal: dedupeStorefrontCategories(storefrontCategories.filter((category) => category.section !== "luxury")),
     luxury: dedupeStorefrontCategories(storefrontCategories.filter((category) => category.section === "luxury")),
   }), [storefrontCategories]);
+  useEffect(() => {
+    if (activeCategory === "All pieces") return;
+    const matchingCategory = storefrontCategories.find((category) =>
+      categoryFilterKey(category.name) === categoryFilterKey(activeCategory)
+      && (activeCategorySection === "all" || category.section === activeCategorySection),
+    );
+    if (!matchingCategory) {
+      setActiveCategory("All pieces");
+      setActiveCategorySection("all");
+    } else if (activeCategory !== matchingCategory.name) {
+      setActiveCategory(matchingCategory.name);
+    }
+  }, [activeCategory, activeCategorySection, storefrontCategories]);
   const duplicateFilterCategoryKeys = useMemo(() => {
     const sectionsByCategory = new Map<string, Set<CatalogCategorySection>>();
     storefrontCategories.forEach((category) => {

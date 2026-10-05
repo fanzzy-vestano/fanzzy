@@ -305,6 +305,36 @@ export async function fetchStoreSetting(key: keyof typeof settingKeys) {
   return { value: typeof result.data?.value === "string" ? result.data.value : null, error: result.error };
 }
 
+export async function fetchVendorCategoryNames() {
+  if (!supabase) return { data: [] as string[], error: new Error("Supabase is not configured") };
+  const result = await supabase
+    .from("store_settings")
+    .select("value")
+    .like("key", "vendor_categories:%");
+  const seen = new Set<string>();
+  const data = (result.data || []).flatMap((row) => {
+    if (typeof row.value !== "string") return [];
+    try {
+      const parsed: unknown = JSON.parse(row.value);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.flatMap((category) => {
+        const name = typeof category === "string"
+          ? category.trim()
+          : category && typeof category === "object" && !Array.isArray(category)
+            ? String((category as Record<string, unknown>).name || "").trim()
+            : "";
+        const key = name.toLowerCase();
+        if (!name || seen.has(key)) return [];
+        seen.add(key);
+        return [name];
+      });
+    } catch {
+      return [];
+    }
+  });
+  return { data, error: result.error };
+}
+
 // Related product settings belong to one catalog read. Fetch them together
 // rather than making seven connections before a customer can see products.
 export async function fetchStoreSettings<const Keys extends readonly (keyof typeof settingKeys)[]>(keys: Keys) {
@@ -340,6 +370,45 @@ export async function saveStoreOrders(orders: unknown[]) {
 }
 
 let storeSettingSubscriptionSequence = 0;
+
+let catalogProductSubscriptionSequence = 0;
+
+let vendorCategorySubscriptionSequence = 0;
+
+export function subscribeToCatalogProducts(onChange: () => void) {
+  const client = supabase;
+  if (!client) return () => undefined;
+  catalogProductSubscriptionSequence += 1;
+  const channel = client
+    .channel(`fanzzy-products-live-${catalogProductSubscriptionSequence}`)
+    .on("postgres_changes", {
+      event: "*",
+      schema: "public",
+      table: "products",
+    }, onChange)
+    .subscribe();
+  return () => { void client.removeChannel(channel); };
+}
+
+export function subscribeToVendorCategories(onChange: () => void) {
+  const client = supabase;
+  if (!client) return () => undefined;
+  vendorCategorySubscriptionSequence += 1;
+  const channel = client
+    .channel(`fanzzy-vendor-categories-live-${vendorCategorySubscriptionSequence}`)
+    .on("postgres_changes", {
+      event: "*",
+      schema: "public",
+      table: "store_settings",
+    }, (payload) => {
+      const current = payload.new as Record<string, unknown>;
+      const previous = payload.old as Record<string, unknown>;
+      const key = String(current?.key || previous?.key || "");
+      if (key.startsWith("vendor_categories:")) onChange();
+    })
+    .subscribe();
+  return () => { void client.removeChannel(channel); };
+}
 
 export function subscribeToStoreSetting(key: keyof typeof settingKeys, onChange: () => void) {
   const client = supabase;

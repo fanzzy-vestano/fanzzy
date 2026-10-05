@@ -6,6 +6,7 @@ import { useParams, useSearchParams } from "next/navigation";
 import "../../globals.css";
 import "../../vendor/vendor.css";
 import { siteApiFetch } from "../../../lib/site-api-client";
+import { subscribeToCatalogProducts } from "../../../lib/supabase/catalog";
 
 type Product = { sku: string; name: string; category: string; price: number; stock: number; image?: string; hover_image?: string; vendor_status?: string };
 type Vendor = { businessName: string; logoUrl?: string; coverUrl?: string; description?: string };
@@ -33,25 +34,35 @@ export default function VendorStorePage() {
     setVendorLoading(true);
     setVendorError("");
 
-    siteApiFetch(`/vendors/${encodeURIComponent(slug)}`, { cache: "no-store" })
-      .then(async (response) => {
-        const body = await response.json() as { vendor?: Vendor; products?: Product[]; error?: string };
-        if (!response.ok) throw new Error(body.error || "Could not load vendor store.");
-        if (!active) return;
-        setVendor(body.vendor || null);
-        setProducts(body.products || []);
-      })
-      .catch((caught) => {
-        if (!active) return;
-        setVendor(null);
-        setProducts([]);
-        setVendorError(caught instanceof Error ? caught.message : "Could not load vendor store.");
-      })
-      .finally(() => {
-        if (active) setVendorLoading(false);
-      });
+    const loadStore = () => {
+      siteApiFetch(`/vendors/${encodeURIComponent(slug)}`, { cache: "no-store" })
+        .then(async (response) => {
+          const body = await response.json() as { vendor?: Vendor; products?: Product[]; error?: string };
+          if (!response.ok) throw new Error(body.error || "Could not load vendor store.");
+          if (!active) return;
+          setVendor(body.vendor || null);
+          setProducts(body.products || []);
+          setVendorError("");
+        })
+        .catch((caught) => {
+          if (!active) return;
+          setVendor(null);
+          setProducts([]);
+          setVendorError(caught instanceof Error ? caught.message : "Could not load vendor store.");
+        })
+        .finally(() => {
+          if (active) setVendorLoading(false);
+        });
+    };
 
-    return () => { active = false; };
+    loadStore();
+    const unsubscribeFromCatalogProducts = subscribeToCatalogProducts(loadStore);
+    window.addEventListener("focus", loadStore);
+    return () => {
+      active = false;
+      unsubscribeFromCatalogProducts();
+      window.removeEventListener("focus", loadStore);
+    };
   }, [slug]);
   const addToCart = (product: Product) => {
     if (product.stock <= 0) return;
@@ -70,6 +81,9 @@ export default function VendorStorePage() {
     }
   };
   const categories = useMemo(() => ["All categories", ...Array.from(new Set(products.map((product) => product.category))).sort()], [products]);
+  useEffect(() => {
+    if (!categories.includes(category)) setCategory("All categories");
+  }, [categories, category]);
   const visible = useMemo(() => products.filter((product) => (!query || `${product.name} ${product.category} ${product.sku}`.toLowerCase().includes(query.toLowerCase())) && (category === "All categories" || product.category === category)).sort((a, b) => sort === "price-low" ? a.price - b.price : sort === "price-high" ? b.price - a.price : a.name.localeCompare(b.name)), [category, products, query, sort]);
   if (vendorLoading) return <main className="vendor-public-page" aria-busy="true"><p className="muted" role="status">Loading vendor store…</p></main>;
   if (!vendor) return <main className="vendor-public-page"><p className="vendor-error">{vendorError || "This vendor store is hidden or unavailable."}</p><a href="/vendors">View all vendors</a></main>;
