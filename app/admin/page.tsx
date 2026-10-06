@@ -2578,7 +2578,6 @@ type SupplierBillSummary = {
   products: Array<{ name: string; sku: string; createdAt?: string }>;
   isUnassigned?: boolean;
 };
-const nonLuxuryMarginMigrationKey = "fanzzy-non-luxury-margin-50-applied";
 const getSupplierBillUnits = (product: {
   stock: number;
   variants?: Array<{ stock?: number }>;
@@ -8283,7 +8282,7 @@ function ProductLibraryWorkspace({
     hsnCode: "",
     billName: "",
     supplierName: "",
-    markup: "",
+    markup: "50",
     gstRate: "",
     costWithGst: "₹",
     sizes: "",
@@ -8486,7 +8485,6 @@ function ProductLibraryWorkspace({
         billNameRemote,
         supplierNameRemote,
         pricingRemote,
-        categoriesRemote,
         variantsRemote,
         variantTypeRemote,
         sizesRemote,
@@ -8500,7 +8498,6 @@ function ProductLibraryWorkspace({
         fetchStoreSetting("productBillNames"),
         fetchStoreSetting("productSupplierNames"),
         fetchStoreSetting("productPricing"),
-        fetchCatalogCategories(),
         fetchStoreSetting("productVariants"),
         fetchStoreSetting("productVariantType"),
         fetchStoreSetting("productSizes"),
@@ -8527,9 +8524,6 @@ function ProductLibraryWorkspace({
       let sizesMap: Record<string, string[]> = {};
       let sizeStockMap: Record<string, Record<string, number>> = {};
       let imageAdjustmentsMap: Record<string, ProductImageAdjustments> = {};
-      const marginCategories = !categoriesRemote.error && categoriesRemote.data?.length
-        ? categoriesRemote.data.map((category) => ({ name: category.name, section: category.section }))
-        : catalogCategories;
       if (barcodeRemote.value) {
         try {
           const parsed = JSON.parse(barcodeRemote.value) as Record<string, unknown>;
@@ -8578,7 +8572,6 @@ function ProductLibraryWorkspace({
           supplierNameMap = {};
         }
       }
-      const shouldApplyNonLuxuryMargin = window.localStorage.getItem(nonLuxuryMarginMigrationKey) !== "true";
       if (pricingRemote.value) {
         try {
           const parsed = JSON.parse(pricingRemote.value) as Record<string, { gstRate?: number; markup?: number }>;
@@ -8677,14 +8670,13 @@ function ProductLibraryWorkspace({
             : Object.fromEntries(variants.filter((variant) => variant.size && variant.stock !== undefined).map((variant) => [variant.size!, variant.stock!]));
           const supplierName = supplierNameMap[product.sku] || "";
           const gstRate = pricingMap[product.sku]?.gstRate || 0;
-          const appliesNonLuxuryMargin = shouldApplyNonLuxuryMargin && productCategorySection(product.category, marginCategories) !== "luxury";
-          const markup = appliesNonLuxuryMargin
-            ? thrissurMarginPercentage
-            : pricingMap[product.sku]?.markup || 0;
-          const pricing = calculatePricing(`₹${(product.cost ?? 0).toLocaleString("en-IN")}`, String(gstRate), String(markup), appliesNonLuxuryMargin);
+          const savedMarkup = pricingMap[product.sku]?.markup;
+          const markup = savedMarkup ?? Number(calculateMarkupFromSellingPrice(`₹${(product.cost ?? 0).toLocaleString("en-IN")}`, String(gstRate), String(product.price)));
+          const normalizedMarkup = Number.isFinite(markup) ? markup : 0;
+          const pricing = calculatePricing(`₹${(product.cost ?? 0).toLocaleString("en-IN")}`, String(gstRate), String(normalizedMarkup));
           return {
           name: product.name,
-          price: appliesNonLuxuryMargin && Number(product.cost ?? 0) > 0 ? pricing.price : normalizeWholeSellingPrice(product.price),
+          price: normalizeWholeSellingPrice(product.price),
            cost: `₹${(product.cost ?? 0).toLocaleString("en-IN")}`,
            compareAt: product.compareAt,
           sku: product.sku,
@@ -8699,7 +8691,7 @@ function ProductLibraryWorkspace({
           billName: billNameMap[product.sku] || "",
           supplierName,
           gstRate,
-          markup,
+          markup: normalizedMarkup,
           costWithGst: pricing.costWithGst,
            sizes,
            sizeStock,
@@ -8718,22 +8710,8 @@ function ProductLibraryWorkspace({
         // Supabase is the shared catalog. Never merge stale local records back
         // into it, otherwise a product deleted on one device can be resurrected
         // by an older localStorage snapshot on another device.
-        const sourceProducts = new Map(remote.data.map((product) => [product.sku, product]));
-        const nonLuxuryProductsNeedingSync = shouldApplyNonLuxuryMargin ? mapped.filter((product) => {
-          if (productCategorySection(product.category, marginCategories) === "luxury") return false;
-          const source = sourceProducts.get(product.sku);
-          return parseMoney(String(source?.price ?? 0)) !== parseMoney(product.price)
-            || pricingMap[product.sku]?.markup !== thrissurMarginPercentage;
-        }) : [];
-        if (nonLuxuryProductsNeedingSync.length) {
-          await Promise.all([
-            ...nonLuxuryProductsNeedingSync.map((product) => saveCatalogProduct(toCatalogProduct(product))),
-            saveProductPricing(mapped),
-          ]);
-        }
         setProducts(mapped);
         persistCatalog(mapped);
-        if (shouldApplyNonLuxuryMargin) window.localStorage.setItem(nonLuxuryMarginMigrationKey, "true");
         return;
       }
       const stored = window.localStorage.getItem("fanzzy-products");
@@ -8764,14 +8742,13 @@ function ProductLibraryWorkspace({
                 const localSizeStock = product.sizeStock || sizeStockMap[sku] || Object.fromEntries(localVariants.filter((variant) => variant.size && variant.stock !== undefined).map((variant) => [variant.size!, variant.stock!]));
                 const supplierName = product.supplierName || supplierNameMap[sku] || "";
                 const gstRate = product.gstRate ?? pricingMap[sku]?.gstRate ?? 0;
-                const appliesNonLuxuryMargin = shouldApplyNonLuxuryMargin && productCategorySection(product.category || "Uncategorised", marginCategories) !== "luxury";
-                const markup = appliesNonLuxuryMargin
-                  ? thrissurMarginPercentage
-                  : product.markup ?? pricingMap[sku]?.markup ?? 0;
-                const pricing = calculatePricing(String(rawCost ?? "₹0"), String(gstRate), String(markup), appliesNonLuxuryMargin);
+                const savedMarkup = product.markup ?? pricingMap[sku]?.markup;
+                const markup = savedMarkup ?? Number(calculateMarkupFromSellingPrice(String(rawCost ?? "₹0"), String(gstRate), String(rawPrice ?? "₹0")));
+                const normalizedMarkup = Number.isFinite(markup) ? markup : 0;
+                const pricing = calculatePricing(String(rawCost ?? "₹0"), String(gstRate), String(normalizedMarkup));
                 return {
                   name: product.name!.trim(),
-                  price: appliesNonLuxuryMargin && parseMoney(String(rawCost ?? "₹0")) > 0 ? pricing.price : normalizeWholeSellingPrice(rawPrice ?? "₹0"),
+                  price: normalizeWholeSellingPrice(rawPrice ?? "₹0"),
                   cost:
                     typeof rawCost === "number"
                       ? `₹${rawCost.toLocaleString("en-IN")}`
@@ -8791,7 +8768,7 @@ function ProductLibraryWorkspace({
                   billName: product.billName || billNameMap[sku] || "",
                   supplierName,
                   gstRate,
-                  markup,
+                  markup: normalizedMarkup,
                   costWithGst: pricing.costWithGst,
            sizes: localSizes,
            sizeStock: localSizeStock,
@@ -8804,7 +8781,6 @@ function ProductLibraryWorkspace({
           if (barcodeResult.changed) void saveProductBarcodes(mapped);
           setProducts(mapped);
           persistCatalog(mapped);
-          if (shouldApplyNonLuxuryMargin) window.localStorage.setItem(nonLuxuryMarginMigrationKey, "true");
         }
       } catch {
         window.localStorage.removeItem("fanzzy-products");
@@ -8906,9 +8882,6 @@ function ProductLibraryWorkspace({
           ? { sku: createSku(value, current.category, products) }
           : {}),
       };
-      if (field === "category" && productCategorySection(next.category, catalogCategories) !== "luxury") {
-        next.markup = String(thrissurMarginPercentage);
-      }
       if (field === "cost" || field === "gstRate" || field === "markup" || field === "category") {
         const roundSellingPrice = productCategorySection(next.category, catalogCategories) !== "luxury" && Number(next.markup) === thrissurMarginPercentage;
         const pricing = calculatePricing(next.cost, next.gstRate, next.markup, roundSellingPrice);
@@ -9385,9 +9358,6 @@ function ProductLibraryWorkspace({
   const updateEditField = (field: keyof typeof editValues, value: string) =>
     setEditValues((current) => {
       const next = { ...current, [field]: value };
-      if (field === "category" && productCategorySection(next.category, catalogCategories) !== "luxury") {
-        next.markup = String(thrissurMarginPercentage);
-      }
       if (field === "cost" || field === "gstRate" || field === "markup" || field === "category") {
         const roundSellingPrice = productCategorySection(next.category, catalogCategories) !== "luxury" && Number(next.markup) === thrissurMarginPercentage;
         const pricing = calculatePricing(next.cost, next.gstRate, next.markup, roundSellingPrice);
@@ -9407,7 +9377,8 @@ function ProductLibraryWorkspace({
     setIsAdding(false);
     setIsEditing(true);
     const supplierName = product.supplierName || "";
-    const markup = calculateMarkupFromSellingPrice(product.cost, String(product.gstRate || 0), product.price);
+    const savedMarkup = Number.isFinite(Number(product.markup)) ? Number(product.markup) : Number(calculateMarkupFromSellingPrice(product.cost, String(product.gstRate || 0), product.price));
+    const markup = Number.isFinite(savedMarkup) ? savedMarkup : 0;
     const pricing = calculatePricing(product.cost, String(product.gstRate || 0), String(markup));
     setEditValues({
       name: product.name,
