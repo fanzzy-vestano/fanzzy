@@ -11,7 +11,7 @@ Premium jewellery storefront and control room built with Next.js, TypeScript, Ta
 
 ## Printing
 
-Bills, receipts, and barcode labels use the browser's standard print dialog. Select any printer available on the current computer or device, adjust copies and paper settings, and confirm with **Print** in that dialog. Fanzzy does not send jobs directly to a named printer and does not require a local printer bridge.
+Bills, receipts, and barcode labels use the browser's standard print dialog. Select any printer available on the current computer or device, adjust copies and paper settings, and confirm with **Print** in that dialog. The jewellery-label stock is **79.5 mm × 12 mm**, matching the supplied PRN template. Fanzzy does not send jobs directly to a named printer and does not require a local printer bridge.
 
 ## Razorpay checkout
 

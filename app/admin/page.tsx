@@ -4010,7 +4010,7 @@ function SettingsWorkspace({
               <strong>Printer selection is shown when you print</strong>
               <p className="settings-help">Bills and barcode labels open the browser print window. Choose the printer, copies, layout, page range, and any other options there, then select Print or Cancel.</p>
             </div>
-            <p className="settings-help settings-wide">For barcode labels, select the label printer in Destination and use its configured 82 mm × 12 mm paper size. No local printer bridge is required.</p>
+            <p className="settings-help settings-wide">For barcode labels, select the label printer in Destination and use its configured 79.5 mm × 12 mm paper size. This matches the supplied PRN design; no local printer bridge is required.</p>
           </div>}
 
           {selectedSection === "Bill design" && <div className="settings-form-grid bill-design-settings">

@@ -6,9 +6,9 @@ export type ProductBarcodePrintInput = {
   copies?: number;
 };
 
-// Code 128 bar/space widths for values 0-106. Product barcodes use Code 128B
-// so the browser can render a real, scanner-readable SVG without a font or a
-// local printer helper.
+// Code 128 bar/space widths for values 0-106. The supplied PRN uses Code 128M,
+// which switches numeric runs to Code 128C. Reproduce that compact encoding in
+// the browser so the bars have the same width as the printer-native template.
 const code128Patterns = [
   "212222", "222122", "222221", "121223", "121322", "131222", "122213", "122312", "132212", "221213",
   "221312", "231212", "112232", "122132", "122231", "113222", "123122", "123221", "223211", "221132",
@@ -40,9 +40,11 @@ const validateBarcode = (barcode: unknown) => {
 };
 
 const barcodeSvg = (value: string) => {
-  const dataCodes = Array.from(value, (character) => character.charCodeAt(0) - 32);
-  const checksum = (104 + dataCodes.reduce((sum, code, index) => sum + code * (index + 1), 0)) % 103;
-  const codes = [104, ...dataCodes, checksum, 106];
+  const dataCodes = value.length % 2 === 0
+    ? [105, ...value.match(/\d{2}/g)!.map(Number)]
+    : [104, value.charCodeAt(0) - 32, 99, ...value.slice(1).match(/\d{2}/g)!.map(Number)];
+  const checksum = (dataCodes[0] + dataCodes.slice(1).reduce((sum, code, index) => sum + code * (index + 1), 0)) % 103;
+  const codes = [...dataCodes, checksum, 106];
   const quietZone = 10;
   let x = quietZone;
   const bars: string[] = [];
@@ -64,16 +66,17 @@ const printablePrice = (value: string | number | undefined) => {
   const rawValue = String(value ?? "").trim();
   if (!rawValue) return "";
   const amount = Number(rawValue.replace(/[^\d.-]/g, ""));
-  return Number.isFinite(amount) ? `FRP :${amount.toFixed(2)}` : "";
+  return Number.isFinite(amount) ? `FRP: ${amount.toFixed(2)}` : "";
 };
 
 const labelMarkup = (input: ProductBarcodePrintInput) => {
   const barcode = validateBarcode(input.barcode);
   const price = printablePrice(input.price);
+  const productName = (String(input.productName || "").replace(/\s+/g, " ").trim() || "Fanzzy product").slice(0, 22);
   return `<section class="label">
     <div class="label-copy">
       <strong class="brand">fanZZy</strong>
-      <span class="product-name">${escapeHtml(input.productName || "Fanzzy product")}</span>
+      <span class="product-name">${escapeHtml(productName)}</span>
       ${price ? `<span class="price">${escapeHtml(price)}</span>` : ""}
     </div>
     <div class="barcode-block">
@@ -88,36 +91,34 @@ const printDocumentMarkup = (inputs: ProductBarcodePrintInput[]) => {
   return `<!doctype html>
 <html><head><meta charset="utf-8"><title>Fanzzy barcode labels</title>
 <style>
-  @page { size: 82mm 12mm; margin: 0; }
+  @page { size: 79.5mm 12mm; margin: 0; }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; background: #fff; color: #000; }
   body { font-family: Arial, Helvetica, sans-serif; }
   .label {
-    width: 82mm;
+    width: 79.5mm;
     height: 12mm;
-    padding: 1mm 2.2mm;
-    display: grid;
-    grid-template-columns: minmax(0, 32mm) minmax(0, 1fr);
-    align-items: center;
-    column-gap: 2.2mm;
+    position: relative;
     overflow: hidden;
     break-after: page;
     page-break-after: always;
   }
   .label:last-child { break-after: auto; page-break-after: auto; }
-  .label-copy { min-width: 0; display: flex; flex-direction: column; justify-content: center; line-height: 1.05; }
-  .brand { font-size: 8pt; letter-spacing: .2pt; }
-  .product-name { margin-top: .35mm; max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 6.5pt; }
-  .price { margin-top: .45mm; font-size: 6.5pt; font-weight: 700; }
-  .barcode-block { min-width: 0; display: flex; flex-direction: column; align-items: stretch; justify-content: center; }
-  .barcode-bars { display: block; width: 100%; height: 6.1mm; shape-rendering: crispEdges; }
-  .barcode-number { margin-top: .15mm; text-align: center; font-family: Arial, Helvetica, sans-serif; font-size: 6.5pt; letter-spacing: 1.2pt; line-height: 1; }
+  /* Positions are the supplied 203-dpi PRN coordinates, rotated upright. */
+  .label-copy { line-height: 1; }
+  .brand, .product-name, .price, .barcode-block { position: absolute; }
+  .brand { left: 2.125mm; top: .625mm; font-size: 8pt; letter-spacing: .2pt; }
+  .product-name { left: 2.125mm; top: 4mm; width: 22mm; overflow: hidden; white-space: nowrap; font-size: 6pt; }
+  .price { left: 6.125mm; top: 8.125mm; white-space: nowrap; font-size: 6pt; font-weight: 700; }
+  .barcode-block { left: 24.25mm; top: 1.25mm; width: 24.25mm; display: flex; flex-direction: column; align-items: stretch; }
+  .barcode-bars { display: block; width: 100%; height: 4.625mm; shape-rendering: crispEdges; }
+  .barcode-number { margin-top: .75mm; text-align: center; font-family: Arial, Helvetica, sans-serif; font-size: 6pt; letter-spacing: 1pt; line-height: 1; }
   @media screen {
     body { padding: 14px; background: #d8d8d8; }
     .label { margin: 0 auto 14px; background: #fff; box-shadow: 0 2px 10px rgba(0,0,0,.2); }
   }
   @media print {
-    html, body { width: 82mm; background: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    html, body { width: 79.5mm; background: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   }
 </style></head><body>${labels.join("")}</body></html>`;
 };
@@ -128,7 +129,7 @@ const printFromHiddenFrame = (markup: string) => {
   frame.style.position = "fixed";
   frame.style.right = "100%";
   frame.style.bottom = "0";
-  frame.style.width = "82mm";
+  frame.style.width = "79.5mm";
   frame.style.height = "12mm";
   frame.style.border = "0";
   frame.style.opacity = "0";
