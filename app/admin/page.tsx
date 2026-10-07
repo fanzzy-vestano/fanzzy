@@ -10,6 +10,7 @@ import {
   fetchCatalogProducts,
   fetchStoreOrders,
   fetchStoreSetting,
+  fetchStoreSettings,
   decrementCatalogStock,
   inferLegacyCategorySections,
   isSupabaseReady,
@@ -7747,6 +7748,18 @@ type PosCatalogSource = Omit<Partial<AdminProduct>, "price" | "cost" | "status">
   cost?: string | number;
   status?: string;
 };
+type PosCartSelection = {
+  key: string;
+  sku: string;
+  productName: string;
+  category: string;
+  barcode?: string;
+  image: string;
+  price: string;
+  stock: number;
+  variantName?: string;
+  size?: string;
+};
 
 function PosWorkspace({
   onNotify,
@@ -7759,8 +7772,9 @@ function PosWorkspace({
   const [loading, setLoading] = useState(true);
   const [inputValue, setInputValue] = useState("");
   const [productSearch, setProductSearch] = useState("");
-  const [cart, setCart] = useState<Record<string, number>>({});
+  const [cart, setCart] = useState<Record<string, { selection: PosCartSelection; quantity: number }>>({});
   const [lastProduct, setLastProduct] = useState<AdminProduct | null>(null);
+  const [variantPickerProduct, setVariantPickerProduct] = useState<AdminProduct | null>(null);
   const [error, setError] = useState("");
   const [customerName, setCustomerName] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
@@ -7779,9 +7793,10 @@ function PosWorkspace({
   useEffect(() => {
     let active = true;
     const loadProducts = async () => {
-      const [remote, barcodeRemote] = await Promise.all([
+      const [remote, barcodeRemote, productSettings] = await Promise.all([
         fetchCatalogProducts(),
         fetchStoreSetting("productBarcodes"),
+        fetchStoreSettings(["productVariants", "productVariantType", "productSizes", "productSizeStock"] as const),
       ]);
       if (!active) return;
       let barcodeMap: Record<string, string> = {};
@@ -7793,6 +7808,18 @@ function PosWorkspace({
       } catch {
         barcodeMap = {};
       }
+      const readSettingMap = <T,>(value: string | null | undefined, fallback: T) => {
+        try {
+          const parsed = JSON.parse(value || "");
+          return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as T : fallback;
+        } catch {
+          return fallback;
+        }
+      };
+      const variantMap = readSettingMap<Record<string, ProductVariant[]>>(productSettings.productVariants.value, {});
+      const variantTypeMap = readSettingMap<Record<string, ProductVariantType>>(productSettings.productVariantType.value, {});
+      const sizesMap = readSettingMap<Record<string, string[]>>(productSettings.productSizes.value, {});
+      const sizeStockMap = readSettingMap<Record<string, Record<string, number>>>(productSettings.productSizeStock.value, {});
       let localCatalog: PosCatalogSource[] = [];
       try {
         const stored = JSON.parse(window.localStorage.getItem("fanzzy-products") || "[]");
@@ -7821,10 +7848,10 @@ function PosWorkspace({
           hoverImage: String(product.hoverImage || product.image || adminPlaceholderImage),
           compareAt: Number(product.compareAt) || undefined,
           barcode,
-          variants: product.variants,
-          sizes: product.sizes,
-          sizeStock: product.sizeStock,
-          variantType: product.variantType,
+          variants: Array.isArray(product.variants) && product.variants.length ? product.variants : variantMap[sku] || [],
+          sizes: Array.isArray(product.sizes) && product.sizes.length ? product.sizes : sizesMap[sku] || [],
+          sizeStock: product.sizeStock || sizeStockMap[sku] || {},
+          variantType: product.variantType || variantTypeMap[sku],
         };
       }).filter((product) => product.sku);
       const barcodeResult = ensureProductBarcodes(mappedProducts);
@@ -7843,28 +7870,103 @@ function PosWorkspace({
     };
   }, []);
 
-  const addProduct = (product: AdminProduct) => {
+  const posSelectionKey = (product: AdminProduct, variantName?: string, size?: string) =>
+    [product.sku, variantName ? `variant:${variantName}` : "", size ? `size:${size}` : ""].filter(Boolean).join("::");
+  const baseSelection = (product: AdminProduct): PosCartSelection => ({
+    key: posSelectionKey(product),
+    sku: product.sku,
+    productName: product.name,
+    category: product.category,
+    barcode: product.barcode,
+    image: product.image,
+    price: product.price,
+    stock: product.stock,
+  });
+  const variantOptions = (product: AdminProduct): PosCartSelection[] => {
+    const variants = product.variants || [];
+    if (product.variantType === "size") {
+      const sizes = product.sizes?.length
+        ? product.sizes
+        : variants.map((variant) => variant.size || variant.name).filter(Boolean) as string[];
+      return Array.from(new Set(sizes)).map((size) => {
+        const variant = variants.find((item) => (item.size || item.name) === size);
+        const stock = Number(product.sizeStock?.[size] ?? variant?.stock ?? 0);
+        return {
+          key: posSelectionKey(product, undefined, size),
+          sku: product.sku,
+          productName: product.name,
+          category: product.category,
+          barcode: product.barcode,
+          image: variant?.image || product.image,
+          price: variant?.price ? formatAdminCurrency(Number(variant.price)) : product.price,
+          stock: Math.max(0, Math.floor(Number(stock) || 0)),
+          size,
+        };
+      });
+    }
+    return variants.map((variant, index) => {
+      const variantName = variant.name || `Option ${index + 1}`;
+      const stock = variant.stock === undefined ? product.stock : Number(variant.stock);
+      return {
+        key: posSelectionKey(product, variantName),
+        sku: product.sku,
+        productName: product.name,
+        category: product.category,
+        barcode: product.barcode,
+        image: variant.image || product.image,
+        price: variant.price ? formatAdminCurrency(Number(variant.price)) : product.price,
+        stock: Math.max(0, Math.floor(Number(stock) || 0)),
+        variantName,
+      };
+    });
+  };
+  const productAvailableStock = (product: AdminProduct) => {
+    const options = variantOptions(product);
+    return options.length ? options.reduce((sum, option) => sum + option.stock, 0) : product.stock;
+  };
+  const addSelection = (selection: PosCartSelection, product: AdminProduct) => {
     if (upiPaymentActive) {
       setError("Switch away from UPI before changing this sale, or complete the confirmed payment.");
       return;
     }
-    const currentQuantity = cart[product.sku] || 0;
-    if (product.status === "Draft" || product.stock <= 0) {
+    const currentQuantity = cart[selection.key]?.quantity || 0;
+    if (product.status === "Draft" || selection.stock <= 0) {
       setError(`${product.name} is out of stock and cannot be added.`);
       return;
     }
-    if (currentQuantity >= product.stock) {
-      setError(`Only ${product.stock} ${product.name} available.`);
+    if (currentQuantity >= selection.stock) {
+      setError(`Only ${selection.stock} ${selection.variantName || selection.size || product.name} available.`);
       return;
     }
-    setCart((current) => ({ ...current, [product.sku]: (current[product.sku] || 0) + 1 }));
+    setCart((current) => ({
+      ...current,
+      [selection.key]: { selection, quantity: (current[selection.key]?.quantity || 0) + 1 },
+    }));
     setLastProduct(product);
+    setVariantPickerProduct(null);
     setLastSale(null);
     setError("");
     setInputValue("");
     lastAutoLookupRef.current = "";
-    onNotify(`${product.name} added to POS cart`);
+    onNotify(`${product.name}${selection.variantName ? ` · ${selection.variantName}` : selection.size ? ` · Size ${selection.size}` : ""} added to POS cart`);
     window.requestAnimationFrame(() => inputRef.current?.focus());
+  };
+  const closeVariantPicker = () => {
+    setVariantPickerProduct(null);
+    setInputValue("");
+    lastAutoLookupRef.current = "";
+    window.requestAnimationFrame(() => inputRef.current?.focus());
+  };
+  const addProduct = (product: AdminProduct) => {
+    const options = variantOptions(product);
+    if (options.length) {
+      setVariantPickerProduct(product);
+      setInputValue("");
+      lastAutoLookupRef.current = "";
+      setError("");
+      return;
+    }
+    addSelection(baseSelection(product), product);
   };
 
   const lookupProduct = (value: string) => {
@@ -7883,6 +7985,15 @@ function PosWorkspace({
     }
     addProduct(match);
   };
+  const handleBarcodeInputChange = (value: string) => {
+    setInputValue(value);
+    const normalized = normalizeBarcodeValue(value);
+    if (loading || upiPaymentActive || !normalized || lastAutoLookupRef.current === normalized) return;
+    const hasExactMatch = products.some((product) => normalizeBarcodeValue(product.barcode || "") === normalized)
+      || products.some((product) => normalizeBarcodeValue(product.sku) === normalized);
+    if (!hasExactMatch) return;
+    lookupProduct(value);
+  };
   useEffect(() => {
     lookupProductRef.current = lookupProduct;
   });
@@ -7898,15 +8009,15 @@ function PosWorkspace({
     if (request > 0) inputRef.current?.focus();
   }, [request]);
 
-  const cartLines = useMemo(() => Object.entries(cart).flatMap(([sku, quantity]) => {
-    const product = products.find((candidate) => candidate.sku === sku);
-    return product && quantity > 0 ? [{ product, quantity }] : [];
+  const cartLines = useMemo(() => Object.values(cart).flatMap(({ selection, quantity }) => {
+    const product = products.find((candidate) => candidate.sku === selection.sku);
+    return product && quantity > 0 ? [{ product, selection, quantity }] : [];
   }), [cart, products]);
   const cartUnits = cartLines.reduce((total, line) => total + line.quantity, 0);
-  const subtotal = cartLines.reduce((total, line) => total + parseMoney(line.product.price) * line.quantity, 0);
+  const subtotal = cartLines.reduce((total, line) => total + parseMoney(line.selection.price) * line.quantity, 0);
   const discount = Math.min(subtotal, Math.max(0, Number(discountValue) || 0));
   const total = Math.max(0, subtotal - discount);
-  const qrPaymentFingerprint = cartLines.map(({ product, quantity }) => `${product.sku}:${quantity}`).sort().join("|");
+  const qrPaymentFingerprint = cartLines.map(({ selection, quantity }) => `${selection.key}:${quantity}`).sort().join("|");
   const upiPaymentActive = paymentMethod === "UPI" && (posQr.status === "loading" || posQr.status === "ready" || posQr.status === "paid");
   const upiPaymentConfirmed = paymentMethod === "UPI" && posQr.status === "paid" && Boolean(posQr.paymentId);
   const visibleProducts = useMemo(() => {
@@ -8004,19 +8115,19 @@ function PosWorkspace({
     }
   }, []);
 
-  const updateQuantity = (product: AdminProduct, delta: number) => {
+  const updateQuantity = (selection: PosCartSelection, delta: number) => {
     if (upiPaymentActive) {
       setError("Switch away from UPI before changing quantities, or complete the confirmed payment.");
       return;
     }
-    const nextQuantity = Math.max(0, Math.min(product.stock, (cart[product.sku] || 0) + delta));
+    const nextQuantity = Math.max(0, Math.min(selection.stock, (cart[selection.key]?.quantity || 0) + delta));
     setCart((current) => {
       const next = { ...current };
-      if (nextQuantity === 0) delete next[product.sku];
-      else next[product.sku] = nextQuantity;
+      if (nextQuantity === 0) delete next[selection.key];
+      else next[selection.key] = { selection, quantity: nextQuantity };
       return next;
     });
-    if (nextQuantity === 0 && lastProduct?.sku === product.sku) setLastProduct(null);
+    if (nextQuantity === 0 && lastProduct?.sku === selection.sku) setLastProduct(null);
     setError("");
   };
 
@@ -8050,7 +8161,7 @@ function PosWorkspace({
       setError(posQr.status === "error" ? posQr.message || "Could not create the UPI QR code." : "Ask the customer to scan the Razorpay QR and wait for payment confirmation.");
       return;
     }
-    const unavailable = cartLines.find(({ product, quantity }) => product.status === "Draft" || quantity > product.stock);
+    const unavailable = cartLines.find(({ product, selection, quantity }) => product.status === "Draft" || quantity > selection.stock);
     if (unavailable) {
       setError(`${unavailable.product.name} does not have enough stock.`);
       return;
@@ -8058,19 +8169,36 @@ function PosWorkspace({
     setCheckoutBusy(true);
     setError("");
     try {
-      if (isSupabaseReady) {
-        const stockResult = await decrementCatalogStock(cartLines.map(({ product, quantity }) => ({ sku: product.sku, quantity })));
+      const baseCartLines = cartLines.filter(({ selection }) => !selection.variantName && !selection.size);
+      if (isSupabaseReady && baseCartLines.length) {
+        const stockResult = await decrementCatalogStock(baseCartLines.map(({ selection, quantity }) => ({ sku: selection.sku, quantity })));
         if (stockResult.error) throw stockResult.error;
       }
-      const soldQuantities = new Map(cartLines.map(({ product, quantity }) => [product.sku, quantity]));
       const nextProducts = products.map((product) => {
-        const sold = soldQuantities.get(product.sku) || 0;
-        if (!sold) return product;
+        const productLines = cartLines.filter(({ selection }) => selection.sku === product.sku);
+        if (!productLines.length) return product;
+        const variants = (product.variants || []).map((variant, index) => {
+          const variantName = variant.name || `Option ${index + 1}`;
+          const sold = productLines
+            .filter(({ selection }) => selection.variantName === variantName || (selection.size && selection.size === (variant.size || variant.name)))
+            .reduce((sum, line) => sum + line.quantity, 0);
+          return sold && Number.isFinite(Number(variant.stock))
+            ? { ...variant, stock: Math.max(0, Math.floor(Number(variant.stock) - sold)) }
+            : variant;
+        });
+        const sizeStock = { ...(product.sizeStock || {}) };
+        productLines.forEach(({ selection, quantity }) => {
+          if (selection.size) sizeStock[selection.size] = Math.max(0, Math.floor(Number(sizeStock[selection.size] ?? selection.stock) - quantity));
+        });
+        const sold = productLines.reduce((sum, line) => sum + line.quantity, 0);
         const stock = Math.max(0, product.stock - sold);
-        return { ...product, stock, status: stock <= 0 ? "Draft" as const : stock < 10 ? "Low stock" as const : "Published" as const };
+        const variantType = product.variantType || (product.sizes?.length ? "size" : "normal");
+        const hasStock = hasSellableStock(stock, variantType, product.sizes || [], sizeStock, variants);
+        return { ...product, stock, variants, sizeStock, status: hasStock ? stock < 10 ? "Low stock" as const : "Published" as const : "Draft" as const };
       });
       setProducts(nextProducts);
       persistCatalog(nextProducts);
+      await Promise.all([saveProductVariants(nextProducts), saveProductSizeStock(nextProducts)]);
 
       const now = new Date();
       const token = globalThis.crypto?.randomUUID?.().replace(/-/g, "").slice(-6).toUpperCase() || String(Date.now()).slice(-6);
@@ -8095,13 +8223,16 @@ function PosWorkspace({
         coupon: discount > 0 ? "POS discount" : undefined,
         couponDiscount: discount,
         inventoryAdjusted: true,
-        items: cartLines.map(({ product, quantity }) => ({
+        items: cartLines.map(({ product, selection, quantity }) => ({
           productId: product.sku,
           productName: product.name,
-          name: product.billName || product.name,
+          name: `${product.billName || product.name}${selection.variantName ? ` · ${selection.variantName}` : selection.size ? ` · Size ${selection.size}` : ""}`,
           quantity,
-          price: product.price,
-          image: product.image,
+          price: selection.price,
+          image: selection.image,
+          variantName: selection.variantName,
+          variantImage: selection.variantName ? selection.image : undefined,
+          size: selection.size,
         })),
       };
       let localOrders: OrderRecord[] = [];
@@ -8136,6 +8267,7 @@ function PosWorkspace({
       window.requestAnimationFrame(() => inputRef.current?.focus());
     }
   };
+  const variantPickerOptions = variantPickerProduct ? variantOptions(variantPickerProduct) : [];
 
   return (
     <section className="panel module-workspace pos-workspace" aria-labelledby="pos-workspace-title">
@@ -8148,21 +8280,21 @@ function PosWorkspace({
           <div className="pos-scan-box">
             <span className="pos-scan-icon">▣</span>
             <label htmlFor="pos-barcode-input"><small>LIVE BARCODE SCANNER</small><strong>{loading ? "Loading catalog…" : "Scan barcode"}</strong></label>
-            <input id="pos-barcode-input" ref={inputRef} value={inputValue} onChange={(event) => setInputValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); lookupProduct(inputValue); } }} placeholder={upiPaymentActive ? "UPI payment in progress" : "Barcode / SKU"} autoComplete="off" spellCheck={false} disabled={upiPaymentActive} />
+            <input id="pos-barcode-input" ref={inputRef} value={inputValue} onChange={(event) => handleBarcodeInputChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); lookupProduct(inputValue); } }} placeholder={upiPaymentActive ? "UPI payment in progress" : "Barcode / SKU"} autoComplete="off" spellCheck={false} disabled={upiPaymentActive} />
             <button className="module-primary" type="button" onClick={() => lookupProduct(inputValue)} disabled={upiPaymentActive}>Add</button>
           </div>
           {error && <p className="pos-error" role="alert">{error}</p>}
           {lastProduct && <div className="pos-last-scan"><img src={lastProduct.image} alt="" /><span><small>LAST ITEM ADDED</small><strong>{lastProduct.name}</strong><em>{lastProduct.barcode} · {lastProduct.price}</em></span><b>✓</b></div>}
           <div className="pos-product-tools"><div><p className="eyebrow">QUICK ADD</p><h3>Products</h3></div><input value={productSearch} onChange={(event) => setProductSearch(event.target.value)} placeholder="Search name, SKU or barcode…" /></div>
           <div className="pos-product-grid">
-            {visibleProducts.map((product) => <button type="button" className="pos-product-card" key={product.sku} onClick={() => addProduct(product)} disabled={upiPaymentActive || product.status === "Draft" || product.stock <= 0}><span className="pos-product-card-image">{product.image ? <img src={product.image} alt="" /> : <i>✦</i>}<em>{product.stock > 0 ? `${product.stock} in stock` : "Out of stock"}</em></span><span><strong>{product.name}</strong><small>{product.sku} · {product.category}</small><b>{product.price}</b></span></button>)}
+            {visibleProducts.map((product) => { const availableStock = productAvailableStock(product); const hasOptions = variantOptions(product).length > 0; return <button type="button" className="pos-product-card" key={product.sku} onClick={() => addProduct(product)} disabled={upiPaymentActive || product.status === "Draft" || availableStock <= 0}><span className="pos-product-card-image">{product.image ? <img src={product.image} alt="" /> : <i>✦</i>}<em>{availableStock > 0 ? `${availableStock} in stock` : "Out of stock"}</em></span><span><strong>{product.name}</strong><small>{product.sku} · {product.category}{hasOptions ? " · Variants" : ""}</small><b>{product.price}</b></span></button>; })}
             {!loading && !visibleProducts.length && <div className="pos-no-products">No matching products found.</div>}
           </div>
         </div>
         <aside className="pos-cart-panel">
           <div className="pos-cart-head"><div><p className="eyebrow">CURRENT SALE</p><h3>{cartUnits ? `${cartUnits} item${cartUnits === 1 ? "" : "s"}` : "New sale"}</h3></div>{cartUnits > 0 && <button type="button" onClick={clearSale} disabled={upiPaymentConfirmed}>Clear</button>}</div>
           <div className="pos-cart-lines">
-            {cartLines.length ? cartLines.map(({ product, quantity }) => <article className="pos-cart-line" key={product.sku}><div className="pos-cart-line-image">{product.image ? <img src={product.image} alt="" /> : <span>✦</span>}</div><div><strong>{product.name}</strong><small>{product.sku}</small><div className="pos-quantity"><button type="button" onClick={() => updateQuantity(product, -1)} aria-label={`Decrease ${product.name}`} disabled={upiPaymentActive}>−</button><span>{quantity}</span><button type="button" onClick={() => updateQuantity(product, 1)} aria-label={`Increase ${product.name}`} disabled={upiPaymentActive}>+</button></div></div><span><b>{formatAdminCurrency(parseMoney(product.price) * quantity)}</b><button type="button" onClick={() => updateQuantity(product, -quantity)} disabled={upiPaymentActive}>Remove</button></span></article>) : <div className="pos-empty-cart"><span>▣</span><strong>Ready to scan</strong><small>Scan a barcode or tap a product to begin the sale.</small></div>}
+            {cartLines.length ? cartLines.map(({ product, selection, quantity }) => <article className="pos-cart-line" key={selection.key}><div className="pos-cart-line-image">{selection.image ? <img src={selection.image} alt="" /> : <span>✦</span>}</div><div><strong>{product.name}</strong><small>{selection.sku}{selection.variantName ? ` · ${selection.variantName}` : selection.size ? ` · Size ${selection.size}` : ""}</small><div className="pos-quantity"><button type="button" onClick={() => updateQuantity(selection, -1)} aria-label={`Decrease ${product.name}`} disabled={upiPaymentActive}>−</button><span>{quantity}</span><button type="button" onClick={() => updateQuantity(selection, 1)} aria-label={`Increase ${product.name}`} disabled={upiPaymentActive}>+</button></div></div><span><b>{formatAdminCurrency(parseMoney(selection.price) * quantity)}</b><button type="button" onClick={() => updateQuantity(selection, -quantity)} disabled={upiPaymentActive}>Remove</button></span></article>) : <div className="pos-empty-cart"><span>▣</span><strong>Ready to scan</strong><small>Scan a barcode or tap a product to begin the sale.</small></div>}
           </div>
           <div className="pos-customer-fields"><label>Customer name <input value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="Walk-in customer" /></label><label>Mobile number <input value={customerPhone} onChange={(event) => setCustomerPhone(event.target.value.replace(/\D/g, "").slice(0, 10))} inputMode="numeric" placeholder="Optional" /></label></div>
           <div className="pos-payment-section"><span>Payment method</span><div>{(["Cash", "UPI", "Card"] as PosPaymentMethod[]).map((method) => <button type="button" key={method} className={paymentMethod === method ? "active" : ""} onClick={() => choosePaymentMethod(method)}>{method}</button>)}</div></div>
@@ -8182,6 +8314,7 @@ function PosWorkspace({
           {lastSale && <div className="pos-sale-complete"><span>✓</span><div><strong>Sale completed</strong><small>{lastSale.id} · {lastSale.total}</small></div><button type="button" onClick={() => void printOrderBill(lastSale)}>Print receipt</button></div>}
         </aside>
       </div>
+      {variantPickerProduct && <div className="product-modal-backdrop" onClick={closeVariantPicker}><div className="product-modal-card pos-variant-modal" role="dialog" aria-modal="true" aria-labelledby="pos-variant-title" onClick={(event) => event.stopPropagation()}><button className="product-modal-close" type="button" onClick={closeVariantPicker} aria-label="Close variant selector">×</button><p className="eyebrow">SELECT VARIANT</p><h3 id="pos-variant-title">{variantPickerProduct.name}</h3><p className="field-help">This barcode belongs to a product with multiple stock options. Choose the exact variant or size before adding it to the POS bill.</p><div className="pos-variant-option-grid">{variantPickerOptions.length ? variantPickerOptions.map((selection) => <article className="pos-variant-option" key={selection.key}><span className="pos-variant-option-image">{selection.image ? <img src={selection.image} alt="" /> : <i>✦</i>}</span><div><strong>{selection.variantName || (selection.size ? `Size ${selection.size}` : variantPickerProduct.name)}</strong><small>{selection.stock > 0 ? `${selection.stock} in stock` : "Out of stock"} · {selection.price}</small></div><button className="module-primary" type="button" disabled={selection.stock <= 0 || upiPaymentActive} onClick={() => addSelection(selection, variantPickerProduct)}>Add</button></article>) : <p className="variant-empty">No variants are configured for this product.</p>}</div></div></div>}
     </section>
   );
 }

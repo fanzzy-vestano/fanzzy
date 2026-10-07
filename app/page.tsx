@@ -182,15 +182,18 @@ type RazorpayCheckoutOptions = {
 type RazorpayCheckout = { open: () => void };
 
 const readOverlayProduct = (): Product | null => {
-  if (typeof window === "undefined" || !new URLSearchParams(window.location.search).get("fanzzy-product")) return null;
+  if (typeof window === "undefined") return null;
+  const productId = new URLSearchParams(window.location.search).get("fanzzy-product");
+  if (!productId) return null;
   try {
     const stored = window.sessionStorage.getItem("fanzzy-overlay-product");
-    return stored ? JSON.parse(stored) as Product : null;
+    const product = stored ? normalizeStoredProduct(JSON.parse(stored), 0) : null;
+    const normalize = (value?: string) => String(value || "").trim().replace(/[^a-z0-9]/gi, "").toLowerCase();
+    return product && [product.id, product.sku].some((key) => normalize(key) === normalize(productId)) ? product : null;
   } catch {
     return null;
   }
 };
-
 const defaultProducts: Product[] = [];
 type StorefrontCategory = { name: string; count: string; image: string; section: CatalogCategorySection };
 const defaultCategories: StorefrontCategory[] = [];
@@ -767,7 +770,7 @@ export default function Home() {
   const [marketingRecords, setMarketingRecords] = useState<MarketingRecord[]>([]);
   const [agentCoupons, setAgentCoupons] = useState<MarketingRecord[]>([]);
   const [promotionalOffers, setPromotionalOffers] = useState<PromotionOffer[]>([]);
-  const [quickProduct, setQuickProduct] = useState<Product | null>(null);
+  const [quickProduct, setQuickProduct] = useState<Product | null>(() => readOverlayProduct());
   const [quickProductImageOverride, setQuickProductImageOverride] = useState<string | null>(null);
   const overlayHistoryStack = useRef<string[]>([]);
   const overlayPageState = useRef<StorefrontPageHistoryState>({ activeCategory: "All pieces", search: "", scrollY: 0 });
