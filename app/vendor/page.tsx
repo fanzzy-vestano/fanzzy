@@ -2,6 +2,7 @@
 /* eslint-disable @next/next/no-html-link-for-pages */
 
 import { useEffect, useRef, useState } from "react";
+import { ExternalLink, Eye, X } from "lucide-react";
 import "../globals.css";
 import "./vendor.css";
 import { uploadStoreImage } from "../../lib/supabase/catalog";
@@ -33,6 +34,43 @@ type Dashboard = {
   notifications: Array<{ id: string; title: string; body: string }>;
   categories?: string[];
   offers?: Array<Record<string, unknown>>;
+};
+
+type VendorOrderItem = Record<string, unknown> & {
+  product_sku?: string;
+  product_name?: string;
+  quantity?: number;
+  unit_price?: number;
+  allocated_discount?: number;
+  vendor_net_amount?: number;
+  product_snapshot?: Record<string, unknown>;
+};
+
+type VendorOrderTracking = {
+  fulfillmentMethod?: "delivery" | "pickup";
+  pickupHubName?: string;
+  pickupHubPlace?: string;
+  waybill?: string;
+  trackingUrl?: string;
+  shipmentStatus?: string;
+  shipmentError?: string;
+  shipmentCreatedAt?: string;
+  pickupRequestStatus?: string;
+  pickupRequestId?: string;
+  pickupRequestDate?: string;
+  pickupRequestTime?: string;
+  liveStatus?: string;
+  liveStatusType?: string;
+  liveStatusDate?: string;
+  liveLocation?: string;
+  lastTrackedAt?: string;
+  scans: Array<{ status: string; date?: string; location?: string; instructions?: string }>;
+};
+
+type VendorOrderDetails = {
+  order: Record<string, unknown>;
+  items: VendorOrderItem[];
+  tracking: VendorOrderTracking;
 };
 
 type ProductVariantType = "normal" | "size";
@@ -102,6 +140,26 @@ const calculateProductMarkup = (costValue: string, gstValue: string, priceValue:
 const parseProductSizes = (value: string) => Array.from(new Set(value.split(",").map((size) => size.trim()).filter(Boolean)));
 
 const money = (value: unknown) => `₹${(Number(value) || 0).toLocaleString("en-IN")}`;
+const trackingStages = [
+  { key: "ready", label: "Ready to ship", match: /manifest|ready|shipment created|confirmed/i },
+  { key: "pickup", label: "Scheduled for pickup", match: /pickup|schedule|booked/i },
+  { key: "transit", label: "In-transit", match: /transit|dispatched|picked|shipped|reached destination/i },
+  { key: "out-for-delivery", label: "Out for delivery", match: /out for delivery|out-for-delivery/i },
+  { key: "delivered", label: "Delivered", match: /delivered|successfully delivered/i },
+] as const;
+const trackingStageIndex = (status: string) => {
+  const normalized = status.toLowerCase();
+  if (/delivered|successfully delivered/.test(normalized)) return 4;
+  if (/out for delivery|out-for-delivery/.test(normalized)) return 3;
+  if (/transit|dispatched|picked|shipped|reached destination/.test(normalized)) return 2;
+  if (/pickup|schedule|booked/.test(normalized)) return 1;
+  return 0;
+};
+const trackingDate = (value?: string) => {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
+};
 
 const makeLocalImage = (file: File) => new Promise<string>((resolve, reject) => {
   const reader = new FileReader();
@@ -175,6 +233,9 @@ export default function VendorDashboardPage() {
   const [categorySaving, setCategorySaving] = useState(false);
   const categoryInputRef = useRef<HTMLInputElement>(null);
   const [editingCategory, setEditingCategory] = useState("");
+  const [selectedOrderDetails, setSelectedOrderDetails] = useState<VendorOrderDetails | null>(null);
+  const [orderDetailsLoading, setOrderDetailsLoading] = useState(false);
+  const [orderDetailsError, setOrderDetailsError] = useState("");
 
   const load = async () => {
     try {
@@ -206,6 +267,13 @@ export default function VendorDashboardPage() {
     document.body.style.overflow = "hidden";
     return () => { document.body.style.overflow = previousOverflow; };
   }, [editingSku]);
+
+  useEffect(() => {
+    if (!selectedOrderDetails && !orderDetailsLoading) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = previousOverflow; };
+  }, [selectedOrderDetails, orderDetailsLoading]);
 
   const updateFormField = (field: keyof VendorProductForm, value: string) => setForm((current) => {
     const next = { ...current, [field]: value } as VendorProductForm;
@@ -539,6 +607,28 @@ export default function VendorDashboardPage() {
     if (response.ok) void load();
   };
 
+  const viewOrder = async (orderId: string) => {
+    setOrderDetailsLoading(true);
+    setOrderDetailsError("");
+    setSelectedOrderDetails(null);
+    try {
+      const response = await vendorApiFetch(`/vendor/orders/${encodeURIComponent(orderId)}/tracking`, { cache: "no-store" });
+      const body = await response.json() as VendorOrderDetails & { error?: string };
+      if (!response.ok) throw new Error(body.error || "Could not load order details.");
+      setSelectedOrderDetails(body);
+    } catch (caught) {
+      setOrderDetailsError(caught instanceof Error ? caught.message : "Could not load order details.");
+    } finally {
+      setOrderDetailsLoading(false);
+    }
+  };
+
+  const closeOrderDetails = () => {
+    setSelectedOrderDetails(null);
+    setOrderDetailsError("");
+    setOrderDetailsLoading(false);
+  };
+
   const logout = async () => { await vendorApiFetch("/vendor-auth/logout", { method: "POST" }).catch(() => undefined); clearVendorSessionToken(); window.location.assign("/vendor"); };
 
   if (dashboardLoading && !data) return <main className="vendor-portal"><p>Loading vendor portal…</p></main>;
@@ -557,6 +647,10 @@ export default function VendorDashboardPage() {
   const displayedOrders = tab === "Returns"
     ? data.orders.filter((order) => /return|refund/i.test(String(order.status || "")))
     : data.orders;
+  const selectedTracking = selectedOrderDetails?.tracking;
+  const selectedCustomer = selectedOrderDetails?.order.customer_snapshot && typeof selectedOrderDetails.order.customer_snapshot === "object"
+    ? selectedOrderDetails.order.customer_snapshot as Record<string, unknown>
+    : {};
 
   return <main className="vendor-portal"><aside className="vendor-sidebar"><a href="/" className="wordmark"><img src="/fanzzy-mark.png" alt="Fanzzy" className="brand-logo" /></a><p className="vendor-sidebar-name">{data.vendor?.business_name}</p>{navItems.map((item) => <button className={tab === item ? "active" : ""} key={item} onClick={() => { if (item === "Add Product" && editingSku) closeProductEditor(); setTab(item); }}>{item}</button>)}<button onClick={() => void logout()}>Logout ↪</button></aside><section className="vendor-portal-content"><header className="vendor-portal-header"><div><p className="eyebrow">VENDOR DASHBOARD</p><h1>{tab}</h1></div><span className="vendor-status">{data.vendor?.status}</span></header>
     {showProductEditor && <div className={editingSku ? "vendor-edit-modal-backdrop" : "vendor-edit-form-shell"} role={editingSku ? "dialog" : undefined} aria-modal={editingSku ? true : undefined} aria-label={editingSku ? `Edit ${form.name || "product"}` : undefined}>
@@ -600,6 +694,7 @@ export default function VendorDashboardPage() {
     {(tab === "Categories" || tab === "Add Category") && <section className="vendor-data-card vendor-category-workspace"><div className="vendor-category-heading"><div><h2>{tab === "Add Category" ? editingCategory ? "Edit category" : "Add a category" : "Your product categories"}</h2><p>{tab === "Add Category" ? editingCategory ? `Update ${editingCategory} for your vendor products.` : "Create a category for your vendor products." : "Only categories created for your vendor account appear here."}</p></div>{tab === "Categories" && <button className="button button-dark" type="button" onClick={openAddCategory}>+ Add category <span>↗</span></button>}</div>{tab === "Add Category" && <div className="vendor-category-list"><p className="eyebrow">YOUR CATEGORIES</p>{categoryChips(data.categories || [])}{!data.categories?.length && <p className="muted">No categories have been added for this vendor yet.</p>}</div>}{tab === "Add Category" ? <form className="vendor-category-form" onSubmit={saveCategory}><label>Category name<input value={categoryName} onChange={(event) => setCategoryName(event.target.value)} placeholder="Example: Pendant Sets" required /></label><label className="vendor-image-upload-field">Category image<input ref={categoryInputRef} type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => void chooseCategoryImage(event)} /><small>Optional · PNG, JPG or WebP</small></label>{categoryImage && <div className="vendor-image-preview"><img src={categoryImage} alt="Category preview" /><button type="button" onClick={() => { setCategoryImage(""); setCategoryFile(null); if (categoryInputRef.current) categoryInputRef.current.value = ""; }}>Remove image</button></div>}<div className="vendor-category-form-actions"><button className="button button-dark" type="submit" disabled={categorySaving}>{categorySaving ? "Saving…" : editingCategory ? "Update category" : "Save category"} <span>↗</span></button><button className="button vendor-category-cancel" type="button" onClick={closeCategoryEditor}>Cancel</button></div></form> : <>{categoryChips(data.categories || [])}{!data.categories?.length && <p className="muted">No categories have been added for this vendor yet.</p>}</>}{message && <p className="vendor-message">{message}</p>}</section>}
     {tab === "Offers" && <section className="vendor-data-card"><h2>Current store offers</h2>{(data.offers || []).map((offer, index) => <div className="vendor-data-row" key={String(offer.id || offer.code || index)}><span><strong>{String(offer.name || offer.title || offer.code || "Offer")}</strong><small>{String(offer.description || offer.detail || offer.status || "Configured by admin")}</small></span></div>)}{!data.offers?.length && <p className="muted">No active offers are available right now.</p>}</section>}
     {tab === "Profile" && <section className="vendor-data-card vendor-details-card vendor-profile-card"><div className="vendor-profile-heading"><div className="vendor-profile-avatar">{(data.vendor?.business_name || "V").slice(0, 1).toUpperCase()}</div><div><p className="eyebrow">ACCOUNT PROFILE</p><h2>{data.vendor?.business_name || "Vendor profile"}</h2><span className="vendor-profile-status">{data.vendor?.status || "Active"}</span></div></div><div className="vendor-profile-grid"><div><span>Owner</span><strong>{data.vendor?.owner_name || "—"}</strong></div><div><span>Login email</span><strong>{data.vendor?.login_email || "—"}</strong></div><div><span>Phone</span><strong>{data.vendor?.phone || "—"}</strong></div><div><span>WhatsApp</span><strong>{data.vendor?.whatsapp || "—"}</strong></div><div className="vendor-profile-field-wide"><span>Address</span><strong>{[data.vendor?.address, data.vendor?.city, data.vendor?.state, data.vendor?.pin_code].filter(Boolean).join(", ") || "—"}</strong></div><div><span>GST number</span><strong>{data.vendor?.gst_number || "—"}</strong></div><div><span>PAN number</span><strong>{data.vendor?.pan_number || "—"}</strong></div></div></section>}
-    {tab !== "Add Product" && tab !== "Categories" && tab !== "Add Category" && tab !== "Offers" && tab !== "Profile" && <><div className="vendor-stat-grid">{statItems.map(([label, value]) => <article key={label}><small>{label}</small><strong>{isMoney(label) ? money(value) : String(value ?? 0)}</strong></article>)}</div><section className="vendor-data-card"><h2>{tab === "Products" || tab === "Inventory" ? "My products" : tab === "Orders" ? "Vendor orders" : tab === "Returns" ? "Returns and refunds" : tab === "Payouts" ? "Payout history" : "Recent activity"}</h2>{tab === "Payouts" && <><div className="vendor-payout-summary"><article><small>Available for payout</small><strong>{money(availablePayout)}</strong></article><article><small>Total payouts</small><strong>{money(totalPayouts)}</strong></article><article><small>Paid to date</small><strong>{money(paidPayouts)}</strong></article></div><p className="muted">Delivered orders become available here. Fanzzy admin reviews and creates the payout.</p>{payoutEligibleOrders.map((order) => <div className="vendor-data-row" key={`eligible-${String(order.id)}`}><span><strong>{String(order.sub_order_number)}</strong><small>Delivered · Awaiting payout</small></span><b>{money(order.vendor_net_amount)}</b></div>)}</>}{(tab === "Products" || tab === "Inventory") && data.products.map((product) => <div className="vendor-data-row" key={String(product.sku)}><span><strong>{String(product.name)}</strong><small>{String(product.sku)} · {String(product.vendor_status || "Draft")}</small></span><span className="vendor-row-actions"><b>{String(product.stock)} in stock</b><button className="vendor-edit-button" type="button" onClick={() => startEditingProduct(product)}>Edit</button><button className="vendor-delete-button" type="button" onClick={() => void deleteProduct(String(product.sku), String(product.name))}>Delete</button></span></div>)}{(tab === "Orders" || tab === "Returns") && displayedOrders.map((order) => <div className="vendor-data-row" key={String(order.id)}><span><strong>{String(order.sub_order_number)}</strong><small>{String(order.status)} · {String(order.payment_status)}</small></span><b>{money(order.vendor_net_amount)}</b></div>)}{tab === "Payouts" && data.payouts.map((payout) => <div className="vendor-data-row" key={String(payout.id)}><span><strong>{String(payout.payout_number)}</strong><small>{String(payout.status)}{payout.payment_method ? ` · ${String(payout.payment_method)}` : ""}</small></span><b>{money(payout.amount)}</b></div>)}{tab === "Notifications" && data.notifications.map((notification) => <div className="vendor-data-row" key={notification.id}><span><strong>{notification.title}</strong><small>{notification.body}</small></span></div>)}{(tab === "Returns" ? !displayedOrders.length : tab === "Payouts" ? !payoutEligibleOrders.length && !data.payouts.length : !data.products.length && !data.orders.length && !data.payouts.length) && <p className="muted">{tab === "Returns" ? "No return requests or refunds yet." : tab === "Payouts" ? "No payout records yet." : "No records yet."}</p>}</section></>}
+    {tab !== "Add Product" && tab !== "Categories" && tab !== "Add Category" && tab !== "Offers" && tab !== "Profile" && <><div className="vendor-stat-grid">{statItems.map(([label, value]) => <article key={label}><small>{label}</small><strong>{isMoney(label) ? money(value) : String(value ?? 0)}</strong></article>)}</div><section className="vendor-data-card"><h2>{tab === "Products" || tab === "Inventory" ? "My products" : tab === "Orders" ? "Vendor orders" : tab === "Returns" ? "Returns and refunds" : tab === "Payouts" ? "Payout history" : "Recent activity"}</h2>{tab === "Payouts" && <><div className="vendor-payout-summary"><article><small>Available for payout</small><strong>{money(availablePayout)}</strong></article><article><small>Total payouts</small><strong>{money(totalPayouts)}</strong></article><article><small>Paid to date</small><strong>{money(paidPayouts)}</strong></article></div><p className="muted">Delivered orders become available here. Fanzzy admin reviews and creates the payout.</p>{payoutEligibleOrders.map((order) => <div className="vendor-data-row" key={`eligible-${String(order.id)}`}><span><strong>{String(order.sub_order_number)}</strong><small>Delivered · Awaiting payout</small></span><b>{money(order.vendor_net_amount)}</b></div>)}</>}{(tab === "Products" || tab === "Inventory") && data.products.map((product) => <div className="vendor-data-row" key={String(product.sku)}><span><strong>{String(product.name)}</strong><small>{String(product.sku)} · {String(product.vendor_status || "Draft")}</small></span><span className="vendor-row-actions"><b>{String(product.stock)} in stock</b><button className="vendor-edit-button" type="button" onClick={() => startEditingProduct(product)}>Edit</button><button className="vendor-delete-button" type="button" onClick={() => void deleteProduct(String(product.sku), String(product.name))}>Delete</button></span></div>)}{(tab === "Orders" || tab === "Returns") && displayedOrders.map((order) => <div className="vendor-data-row vendor-order-row" key={String(order.id)}><span><strong>{String(order.sub_order_number)}</strong><small>{String(order.status)} · {String(order.payment_status)}</small></span><span className="vendor-order-row-actions"><b>{money(order.vendor_net_amount)}</b><button className="vendor-order-view" type="button" onClick={() => void viewOrder(String(order.id))}><Eye size={15} aria-hidden="true" /> View</button></span></div>)}{tab === "Payouts" && data.payouts.map((payout) => <div className="vendor-data-row" key={String(payout.id)}><span><strong>{String(payout.payout_number)}</strong><small>{String(payout.status)}{payout.payment_method ? ` · ${String(payout.payment_method)}` : ""}</small></span><b>{money(payout.amount)}</b></div>)}{tab === "Notifications" && data.notifications.map((notification) => <div className="vendor-data-row" key={notification.id}><span><strong>{notification.title}</strong><small>{notification.body}</small></span></div>)}{(tab === "Returns" ? !displayedOrders.length : tab === "Payouts" ? !payoutEligibleOrders.length && !data.payouts.length : !data.products.length && !data.orders.length && !data.payouts.length) && <p className="muted">{tab === "Returns" ? "No return requests or refunds yet." : tab === "Payouts" ? "No payout records yet." : "No records yet."}</p>}</section></>}
+    {(orderDetailsLoading || orderDetailsError || selectedOrderDetails) && <div className="vendor-order-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeOrderDetails(); }}><section className="vendor-order-modal" role="dialog" aria-modal="true" aria-label="Vendor order details"><button className="vendor-order-modal-close" type="button" onClick={closeOrderDetails} aria-label="Close order details"><X size={20} /></button>{orderDetailsLoading && <div className="vendor-order-modal-state">Loading order details…</div>}{orderDetailsError && <div className="vendor-order-modal-state"><p className="vendor-error" role="alert">{orderDetailsError}</p><button className="button" type="button" onClick={closeOrderDetails}>Close</button></div>}{selectedOrderDetails && <><header className="vendor-order-modal-header"><p className="eyebrow">ORDER DETAILS</p><h2>{String(selectedOrderDetails.order.sub_order_number || selectedOrderDetails.order.main_order_id || "Order")}</h2><p>{String(selectedOrderDetails.order.status || "New")} · {String(selectedOrderDetails.order.payment_status || "pending")} · {String(selectedOrderDetails.order.payment_method || "")}</p></header><section className="vendor-order-products"><p className="eyebrow">PRODUCTS</p>{selectedOrderDetails.items.map((item, index) => { const snapshot = item.product_snapshot && typeof item.product_snapshot === "object" ? item.product_snapshot : {}; const image = String(snapshot.variantImage || snapshot.image || ""); const variant = String(snapshot.variantName || snapshot.size || ""); return <article key={String(item.id || `${item.product_sku}-${index}`)}>{image ? <img src={image} alt={String(item.product_name || "Ordered product")} /> : <span className="vendor-order-product-placeholder" aria-hidden="true" /> }<div><strong>{String(item.product_name || "Product")}</strong><small>SKU {String(item.product_sku || "Not available")}</small>{variant && <small>Selected option: {variant}</small>}<small>Quantity: {String(item.quantity || 0)} · Unit price: {money(item.unit_price)}</small>{Number(item.allocated_discount) > 0 && <small>Discount: {money(item.allocated_discount)}</small>}</div><b>{money(item.vendor_net_amount)}</b></article>; })}{!selectedOrderDetails.items.length && <p className="muted">No product lines were saved for this order.</p>}</section><section className="vendor-order-customer"><p className="eyebrow">CUSTOMER</p><dl><div><dt>Name</dt><dd>{String(selectedCustomer.name || "Not provided")}</dd></div><div><dt>Phone</dt><dd>{String(selectedCustomer.phone || "Not provided")}</dd></div><div><dt>Address</dt><dd>{String(selectedCustomer.address || "Not provided")}</dd></div></dl></section>{selectedTracking?.fulfillmentMethod !== "pickup" && <section className="vendor-order-tracking"><p className="eyebrow">ORDER TRACKING</p>{selectedTracking?.waybill ? <><div className="vendor-tracking-summary"><div><small>DELHIVERY AWB</small><strong>{selectedTracking.waybill}</strong></div><div><small>LIVE STATUS</small><strong>{selectedTracking.liveStatus || "Ready to ship"}</strong>{selectedTracking.liveLocation && <span>{selectedTracking.liveLocation}</span>}</div></div>{selectedTracking.trackingUrl && <a className="vendor-tracking-link" href={selectedTracking.trackingUrl} target="_blank" rel="noreferrer">Open Delhivery tracking <ExternalLink size={14} aria-hidden="true" /></a>}<div className="vendor-live-timeline"><p className="eyebrow">LIVE DELIVERY TIMELINE</p>{(() => { const currentStage = trackingStageIndex(selectedTracking.liveStatus || "Ready to ship"); const scans = selectedTracking.scans || []; return <><ol className="tracking-stage-list" aria-label="Delhivery delivery progress">{trackingStages.map((stage, index) => { const current = index === currentStage; const completed = index < currentStage; const scan = scans.find((candidate) => stage.match.test(`${candidate.status} ${candidate.instructions || ""}`)); const date = scan?.date || (current ? selectedTracking.liveStatusDate : index === 0 ? selectedTracking.shipmentCreatedAt : index === 1 ? selectedTracking.pickupRequestDate : ""); const detail = current ? index === 2 && selectedTracking.liveLocation ? `Moving through ${selectedTracking.liveLocation}.` : index === 3 ? "The parcel is out for delivery." : index === 4 ? "The order has been delivered." : index === 1 ? "Pickup has been scheduled with Delhivery." : "The parcel is being prepared." : completed ? "Completed" : "Waiting for update"; return <li className={`${completed ? "completed " : ""}${current ? "current" : "upcoming"}`} aria-current={current ? "step" : undefined} key={stage.key}><span className="tracking-stage-dot" /><div><strong>{stage.label}</strong><small>{detail}</small>{date && <time>{trackingDate(date)}</time>}</div></li>; })}</ol>{scans.length > 0 && <div className="tracking-scan-summary"><strong>Latest courier scan</strong><span>{scans[0].status}{scans[0].location ? ` · ${scans[0].location}` : ""}</span>{scans[0].date && <time>{trackingDate(scans[0].date)}</time>}</div>}</>; })()}</div></> : <div className="vendor-tracking-notice"><strong>Tracking is not available yet</strong><span>{selectedTracking?.shipmentStatus === "failed" ? selectedTracking.shipmentError || "Shipment creation needs attention." : "The Delhivery timeline will appear after the shipment and AWB are created."}</span></div>}</section>}</>}</section></div>}
   </section></main>;
 }

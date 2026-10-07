@@ -1,4 +1,4 @@
-import { createDelhiveryPickupRequest, delhiveryPickupSchedule, manifestDelhiveryShipment, trackDelhiveryShipment } from "./delhivery";
+import { createDelhiveryPickupRequest, delhiveryPickupSchedule, getDelhiveryAdminOptions, manifestDelhiveryShipment, trackDelhiveryShipment } from "./delhivery";
 
 type StoredOrder = {
   id: string;
@@ -28,7 +28,9 @@ type StoredOrder = {
   inventoryAdjusted?: boolean;
   delhiveryAwb?: string;
   delhiveryTrackingUrl?: string;
-  delhiveryShipmentStatus?: "pending" | "created" | "failed" | "skipped";
+  delhiveryShipmentStatus?: "awaiting_weight" | "pending" | "created" | "failed" | "skipped";
+  delhiveryWeightGrams?: number;
+  delhiveryPickupLocation?: string;
   delhiveryShipmentError?: string;
   delhiveryShipmentCreatedAt?: string;
   delhiveryShipmentRequestedAt?: string;
@@ -206,6 +208,8 @@ const delhiveryPickupFailureMessage = (error: unknown) => {
 // a payment-repair/sync run.
 const delhiveryAutomationStartDate = "2026-09-05";
 
+const requiresAdminShipmentWeight = () => /^(1|true|yes|on)$/i.test(String(process.env.DELHIVERY_REQUIRE_ADMIN_WEIGHT || ""));
+
 const isDeliveryOrderReadyForPickup = (order: StoredOrder) =>
   order.fulfillmentMethod !== "pickup"
   && Boolean(order.delhiveryAwb)
@@ -222,13 +226,16 @@ async function ensureDelhiveryPickupRequest(orders: StoredOrder[], order: Stored
   // next payment/admin sync to retry it after the Delhivery wallet is topped up.
   if (order.delhiveryPickupRequestStatus === "pending" && !order.delhiveryPickupRequestError) return;
 
-  const schedule = delhiveryPickupSchedule();
+  const defaultPickupLocation = getDelhiveryAdminOptions().pickupLocations[0] || "";
+  const pickupLocation = order.delhiveryPickupLocation || defaultPickupLocation;
+  const schedule = delhiveryPickupSchedule(order.delhiveryPickupRequestTime);
   if (order.delhiveryPickupRequestStatus === "created" && (order.delhiveryPickupRequestDate || "") >= schedule.currentDate) return;
 
   // Delhivery raises pickup requests against a warehouse, not an individual
   // AWB. Cover later orders with the request already created for this slot.
   const existingRequest = orders.find((candidate) =>
     candidate.id !== order.id
+    && (candidate.delhiveryPickupLocation || defaultPickupLocation) === pickupLocation
     && (candidate.delhiveryPickupRequestDate || "") >= schedule.currentDate
     && ["pending", "created", "covered"].includes(candidate.delhiveryPickupRequestStatus || ""),
   );
@@ -248,8 +255,11 @@ async function ensureDelhiveryPickupRequest(orders: StoredOrder[], order: Stored
   order.delhiveryPickupRequestTime = schedule.pickupTime;
   await writeOrders(orders);
   try {
-    const expectedPackageCount = orders.filter(isDeliveryOrderReadyForPickup).length;
-    const pickup = await createDelhiveryPickupRequest(expectedPackageCount);
+    const expectedPackageCount = orders.filter((candidate) =>
+      isDeliveryOrderReadyForPickup(candidate)
+      && (candidate.delhiveryPickupLocation || defaultPickupLocation) === pickupLocation
+    ).length;
+    const pickup = await createDelhiveryPickupRequest(expectedPackageCount, pickupLocation, order.delhiveryPickupRequestTime);
     order.delhiveryPickupRequestStatus = "created";
     order.delhiveryPickupRequestId = pickup.pickupId;
     order.delhiveryPickupRequestDate = pickup.pickupDate;
@@ -268,13 +278,21 @@ async function ensureDelhiveryPickupRequest(orders: StoredOrder[], order: Stored
   await writeOrders(orders);
 }
 
-async function ensureDelhiveryShipment(orders: StoredOrder[], order: StoredOrder) {
+async function ensureDelhiveryShipment(orders: StoredOrder[], order: StoredOrder, force = false) {
   if (order.fulfillmentMethod === "pickup") return;
   if (order.status === "Delivered" || order.status === "Cancelled") return;
   const orderDate = String(order.createdAt || order.date || "").slice(0, 10);
   if (orderDate && orderDate < delhiveryAutomationStartDate) return;
   if (order.delhiveryAwb) {
     await ensureDelhiveryPickupRequest(orders, order);
+    return;
+  }
+  if (requiresAdminShipmentWeight() && !force && !order.delhiveryWeightGrams) {
+    if (order.delhiveryShipmentStatus !== "awaiting_weight") {
+      order.delhiveryShipmentStatus = "awaiting_weight";
+      delete order.delhiveryShipmentError;
+      await writeOrders(orders);
+    }
     return;
   }
   if (order.delhiveryShipmentStatus === "pending") return;
@@ -637,6 +655,32 @@ export async function confirmCashOnDeliveryOrder(orderId: string, identity?: { i
     await writeOrders(orders);
     await syncVendorOrderForPaidOrder(order).catch(() => undefined);
     if (order.fulfillmentMethod !== "pickup") await ensureDelhiveryShipment(orders, order);
+    return order;
+  });
+}
+
+export async function createAdminDelhiveryShipment(orderId: string, weightGrams: number, pickupLocation: string, pickupTime: string) {
+  return withInventoryMutationLock(async () => {
+    const orders = await readOrders();
+    const order = orders.find((candidate) => candidate.id === orderId);
+    if (!order) throw new Error("Order could not be found for Delhivery shipment creation.");
+    if (order.fulfillmentMethod === "pickup") throw new Error("Hub-pickup orders do not use Delhivery shipping.");
+    if (!order.paymentStatus || !["paid", "cod_pending", "cod_collected"].includes(order.paymentStatus)) throw new Error("Payment or COD confirmation is required before creating the shipment.");
+    if (order.status === "Delivered" || order.status === "Cancelled") throw new Error(`A ${order.status.toLowerCase()} order cannot create a new shipment.`);
+    if (order.delhiveryAwb) return order;
+    const normalizedWeight = Math.round(Number(weightGrams));
+    if (!Number.isFinite(normalizedWeight) || normalizedWeight < 500 || normalizedWeight > 30_000) throw new Error("Packed parcel weight must be between 500 and 30,000 grams.");
+    const options = getDelhiveryAdminOptions();
+    if (!options.pickupLocations.includes(pickupLocation)) throw new Error("Select the configured Delhivery pickup location.");
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(pickupTime)) throw new Error("Enter a valid Delhivery pickup time.");
+
+    order.delhiveryWeightGrams = normalizedWeight;
+    order.delhiveryPickupLocation = pickupLocation;
+    order.delhiveryPickupRequestTime = `${pickupTime}:00`;
+    order.delhiveryShipmentStatus = "awaiting_weight";
+    delete order.delhiveryShipmentError;
+    await writeOrders(orders);
+    await ensureDelhiveryShipment(orders, order, true);
     return order;
   });
 }

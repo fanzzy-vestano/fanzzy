@@ -19,6 +19,8 @@ import * as adminVendorProductRoute from "../app/api/admin/vendors/[id]/products
 import * as adminVendorCommissionsRoute from "../app/api/admin/vendor-commissions/route";
 import * as adminVendorPayoutsRoute from "../app/api/admin/vendor-payouts/route";
 import * as adminVendorReportsRoute from "../app/api/admin/vendor-reports/route";
+import * as adminDelhiveryConfigRoute from "../app/api/admin/delhivery/config/route";
+import * as adminDelhiveryCreateRoute from "../app/api/admin/delhivery/create/route";
 import * as confirmCodRoute from "../app/api/orders/confirm-cod/route";
 import * as orderTrackingRoute from "../app/api/orders/track/route";
 import * as delhiveryTrackingRoute from "../app/api/delhivery/track/route";
@@ -42,6 +44,18 @@ type WorkerEnv = {
   DELHIVERY_API_TOKEN?: string;
   DELHIVERY_CLIENT_NAME?: string;
   DELHIVERY_PICKUP_NAME?: string;
+  DELHIVERY_PICKUP_LOCATION?: string;
+  DELHIVERY_ORIGIN_PIN?: string;
+  DELHIVERY_SELLER_NAME?: string;
+  DELHIVERY_SELLER_ADDRESS?: string;
+  DELHIVERY_SELLER_GST_TIN?: string;
+  DELHIVERY_PICKUP_TIME?: string;
+  DELHIVERY_DEFAULT_HSN_CODE?: string;
+  DELHIVERY_DEFAULT_WEIGHT_GRAMS?: string;
+  DELHIVERY_REQUIRE_ADMIN_WEIGHT?: string;
+  DELHIVERY_DEFAULT_LENGTH_CM?: string;
+  DELHIVERY_DEFAULT_WIDTH_CM?: string;
+  DELHIVERY_DEFAULT_HEIGHT_CM?: string;
 };
 
 const allowedOrigins = new Set([
@@ -160,6 +174,8 @@ const routeRequest = async (request: Request, env: WorkerEnv): Promise<Response>
   if (path === "/admin/vendor-commissions") return adminRoute(request, env, adminVendorCommissionsRoute);
   if (path === "/admin/vendor-payouts") return adminRoute(request, env, adminVendorPayoutsRoute);
   if (path === "/admin/vendor-reports") return adminRoute(request, env, adminVendorReportsRoute);
+  if (path === "/admin/delhivery/config") return adminRoute(request, env, adminDelhiveryConfigRoute);
+  if (path === "/admin/delhivery/create") return adminRoute(request, env, adminDelhiveryCreateRoute);
   if (segments[0] === "admin" && segments[1] === "vendors" && segments.length === 3) {
     return adminRoute(request, env, adminVendorRoute, { params: Promise.resolve({ id: segments[2] }) });
   }

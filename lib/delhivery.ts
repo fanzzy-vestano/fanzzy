@@ -19,6 +19,8 @@ export type DelhiveryOrder = {
   phone: string;
   address?: string;
   paymentMethod?: "online" | "cod";
+  delhiveryWeightGrams?: number;
+  delhiveryPickupLocation?: string;
   items?: DelhiveryOrderItem[];
 };
 
@@ -196,6 +198,22 @@ const validPickupTime = (value: string) => {
   return hour <= 23 && minute <= 59 && second <= 59 ? value : "11:00:00";
 };
 
+export const getDelhiveryAdminOptions = () => {
+  const current = config();
+  return {
+    pickupLocations: current.pickupLocation ? [current.pickupLocation] : [],
+    defaultPickupTime: validPickupTime(current.pickupTime).slice(0, 5),
+  };
+};
+
+const configuredPickupLocation = (requested?: string) => {
+  const current = config();
+  const pickupLocation = String(requested || current.pickupLocation).trim();
+  if (!pickupLocation) throw delhiveryError("The Delhivery pickup location is not configured on the server.");
+  if (pickupLocation !== current.pickupLocation) throw delhiveryError("The selected Delhivery pickup location is not configured on the server.");
+  return pickupLocation;
+};
+
 const indiaDateParts = (date: Date) => {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Kolkata",
@@ -232,9 +250,9 @@ const businessDate = (year: number, month: number, day: number, daysToAdd: numbe
   return date.toISOString().slice(0, 10);
 };
 
-const pickupTimeCandidates = (current: ReturnType<typeof indiaDateParts>) => {
-  const configured = validPickupTime(config().pickupTime);
-  const unique = Array.from(new Set([configured, "14:00:00", "10:00:00"]));
+const pickupTimeCandidates = (current: ReturnType<typeof indiaDateParts>, requestedPickupTime?: string) => {
+  const configured = validPickupTime(requestedPickupTime || config().pickupTime);
+  const unique = requestedPickupTime ? [configured] : Array.from(new Set([configured, "14:00:00", "10:00:00"]));
   const currentMinutes = current.hour * 60 + current.minute;
   return unique.filter((time) => {
     const [hour, minute] = time.split(":").map(Number);
@@ -242,7 +260,7 @@ const pickupTimeCandidates = (current: ReturnType<typeof indiaDateParts>) => {
   });
 };
 
-const pickupScheduleCandidates = () => {
+const pickupScheduleCandidates = (requestedPickupTime?: string) => {
   const current = indiaDateParts(new Date());
   const currentDate = indiaDateString(current);
   const workingDay = current.weekday !== "Sat" && current.weekday !== "Sun";
@@ -250,29 +268,32 @@ const pickupScheduleCandidates = () => {
   const schedules: Array<{ pickupDate: string; pickupTime: string; currentDate: string }> = [];
 
   if (workingDay && beforeSameDayCutoff) {
-    pickupTimeCandidates(current).forEach((pickupTime) => schedules.push({ pickupDate: currentDate, pickupTime, currentDate }));
+    pickupTimeCandidates(current, requestedPickupTime).forEach((pickupTime) => schedules.push({ pickupDate: currentDate, pickupTime, currentDate }));
   }
 
   // Try the next working day as a fallback. This also handles weekends and
   // orders placed after Delhivery's same-day cutoff.
   const nextWorkingDate = businessDate(current.year, current.month, current.day, 1);
-  const nextDayTimes = Array.from(new Set([validPickupTime(config().pickupTime), "10:00:00", "14:00:00"]));
+  const nextDayTimes = requestedPickupTime
+    ? [validPickupTime(requestedPickupTime)]
+    : Array.from(new Set([validPickupTime(config().pickupTime), "10:00:00", "14:00:00"]));
   nextDayTimes.forEach((pickupTime) => schedules.push({ pickupDate: nextWorkingDate, pickupTime, currentDate }));
   return schedules;
 };
 
-export const delhiveryPickupSchedule = () => pickupScheduleCandidates()[0];
+export const delhiveryPickupSchedule = (pickupTime?: string) => pickupScheduleCandidates(pickupTime)[0];
 
-export async function createDelhiveryPickupRequest(expectedPackageCount: number): Promise<DelhiveryPickupRequestResult> {
+export async function createDelhiveryPickupRequest(expectedPackageCount: number, pickupLocation?: string, pickupTime?: string): Promise<DelhiveryPickupRequestResult> {
   const current = config();
   if (!isDelhiveryPickupConfigured()) throw delhiveryError("Delhivery pickup automation is not fully configured on the server.");
+  const selectedPickupLocation = configuredPickupLocation(pickupLocation);
   const count = Math.max(1, Math.floor(Number(expectedPackageCount) || 0));
   let lastError: Error | undefined;
-  for (const schedule of pickupScheduleCandidates()) {
+  for (const schedule of pickupScheduleCandidates(pickupTime)) {
     const body = JSON.stringify({
       pickup_time: schedule.pickupTime,
       pickup_date: schedule.pickupDate,
-      pickup_location: current.pickupLocation,
+      pickup_location: selectedPickupLocation,
       expected_package_count: count,
     });
     const response = await fetch(pickupRequestEndpoint, {
@@ -304,13 +325,15 @@ export async function manifestDelhiveryShipment(order: DelhiveryOrder): Promise<
   if (!isDelhiveryConfigured()) throw delhiveryError("Delhivery is not fully configured on the server.");
   if (!current.originPin || !/^\d{6}$/.test(current.originPin)) throw delhiveryError("The Delhivery origin pincode is not configured.");
   const consignee = parseAddress(order);
+  const pickupLocation = configuredPickupLocation(order.delhiveryPickupLocation);
   await getPincodeServiceability(consignee.pincode, current.token, order.paymentMethod);
 
   const items = (order.items || []).filter((item) => Math.max(0, Number(item.quantity) || 0) > 0);
   const quantity = items.reduce((sum, item) => sum + Math.max(0, Math.floor(Number(item.quantity) || 0)), 0) || 1;
   const hsnCodes = items.map((item) => String(item.hsnCode || current.defaultHsnCode).trim()).filter(Boolean);
   if (!hsnCodes.length) throw delhiveryError("An HSN code is required before creating a Delhivery shipment.");
-  const weight = Math.max(100, Math.round(current.defaultWeightGrams * quantity));
+  const savedWeight = Number(order.delhiveryWeightGrams);
+  const weight = Math.max(500, Math.round(Number.isFinite(savedWeight) && savedWeight > 0 ? savedWeight : current.defaultWeightGrams * quantity));
   const description = items.map((item) => `${item.name} x${item.quantity}`).join(", ").slice(0, 256) || "Fanzzy order";
   const payload = {
     shipments: [{
@@ -340,7 +363,7 @@ export async function manifestDelhiveryShipment(order: DelhiveryOrder): Promise<
       return_pin: current.originPin,
       return_country: "India",
     }],
-    pickup_location: { name: current.pickupLocation },
+    pickup_location: { name: pickupLocation },
     client: current.client,
     fragile_shipment: true,
   };

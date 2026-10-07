@@ -560,7 +560,9 @@ type OrderRecord = {
   inventoryAdjusted?: boolean;
   delhiveryAwb?: string;
   delhiveryTrackingUrl?: string;
-  delhiveryShipmentStatus?: "pending" | "created" | "failed" | "skipped";
+  delhiveryShipmentStatus?: "awaiting_weight" | "pending" | "created" | "failed" | "skipped";
+  delhiveryWeightGrams?: number;
+  delhiveryPickupLocation?: string;
   delhiveryShipmentError?: string;
   delhiveryShipmentCreatedAt?: string;
   delhiveryPickupRequestStatus?: "pending" | "created" | "covered" | "failed" | "skipped";
@@ -667,7 +669,7 @@ const normalizeOrderRecordForDisplay = (value: unknown): OrderRecord | null => {
         ? "cod"
         : "online";
   const fulfillmentMethod = source.fulfillmentMethod === "pickup" || Boolean(source.pickupHubId || source.pickupHubName || source.pickupHubPlace) ? "pickup" : "delivery";
-  const shipmentStatus = source.delhiveryShipmentStatus === "created" || source.delhiveryShipmentStatus === "failed" || source.delhiveryShipmentStatus === "skipped" ? source.delhiveryShipmentStatus : source.delhiveryShipmentStatus === "pending" ? "pending" : undefined;
+  const shipmentStatus = source.delhiveryShipmentStatus === "created" || source.delhiveryShipmentStatus === "failed" || source.delhiveryShipmentStatus === "skipped" || source.delhiveryShipmentStatus === "awaiting_weight" ? source.delhiveryShipmentStatus : source.delhiveryShipmentStatus === "pending" ? "pending" : undefined;
   const pickupRequestError = safeOrderString(source.delhiveryPickupRequestError) || undefined;
   const pickupStatus = source.delhiveryPickupRequestStatus === "created" || source.delhiveryPickupRequestStatus === "covered" || source.delhiveryPickupRequestStatus === "failed" || source.delhiveryPickupRequestStatus === "skipped" ? source.delhiveryPickupRequestStatus : source.delhiveryPickupRequestStatus === "pending" ? (pickupRequestError ? "failed" : "pending") : undefined;
   const delhiveryScans = Array.isArray(source.delhiveryScans)
@@ -713,6 +715,8 @@ const normalizeOrderRecordForDisplay = (value: unknown): OrderRecord | null => {
     delhiveryAwb: safeOrderString(source.delhiveryAwb) || undefined,
     delhiveryTrackingUrl: safeOrderString(source.delhiveryTrackingUrl) || undefined,
     delhiveryShipmentStatus: shipmentStatus,
+    delhiveryWeightGrams: safeOrderNumber(source.delhiveryWeightGrams) || undefined,
+    delhiveryPickupLocation: safeOrderString(source.delhiveryPickupLocation) || undefined,
     delhiveryShipmentError: safeOrderString(source.delhiveryShipmentError) || undefined,
     delhiveryShipmentCreatedAt: safeOrderString(source.delhiveryShipmentCreatedAt) || undefined,
     delhiveryPickupRequestStatus: pickupStatus,
@@ -5964,6 +5968,30 @@ function OrdersWorkspace({
   const [ordersSyncError, setOrdersSyncError] = useState("");
   const [catalogProducts, setCatalogProducts] = useState<Array<{ id: string; name: string; sku: string; category: string; stock: number; price: number; cost: number; status: string; image: string; variants: ProductVariant[] }>>([]);
   const [orderItemDraft, setOrderItemDraft] = useState({ productId: "", variantName: "", quantity: "1", price: "" });
+  const [shipmentWeight, setShipmentWeight] = useState("");
+  const [shipmentWeightError, setShipmentWeightError] = useState("");
+  const [shipmentCreating, setShipmentCreating] = useState(false);
+  const [delhiveryPickupLocations, setDelhiveryPickupLocations] = useState<string[]>([]);
+  const [shipmentPickupLocation, setShipmentPickupLocation] = useState("");
+  const [shipmentPickupTime, setShipmentPickupTime] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    void adminApiFetch("/admin/delhivery/config", { cache: "no-store" })
+      .then(async (response) => {
+        const result = await response.json() as { pickupLocations?: string[]; defaultPickupTime?: string; error?: string };
+        if (!response.ok) throw new Error(result.error || "Could not load Delhivery pickup settings");
+        if (!active) return;
+        const locations = Array.isArray(result.pickupLocations) ? result.pickupLocations.filter(Boolean) : [];
+        setDelhiveryPickupLocations(locations);
+        setShipmentPickupLocation((current) => current || locations[0] || "");
+        setShipmentPickupTime((current) => current || result.defaultPickupTime || "11:00");
+      })
+      .catch((error) => {
+        if (active) setShipmentWeightError(error instanceof Error ? error.message : "Could not load Delhivery pickup settings");
+      });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     let syncInFlight = false;
@@ -6100,8 +6128,8 @@ function OrdersWorkspace({
     if (!selectedOrder) return;
     const refreshed = orders.find((order) => order.id === selectedOrder.id);
     if (!refreshed) return;
-    const selectedTracking = [selectedOrder.delhiveryLiveStatus, selectedOrder.delhiveryLastTrackedAt].join("|");
-    const refreshedTracking = [refreshed.delhiveryLiveStatus, refreshed.delhiveryLastTrackedAt].join("|");
+    const selectedTracking = [selectedOrder.delhiveryAwb, selectedOrder.delhiveryShipmentStatus, selectedOrder.delhiveryWeightGrams, selectedOrder.delhiveryLiveStatus, selectedOrder.delhiveryLastTrackedAt].join("|");
+    const refreshedTracking = [refreshed.delhiveryAwb, refreshed.delhiveryShipmentStatus, refreshed.delhiveryWeightGrams, refreshed.delhiveryLiveStatus, refreshed.delhiveryLastTrackedAt].join("|");
     if (selectedTracking !== refreshedTracking) setSelectedOrder(refreshed);
   }, [orders, selectedOrder?.id]);
 
@@ -6165,6 +6193,10 @@ function OrdersWorkspace({
   const openOrder = (order: OrderRecord) => {
     setSelectedOrder(order);
     setPhone(typeof order.phone === "string" ? order.phone : "");
+    setShipmentWeight(order.delhiveryWeightGrams ? String(order.delhiveryWeightGrams) : "");
+    setShipmentPickupLocation(order.delhiveryPickupLocation || delhiveryPickupLocations[0] || "");
+    setShipmentPickupTime(order.delhiveryPickupRequestTime?.slice(0, 5) || shipmentPickupTime || "11:00");
+    setShipmentWeightError("");
     setOrderItemDraft({ productId: "", variantName: "", quantity: "1", price: "" });
   };
   const getOrderedProduct = (item: NonNullable<OrderRecord["items"]>[number]) => {
@@ -6221,6 +6253,42 @@ function OrdersWorkspace({
       onNotify(`Delivery details restored for ${updated.id}`);
     } catch (error) {
       onNotify(error instanceof Error ? error.message : "Could not restore the payment details");
+    }
+  };
+  const createDelhiveryShipment = async () => {
+    if (!selectedOrder || shipmentCreating) return;
+    const weightGrams = Math.round(Number(shipmentWeight));
+    if (!Number.isFinite(weightGrams) || weightGrams < 500 || weightGrams > 30_000) {
+      setShipmentWeightError("Enter a packed parcel weight between 500 and 30,000 grams.");
+      return;
+    }
+    if (!delhiveryPickupLocations.includes(shipmentPickupLocation)) {
+      setShipmentWeightError("Select the configured Delhivery pickup location.");
+      return;
+    }
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(shipmentPickupTime)) {
+      setShipmentWeightError("Enter a valid Delhivery pickup time.");
+      return;
+    }
+    setShipmentWeightError("");
+    setShipmentCreating(true);
+    try {
+      const response = await adminApiFetch("/admin/delhivery/create", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ orderId: selectedOrder.id, weightGrams, pickupLocation: shipmentPickupLocation, pickupTime: shipmentPickupTime }),
+      });
+      const result = await response.json() as { order?: OrderRecord; error?: string };
+      if (!response.ok || !result.order) throw new Error(result.error || "Could not create the Delhivery shipment");
+      const normalized = normalizeOrderRecordForDisplay(result.order);
+      if (!normalized) throw new Error("The updated shipment could not be read");
+      setSelectedOrder(normalized);
+      setOrders((current) => current.map((order) => order.id === normalized.id ? normalized : order));
+      onNotify(normalized.delhiveryAwb ? `Delhivery AWB ${normalized.delhiveryAwb} created` : normalized.delhiveryShipmentError || "Delhivery shipment creation needs attention");
+    } catch (error) {
+      setShipmentWeightError(error instanceof Error ? error.message : "Could not create the Delhivery shipment");
+    } finally {
+      setShipmentCreating(false);
     }
   };
   const downloadBill = async (order: OrderRecord) => {
@@ -6444,7 +6512,37 @@ function OrdersWorkspace({
                   <span>{selectedOrder.razorpayPaymentId || selectedOrder.razorpayOrderId}</span>
                 </div>}
               </section>
-              {selectedOrder.fulfillmentMethod !== "pickup" && <section className="admin-customer-details admin-delhivery-details"><p className="eyebrow">DELHIVERY SHIPMENT</p>{selectedOrder.delhiveryAwb ? <dl><div><dt>AWB</dt><dd>{selectedOrder.delhiveryAwb}</dd></div><div><dt>Live status</dt><dd>{selectedOrder.delhiveryLiveStatus || (selectedOrder.delhiveryShipmentStatus === "created" ? "Manifested" : "Available")}</dd></div><div><dt>Pickup request</dt><dd>{selectedOrder.delhiveryPickupRequestStatus === "created" ? `Scheduled${selectedOrder.delhiveryPickupRequestId ? ` · ${selectedOrder.delhiveryPickupRequestId}` : ""}` : selectedOrder.delhiveryPickupRequestStatus === "covered" ? "Covered by an existing pickup" : selectedOrder.delhiveryPickupRequestStatus === "pending" ? "Request in progress" : selectedOrder.delhiveryPickupRequestStatus === "failed" ? "Pickup request failed" : "Waiting to schedule"}{selectedOrder.delhiveryPickupRequestDate && <small>{selectedOrder.delhiveryPickupRequestDate}{selectedOrder.delhiveryPickupRequestTime ? ` · ${selectedOrder.delhiveryPickupRequestTime}` : ""}</small>}{selectedOrder.delhiveryPickupRequestError && <small>{selectedOrder.delhiveryPickupRequestError}</small>}</dd></div>{selectedOrder.delhiveryLiveLocation && <div><dt>Location</dt><dd>{selectedOrder.delhiveryLiveLocation}</dd></div>}{selectedOrder.delhiveryLastTrackedAt && <div><dt>Last checked</dt><dd>{formatOrderTime(selectedOrder.delhiveryLastTrackedAt)}</dd></div>}</dl> : <p className="product-detail-meta">{selectedOrder.delhiveryShipmentStatus === "pending" ? "Shipment creation is in progress." : selectedOrder.delhiveryShipmentStatus === "failed" ? "Shipment creation needs attention before tracking can be shown." : "Shipment will be created automatically after payment confirmation."}</p>}{selectedOrder.delhiveryAwb && <a className="module-secondary admin-delhivery-link" href={selectedOrder.delhiveryTrackingUrl || `https://www.delhivery.com/tracking?uniqueIdentifier=${encodeURIComponent(selectedOrder.delhiveryAwb)}`} target="_blank" rel="noreferrer">Open Delhivery tracking ↗</a>}</section>}
+              {selectedOrder.fulfillmentMethod !== "pickup" && <section className="admin-customer-details admin-delhivery-details">
+                <p className="eyebrow">DELHIVERY SHIPMENT</p>
+                {selectedOrder.delhiveryAwb ? <>
+                  <dl>
+                    <div><dt>AWB</dt><dd>{selectedOrder.delhiveryAwb}</dd></div>
+                    <div><dt>Packed weight</dt><dd>{selectedOrder.delhiveryWeightGrams ? `${selectedOrder.delhiveryWeightGrams.toLocaleString("en-IN")} g` : "Default weight used"}</dd></div>
+                    <div><dt>Pickup location</dt><dd>{selectedOrder.delhiveryPickupLocation || "Configured Delhivery warehouse"}</dd></div>
+                    <div><dt>Live status</dt><dd>{selectedOrder.delhiveryLiveStatus || (selectedOrder.delhiveryShipmentStatus === "created" ? "Manifested" : "Available")}</dd></div>
+                    <div><dt>Pickup request</dt><dd>{selectedOrder.delhiveryPickupRequestStatus === "created" ? `Scheduled${selectedOrder.delhiveryPickupRequestId ? ` · ${selectedOrder.delhiveryPickupRequestId}` : ""}` : selectedOrder.delhiveryPickupRequestStatus === "covered" ? "Covered by an existing pickup" : selectedOrder.delhiveryPickupRequestStatus === "pending" ? "Request in progress" : selectedOrder.delhiveryPickupRequestStatus === "failed" ? "Pickup request failed" : "Waiting to schedule"}{selectedOrder.delhiveryPickupRequestDate && <small>{selectedOrder.delhiveryPickupRequestDate}{selectedOrder.delhiveryPickupRequestTime ? ` · ${selectedOrder.delhiveryPickupRequestTime}` : ""}</small>}{selectedOrder.delhiveryPickupRequestError && <small>{selectedOrder.delhiveryPickupRequestError}</small>}</dd></div>
+                    {selectedOrder.delhiveryLiveLocation && <div><dt>Location</dt><dd>{selectedOrder.delhiveryLiveLocation}</dd></div>}
+                    {selectedOrder.delhiveryLastTrackedAt && <div><dt>Last checked</dt><dd>{formatOrderTime(selectedOrder.delhiveryLastTrackedAt)}</dd></div>}
+                  </dl>
+                  <a className="module-secondary admin-delhivery-link" href={selectedOrder.delhiveryTrackingUrl || `https://www.delhivery.com/tracking?uniqueIdentifier=${encodeURIComponent(selectedOrder.delhiveryAwb)}`} target="_blank" rel="noreferrer">Open Delhivery tracking ↗</a>
+                </> : <>
+                  <p className="product-detail-meta">{selectedOrder.delhiveryShipmentStatus === "pending" ? "Shipment creation is in progress." : selectedOrder.delhiveryShipmentStatus === "failed" ? selectedOrder.delhiveryShipmentError || "Shipment creation needs attention before tracking can be shown." : "Pack the complete order, weigh the parcel, then create its Delhivery shipment."}</p>
+                  <div className="admin-delhivery-weight-form">
+                    <label htmlFor="delhivery-packed-weight">Packed parcel weight <span>grams · allowed range 500–30,000</span></label>
+                    <input id="delhivery-packed-weight" type="number" min="500" max="30000" step="1" inputMode="numeric" value={shipmentWeight} onChange={(event) => { setShipmentWeight(event.target.value); if (shipmentWeightError) setShipmentWeightError(""); }} placeholder="e.g. 650" aria-describedby="delhivery-weight-range delhivery-weight-error" aria-invalid={Boolean(shipmentWeightError)} disabled={shipmentCreating || selectedOrder.delhiveryShipmentStatus === "pending"} />
+                    <label htmlFor="delhivery-pickup-location">Delhivery pickup location <span>Existing registered warehouse</span></label>
+                    <select id="delhivery-pickup-location" value={shipmentPickupLocation} onChange={(event) => { setShipmentPickupLocation(event.target.value); if (shipmentWeightError) setShipmentWeightError(""); }} disabled={shipmentCreating || selectedOrder.delhiveryShipmentStatus === "pending" || !delhiveryPickupLocations.length}>
+                      {!delhiveryPickupLocations.length && <option value="">No configured pickup location</option>}
+                      {delhiveryPickupLocations.map((location) => <option key={location} value={location}>{location}</option>)}
+                    </select>
+                    <label htmlFor="delhivery-pickup-time">Pickup time <span>India time</span></label>
+                    <input id="delhivery-pickup-time" type="time" step="60" value={shipmentPickupTime} onChange={(event) => { setShipmentPickupTime(event.target.value); if (shipmentWeightError) setShipmentWeightError(""); }} disabled={shipmentCreating || selectedOrder.delhiveryShipmentStatus === "pending"} />
+                    <button className="module-primary admin-delhivery-create-button" type="button" onClick={() => void createDelhiveryShipment()} disabled={shipmentCreating || selectedOrder.delhiveryShipmentStatus === "pending" || !delhiveryPickupLocations.length}>{shipmentCreating || selectedOrder.delhiveryShipmentStatus === "pending" ? "Creating shipment…" : "Create Delhivery shipment"}</button>
+                    <small id="delhivery-weight-range" className="admin-delhivery-weight-range">Use the total packed weight, including the product and packaging.</small>
+                    <p id="delhivery-weight-error" className="admin-delhivery-weight-error" role="alert">{shipmentWeightError}</p>
+                  </div>
+                </>}
+              </section>}
               {selectedOrder.fulfillmentMethod !== "pickup" && selectedOrder.delhiveryAwb && (() => {
                 const liveStatus = selectedOrder.delhiveryLiveStatus || (selectedOrder.delhiveryShipmentStatus === "created" ? "Ready to ship" : "Order received");
                 const currentStage = delhiveryTimelineStageIndex(liveStatus);

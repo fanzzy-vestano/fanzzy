@@ -1,5 +1,6 @@
 import { createHash, randomBytes, scrypt as nodeScrypt, timingSafeEqual, createCipheriv } from "node:crypto";
 import { promisify } from "node:util";
+import { delhiveryTrackingUrl, trackDelhiveryShipment } from "./delhivery";
 import { allocateProRata, calculateCommission, groupOrderItemsByVendor, resolveCommissionRule, slugifyVendorName, type CommissionRule, type VendorAccountStatus, type VendorOrderStatus, type VendorProductStatus } from "./vendor-marketplace";
 
 const scrypt = promisify(nodeScrypt);
@@ -89,6 +90,20 @@ async function readStoreSettingMap<T = unknown>(key: string) {
     // Ignore malformed optional metadata and treat it as empty.
   }
   return {} as Record<string, T>;
+}
+
+async function readStoreSettingArray<T = unknown>(key: string) {
+  const rows = await rest<Array<{ value?: string }>>(
+    "store_settings",
+    `key=eq.${encodeURIComponent(key)}&select=value`,
+    { privileged: true },
+  );
+  try {
+    const parsed = JSON.parse(rows[0]?.value || "[]");
+    return Array.isArray(parsed) ? parsed as T[] : [];
+  } catch {
+    return [] as T[];
+  }
 }
 
 async function updateStoreSettingMap(key: string, sku: string, value: unknown) {
@@ -641,6 +656,82 @@ export async function getVendorOrders(vendorId: string) {
     `vendor_id=eq.${encodeURIComponent(vendorId)}&select=*&order=created_at.desc`,
     { privileged: true },
   );
+}
+
+type MainOrderTrackingRecord = {
+  id?: string;
+  date?: string;
+  createdAt?: string;
+  fulfillmentMethod?: "delivery" | "pickup";
+  pickupHubName?: string;
+  pickupHubPlace?: string;
+  delhiveryAwb?: string;
+  delhiveryTrackingUrl?: string;
+  delhiveryShipmentStatus?: string;
+  delhiveryShipmentError?: string;
+  delhiveryShipmentCreatedAt?: string;
+  delhiveryPickupRequestStatus?: string;
+  delhiveryPickupRequestId?: string;
+  delhiveryPickupRequestDate?: string;
+  delhiveryPickupRequestTime?: string;
+  delhiveryLiveStatus?: string;
+  delhiveryLiveStatusType?: string;
+  delhiveryLiveStatusDate?: string;
+  delhiveryLiveLocation?: string;
+  delhiveryLastTrackedAt?: string;
+  delhiveryScans?: Array<{ status: string; date?: string; location?: string; instructions?: string }>;
+};
+
+export async function getVendorOrderDetails(vendorId: string, orderId: string) {
+  const orders = await rest<Array<Record<string, unknown>>>(
+    "vendor_orders",
+    `id=eq.${encodeURIComponent(orderId)}&vendor_id=eq.${encodeURIComponent(vendorId)}&select=*&limit=1`,
+    { privileged: true },
+  );
+  const order = orders[0];
+  if (!order) throw new VendorDataError("Order not found for this vendor.", 404);
+
+  const items = await rest<Array<Record<string, unknown>>>(
+    "vendor_order_items",
+    `vendor_order_id=eq.${encodeURIComponent(orderId)}&select=*&order=created_at.asc`,
+    { privileged: true },
+  );
+  const mainOrders = await readStoreSettingArray<MainOrderTrackingRecord>("orders");
+  const mainOrder = mainOrders.find((candidate) => candidate.id === order.main_order_id);
+  let liveTracking: Awaited<ReturnType<typeof trackDelhiveryShipment>> | undefined;
+  if (mainOrder?.delhiveryAwb) {
+    try {
+      liveTracking = await trackDelhiveryShipment(mainOrder.delhiveryAwb, mainOrder.id);
+    } catch {
+      // The vendor can still see the last saved courier state during an outage.
+    }
+  }
+
+  const waybill = mainOrder?.delhiveryAwb || String(order.tracking_number || "");
+  return {
+    order,
+    items,
+    tracking: {
+      fulfillmentMethod: mainOrder?.fulfillmentMethod || "delivery",
+      pickupHubName: mainOrder?.pickupHubName,
+      pickupHubPlace: mainOrder?.pickupHubPlace,
+      waybill: waybill || undefined,
+      trackingUrl: mainOrder?.delhiveryTrackingUrl || String(order.tracking_url || "") || (waybill ? delhiveryTrackingUrl(waybill) : undefined),
+      shipmentStatus: mainOrder?.delhiveryShipmentStatus,
+      shipmentError: mainOrder?.delhiveryShipmentError,
+      shipmentCreatedAt: mainOrder?.delhiveryShipmentCreatedAt || mainOrder?.createdAt || mainOrder?.date,
+      pickupRequestStatus: mainOrder?.delhiveryPickupRequestStatus,
+      pickupRequestId: mainOrder?.delhiveryPickupRequestId,
+      pickupRequestDate: mainOrder?.delhiveryPickupRequestDate,
+      pickupRequestTime: mainOrder?.delhiveryPickupRequestTime,
+      liveStatus: liveTracking?.status || mainOrder?.delhiveryLiveStatus,
+      liveStatusType: liveTracking?.statusType || mainOrder?.delhiveryLiveStatusType,
+      liveStatusDate: liveTracking?.statusDate || mainOrder?.delhiveryLiveStatusDate,
+      liveLocation: liveTracking?.location || mainOrder?.delhiveryLiveLocation,
+      lastTrackedAt: liveTracking ? new Date().toISOString() : mainOrder?.delhiveryLastTrackedAt,
+      scans: liveTracking?.scans?.length ? liveTracking.scans : mainOrder?.delhiveryScans || [],
+    },
+  };
 }
 
 export async function listAllVendorOrders() {

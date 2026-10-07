@@ -50,3 +50,12 @@ test("static Pages build never injects an admin password", async () => {
   assert.match(adminPage, /supabase\.auth\.signInWithPassword/);
   assert.doesNotMatch(adminPage, /fanzzy-github-pages-admin-authenticated/);
 });
+
+test("production worker exposes authenticated Delhivery admin routes", async () => {
+  const worker = await readFile(new URL("../worker/site-api.ts", import.meta.url), "utf8");
+  assert.match(worker, /adminDelhiveryConfigRoute/);
+  assert.match(worker, /adminDelhiveryCreateRoute/);
+  assert.match(worker, /path === "\/admin\/delhivery\/config"\) return adminRoute/);
+  assert.match(worker, /path === "\/admin\/delhivery\/create"\) return adminRoute/);
+  assert.match(worker, /DELHIVERY_PICKUP_LOCATION\?: string/);
+});
