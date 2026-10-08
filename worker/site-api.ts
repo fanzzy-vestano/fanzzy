@@ -10,6 +10,7 @@ import * as vendorCategoriesRoute from "../app/api/vendor/categories/route";
 import * as vendorProductsRoute from "../app/api/vendor/products/route";
 import * as vendorProductRoute from "../app/api/vendor/products/[sku]/route";
 import * as vendorOrdersRoute from "../app/api/vendor/orders/route";
+import * as vendorOrderTrackingRoute from "../app/api/vendor/orders/[id]/tracking/route";
 import * as vendorPayoutsRoute from "../app/api/vendor/payouts/route";
 import * as adminVendorsRoute from "../app/api/admin/vendors/route";
 import * as adminVendorRoute from "../app/api/admin/vendors/[id]/route";
@@ -154,6 +155,9 @@ const routeRequest = async (request: Request, env: WorkerEnv): Promise<Response>
     return methodHandler(request, vendorProductRoute, { params: Promise.resolve({ sku: segments[2] }) });
   }
   if (path === "/vendor/orders") return methodHandler(request, vendorOrdersRoute);
+  if (segments[0] === "vendor" && segments[1] === "orders" && segments[3] === "tracking" && segments.length === 4) {
+    return methodHandler(request, vendorOrderTrackingRoute, { params: Promise.resolve({ id: segments[2] }) });
+  }
   if (path === "/vendor/payouts") return methodHandler(request, vendorPayoutsRoute);
 
   if (path === "/orders/confirm-cod") return methodHandler(request, confirmCodRoute);
