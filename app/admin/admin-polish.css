@@ -4309,7 +4309,7 @@
 /* Keep the financial columns readable while allowing the agent table to scroll on smaller screens. */
 .agent-list-heading,
 .agent-list-row {
-  grid-template-columns: minmax(220px, 1.7fr) minmax(120px, 1fr) 90px minmax(120px, 1fr) minmax(110px, 1fr) minmax(145px, 1.1fr) 68px 68px 68px auto;
+  grid-template-columns: minmax(220px, 1.7fr) minmax(120px, 1fr) 90px minmax(120px, 1fr) minmax(110px, 1fr) minmax(145px, 1.1fr) 68px 68px 68px 78px;
   min-width: 1180px;
 }
 
@@ -4318,8 +4318,12 @@
   text-align: center;
 }
 
-.agent-list-heading > span:not(:first-child):not(:last-child) {
+.agent-list-heading > span:not(:last-child) {
+  align-items: center;
+  display: flex;
+  justify-content: center;
   text-align: center;
+  width: 100%;
 }
 
 .agent-list-row .agent-money {
