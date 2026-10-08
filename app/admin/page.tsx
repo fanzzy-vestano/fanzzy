@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 /* eslint-disable react-hooks/set-state-in-effect, react-hooks/refs */
 
 import { Component, memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ErrorInfo } from "react";
@@ -1221,6 +1221,24 @@ const adminApiUnavailableMessage = (status: number) =>
     ? "Admin login API is unavailable. Run the app locally with pnpm dev."
     : "Could not connect to admin login. Check that the local server is running.";
 
+function AdminWorkspaceLoadingShell() {
+  return <main className="admin-shell admin-workspace-loading" aria-busy="true" aria-label="Loading admin workspace">
+    <aside className="admin-sidebar" aria-hidden="true">
+      <span className="admin-loading-brand" />
+      <div className="admin-loading-navigation">{menu.slice(0, 10).map((item) => <span key={item.label}>{item.label}</span>)}</div>
+    </aside>
+    <section className="admin-main">
+      <header className="admin-topbar"><span className="admin-loading-search" /><span className="admin-loading-account" /></header>
+      <div className="admin-content admin-loading-content" aria-hidden="true">
+        <p className="eyebrow">FANZZY CONTROL ROOM</p>
+        <span className="admin-loading-title" />
+        <div className="admin-loading-metrics">{Array.from({ length: 4 }, (_, index) => <span key={index} />)}</div>
+        <div className="admin-loading-panel"><span /><span /><span /></div>
+      </div>
+    </section>
+  </main>;
+}
+
 function AdminLoginGate() {
   const [checked, setChecked] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
@@ -1413,7 +1431,7 @@ function AdminLoginGate() {
     }
   };
 
-  if (!checked) return <div className="admin-auth-loading">Loading admin workspace…</div>;
+  if (!checked) return <AdminWorkspaceLoadingShell />;
   if (authenticated) return <AdminDashboard />;
   return <main className="admin-auth-page"><section className="admin-auth-card">
     <p className="eyebrow">FANZZY CONTROL ROOM</p>
@@ -5974,6 +5992,69 @@ function OrdersWorkspace({
   const [delhiveryPickupLocations, setDelhiveryPickupLocations] = useState<string[]>([]);
   const [shipmentPickupLocation, setShipmentPickupLocation] = useState("");
   const [shipmentPickupTime, setShipmentPickupTime] = useState("");
+  const catalogSyncInFlight = useRef(false);
+  const catalogSyncRequested = useRef(false);
+
+  const syncCatalogProducts = useCallback(async () => {
+    if (catalogSyncInFlight.current) {
+      catalogSyncRequested.current = true;
+      return;
+    }
+    catalogSyncInFlight.current = true;
+    try {
+      do {
+        catalogSyncRequested.current = false;
+        const [catalog, variantsRemote] = await Promise.all([fetchCatalogProducts(), fetchStoreSetting("productVariants")]);
+        let variantsMap: Record<string, ProductVariant[]> = {};
+        if (variantsRemote.value) {
+          try {
+            const parsed = JSON.parse(variantsRemote.value) as Record<string, ProductVariant[]>;
+            if (parsed && typeof parsed === "object") variantsMap = parsed;
+          } catch {
+            variantsMap = {};
+          }
+        }
+        if (!catalog.error && catalog.data) {
+          const nextCatalogProducts = catalog.data.filter((product) => !isDemoProduct(product)).map((product) => ({
+            id: product.sku.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+            name: product.name,
+            sku: product.sku,
+            category: product.category,
+            stock: product.stock,
+            price: product.price,
+            cost: Number(product.cost) || 0,
+            status: product.status,
+            image: product.image || adminPlaceholderImage,
+            variants: Array.isArray(variantsMap[product.sku]) ? variantsMap[product.sku].map((variant, index) => ({ ...variant, name: variant.name || `Option ${index + 1}` })) : [],
+          }));
+          setCatalogProducts((current) => JSON.stringify(current) === JSON.stringify(nextCatalogProducts) ? current : nextCatalogProducts);
+        }
+      } while (catalogSyncRequested.current);
+    } catch {
+      // Keep the last usable catalog available if a refresh temporarily fails.
+    } finally {
+      catalogSyncInFlight.current = false;
+    }
+  }, []);
+
+  useEffect(() => {
+    const refreshCatalog = () => { void syncCatalogProducts(); };
+    refreshCatalog();
+    const unsubscribeFromProducts = subscribeToCatalogProducts(refreshCatalog);
+    const unsubscribeFromVariants = subscribeToStoreSetting("productVariants", refreshCatalog);
+    window.addEventListener("storage", refreshCatalog);
+    window.addEventListener("fanzzy-products-updated", refreshCatalog);
+    return () => {
+      unsubscribeFromProducts();
+      unsubscribeFromVariants();
+      window.removeEventListener("storage", refreshCatalog);
+      window.removeEventListener("fanzzy-products-updated", refreshCatalog);
+    };
+  }, [syncCatalogProducts]);
+
+  useEffect(() => {
+    if (selectedOrder) void syncCatalogProducts();
+  }, [selectedOrder?.id, syncCatalogProducts]);
 
   useEffect(() => {
     let active = true;
@@ -6033,31 +6114,6 @@ function OrdersWorkspace({
       localOrders.forEach((order) => { if (!merged.has(order.id)) merged.set(order.id, order); });
       const nextOrders = Array.from(merged.values());
       setOrders((current) => orderListsEqual(current, nextOrders) ? current : nextOrders);
-      const [catalog, variantsRemote] = await Promise.all([fetchCatalogProducts(), fetchStoreSetting("productVariants")]);
-      let variantsMap: Record<string, ProductVariant[]> = {};
-      if (variantsRemote.value) {
-        try {
-          const parsed = JSON.parse(variantsRemote.value) as Record<string, ProductVariant[]>;
-          if (parsed && typeof parsed === "object") variantsMap = parsed;
-        } catch {
-          variantsMap = {};
-        }
-      }
-      if (!catalog.error && catalog.data) {
-        const nextCatalogProducts = catalog.data.filter((product) => !isDemoProduct(product)).map((product) => ({
-          id: product.sku.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
-          name: product.name,
-          sku: product.sku,
-          category: product.category,
-          stock: product.stock,
-          price: product.price,
-          cost: Number(product.cost) || 0,
-          status: product.status,
-          image: product.image || adminPlaceholderImage,
-          variants: Array.isArray(variantsMap[product.sku]) ? variantsMap[product.sku].map((variant, index) => ({ ...variant, name: variant.name || `Option ${index + 1}` })) : [],
-        }));
-        setCatalogProducts((current) => JSON.stringify(current) === JSON.stringify(nextCatalogProducts) ? current : nextCatalogProducts);
-      }
       if (!remote.error) setLastOrdersSync((current) => current && Date.now() - current.getTime() < 30_000 ? current : new Date());
       } catch {
         setOrdersSyncError("Live order storage is unavailable. Records may be incomplete.");
@@ -6086,15 +6142,10 @@ function OrdersWorkspace({
     };
   }, []);
 
-  const delhiveryOrderKey = useMemo(() => orders.filter((order) => order.delhiveryAwb).map((order) => `${order.id}::${order.delhiveryAwb}`).sort().join("|"), [orders]);
-
   useEffect(() => {
-    if (!delhiveryOrderKey) return;
+    if (!selectedOrder?.delhiveryAwb || selectedOrder.fulfillmentMethod === "pickup") return;
     let active = true;
-    const orderWaybills = delhiveryOrderKey.split("|").map((value) => {
-      const [id, waybill] = value.split("::");
-      return { id, waybill };
-    });
+    const orderWaybills = [{ id: selectedOrder.id, waybill: selectedOrder.delhiveryAwb }];
     const refreshTracking = async () => {
       const updates = await Promise.all(orderWaybills.map(async ({ id, waybill }) => {
         try {
@@ -6122,7 +6173,7 @@ function OrdersWorkspace({
       active = false;
       window.clearInterval(trackingTimer);
     };
-  }, [delhiveryOrderKey]);
+  }, [selectedOrder?.id, selectedOrder?.delhiveryAwb, selectedOrder?.fulfillmentMethod]);
 
   useEffect(() => {
     if (!selectedOrder) return;

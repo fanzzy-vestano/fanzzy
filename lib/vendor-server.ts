@@ -2,7 +2,6 @@ import { createHash, randomBytes, scrypt as nodeScrypt, timingSafeEqual, createC
 import { promisify } from "node:util";
 import { delhiveryTrackingUrl, trackDelhiveryShipment } from "./delhivery";
 import { allocateProRata, calculateCommission, groupOrderItemsByVendor, resolveCommissionRule, slugifyVendorName, type CommissionRule, type VendorAccountStatus, type VendorOrderStatus, type VendorProductStatus } from "./vendor-marketplace";
-
 const scrypt = promisify(nodeScrypt);
 const VENDOR_COOKIE = "fanzzy_vendor_session";
 const SESSION_MAX_AGE = 60 * 60 * 12;
@@ -90,6 +89,22 @@ async function readStoreSettingMap<T = unknown>(key: string) {
     // Ignore malformed optional metadata and treat it as empty.
   }
   return {} as Record<string, T>;
+}
+
+async function readStoreSettingMaps(keys: string[]) {
+  const rows = await rest<Array<{ key: string; value?: string }>>(
+    "store_settings",
+    `key=in.(${keys.map((key) => encodeURIComponent(key)).join(",")})&select=key,value`,
+    { privileged: true },
+  );
+  return Object.fromEntries(rows.map((row) => {
+    try {
+      const parsed = JSON.parse(row.value || "{}");
+      return [row.key, parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {}];
+    } catch {
+      return [row.key, {}];
+    }
+  })) as Record<string, Record<string, unknown>>;
 }
 
 async function readStoreSettingArray<T = unknown>(key: string) {
@@ -210,14 +225,24 @@ export const createVendorSessionCookie = (token: string) => `${VENDOR_COOKIE}=${
 export async function getVendorSession(request: Request): Promise<VendorSession | null> {
   const token = cookieValue(request);
   if (!token || !hmacSecret()) return null;
-  const rows = await rest<Array<{ vendor_id: string; vendor_user_id: string; session_version: number; expires_at: string }>>("vendor_sessions", `token_hash=eq.${encodeURIComponent(hashToken(token))}&expires_at=gt.${encodeURIComponent(new Date().toISOString())}&select=vendor_id,vendor_user_id,session_version,expires_at`, { privileged: true });
+  const rows = await rest<Array<{
+    vendor_id: string;
+    vendor_user_id: string;
+    session_version: number;
+    expires_at: string;
+    vendor: VendorRecord | null;
+    user: { id: string; email: string } | null;
+  }>>(
+    "vendor_sessions",
+    `token_hash=eq.${encodeURIComponent(hashToken(token))}&expires_at=gt.${encodeURIComponent(new Date().toISOString())}&select=vendor_id,vendor_user_id,session_version,expires_at,vendor:vendors!vendor_sessions_vendor_id_fkey(*),user:vendor_users!vendor_sessions_vendor_user_id_fkey(id,email)`,
+    { privileged: true },
+  );
   const session = rows[0];
   if (!session) return null;
-  const vendors = await rest<VendorRecord[]>("vendors", `id=eq.${encodeURIComponent(session.vendor_id)}&select=*`, { privileged: true });
-  const vendor = vendors[0];
-  const users = await rest<Array<{ id: string; email: string }>>("vendor_users", `id=eq.${encodeURIComponent(session.vendor_user_id)}&select=id,email`, { privileged: true });
-  if (!vendor || !users[0] || vendor.status !== "Active" || vendor.session_version !== session.session_version) return null;
-  return { vendorId: vendor.id, userId: users[0].id, email: users[0].email, vendor };
+  const vendor = session.vendor;
+  const user = session.user;
+  if (!vendor || !user || vendor.status !== "Active" || vendor.session_version !== session.session_version) return null;
+  return { vendorId: vendor.id, userId: user.id, email: user.email, vendor };
 }
 
 export async function audit(actorType: "admin" | "vendor" | "system", actorId: string | undefined, vendorId: string | undefined, action: string, entityType: string, entityId: string | undefined, metadata: Record<string, unknown> = {}) {
@@ -429,18 +454,20 @@ export async function deleteVendorAdmin(vendorId: string, actorId: string) {
 }
 
 export async function getVendorProducts(vendorId: string, privileged = true) {
-  const products = await rest<Array<Record<string, unknown>>>("products", `vendor_id=eq.${encodeURIComponent(vendorId)}&select=*&order=created_at.desc`, { privileged });
-  const [variants, variantTypes, sizes, sizeStocks, barcodes, hsnCodes, billNames, descriptions, pricing] = await Promise.all([
-    readStoreSettingMap<unknown>("product_variants"),
-    readStoreSettingMap<unknown>("product_variant_type"),
-    readStoreSettingMap<unknown>("product_sizes"),
-    readStoreSettingMap<unknown>("product_size_stock"),
-    readStoreSettingMap<unknown>("product_barcodes"),
-    readStoreSettingMap<unknown>("product_hsn_codes"),
-    readStoreSettingMap<unknown>("product_bill_names"),
-    readStoreSettingMap<unknown>("product_descriptions"),
-    readStoreSettingMap<unknown>("product_pricing"),
+  const settingKeys = ["product_variants", "product_variant_type", "product_sizes", "product_size_stock", "product_barcodes", "product_hsn_codes", "product_bill_names", "product_descriptions", "product_pricing"];
+  const [products, settings] = await Promise.all([
+    rest<Array<Record<string, unknown>>>("products", `vendor_id=eq.${encodeURIComponent(vendorId)}&select=*&order=created_at.desc`, { privileged }),
+    readStoreSettingMaps(settingKeys),
   ]);
+  const variants = settings.product_variants || {};
+  const variantTypes = settings.product_variant_type || {};
+  const sizes = settings.product_sizes || {};
+  const sizeStocks = settings.product_size_stock || {};
+  const barcodes = settings.product_barcodes || {};
+  const hsnCodes = settings.product_hsn_codes || {};
+  const billNames = settings.product_bill_names || {};
+  const descriptions = settings.product_descriptions || {};
+  const pricing = settings.product_pricing || {};
   const enrichedProducts: Array<Record<string, unknown>> = products.map((product) => {
     const sku = String(product.sku || "");
     const productPricing = pricing[sku] && typeof pricing[sku] === "object" && !Array.isArray(pricing[sku])
@@ -691,12 +718,14 @@ export async function getVendorOrderDetails(vendorId: string, orderId: string) {
   const order = orders[0];
   if (!order) throw new VendorDataError("Order not found for this vendor.", 404);
 
-  const items = await rest<Array<Record<string, unknown>>>(
-    "vendor_order_items",
-    `vendor_order_id=eq.${encodeURIComponent(orderId)}&select=*&order=created_at.asc`,
-    { privileged: true },
-  );
-  const mainOrders = await readStoreSettingArray<MainOrderTrackingRecord>("orders");
+  const [items, mainOrders] = await Promise.all([
+    rest<Array<Record<string, unknown>>>(
+      "vendor_order_items",
+      `vendor_order_id=eq.${encodeURIComponent(orderId)}&select=*&order=created_at.asc`,
+      { privileged: true },
+    ),
+    readStoreSettingArray<MainOrderTrackingRecord>("orders"),
+  ]);
   const mainOrder = mainOrders.find((candidate) => candidate.id === order.main_order_id);
   let liveTracking: Awaited<ReturnType<typeof trackDelhiveryShipment>> | undefined;
   if (mainOrder?.delhiveryAwb) {
@@ -794,16 +823,17 @@ export async function reviewVendorProduct(vendorId: string, sku: string, decisio
   return productRows[0];
 }
 
-export async function getVendorDashboard(vendorId: string) {
-  const [vendorRows, products, orders, payouts, notifications, offerRows] = await Promise.all([
-    rest<VendorRecord[]>("vendors", `id=eq.${encodeURIComponent(vendorId)}&select=*`, { privileged: true }),
+export async function getVendorDashboard(vendorId: string, authenticatedVendor?: VendorRecord) {
+  const [vendorRows, products, orders, payouts, notifications, offerRows, categoryRecords] = await Promise.all([
+    authenticatedVendor ? Promise.resolve([authenticatedVendor]) : rest<VendorRecord[]>("vendors", `id=eq.${encodeURIComponent(vendorId)}&select=*`, { privileged: true }),
     getVendorProducts(vendorId),
     rest<Array<Record<string, unknown>>>("vendor_orders", `vendor_id=eq.${encodeURIComponent(vendorId)}&select=*&order=created_at.desc`, { privileged: true }),
     rest<Array<Record<string, unknown>>>("vendor_payouts", `vendor_id=eq.${encodeURIComponent(vendorId)}&select=*&order=created_at.desc`, { privileged: true }),
     rest<Array<Record<string, unknown>>>("vendor_notifications", `vendor_id=eq.${encodeURIComponent(vendorId)}&select=id,kind,title,body,read_at,created_at&order=created_at.desc&limit=20`, { privileged: true }),
     rest<Array<{ value?: string }>>("store_settings", "key=eq.promotional_offers&select=value", { privileged: true }).catch(() => []),
+    getVendorCategoryRecords(vendorId),
   ]);
-  const categories = (await getVendorCategoryRecords(vendorId, products)).map((category) => category.name);
+  const categories = categoryRecords.map((category) => category.name);
   let offers: Array<Record<string, unknown>> = [];
   try {
     const parsed = JSON.parse(offerRows[0]?.value || "[]") as unknown;
