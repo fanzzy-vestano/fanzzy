@@ -134,6 +134,7 @@ type AdminPermission =
   | "Hub"
   | "Reports"
   | "Announcement"
+  | "Damaged Products"
   | "Settings"
   | "Vendors"
   | "Suppliers"
@@ -177,6 +178,7 @@ const allAdminPermissions: AdminPermission[] = [
   "Hub",
   "Reports",
   "Announcement",
+  "Damaged Products",
   "Settings",
   "Vendors",
   "Suppliers",
@@ -1201,6 +1203,7 @@ const menu = [
   { label: "Hub", icon: "⌖" },
   { label: "Reports", icon: "▥" },
   { label: "Announcement", icon: "▤" },
+  { label: "Damaged Products", icon: "▧" },
   { label: "Vendors", icon: "♢" },
 ];
 
@@ -2931,6 +2934,7 @@ function ModuleWorkspace({
     return <PurchaseEntryWorkspace onNotify={onNotify} />;
   if (module === "Reports") return <ReportsWorkspace onNotify={onNotify} view={reportView} />;
   if (module === "Announcement") return <AnnouncementPanel onNotify={onNotify} module />;
+  if (module === "Damaged Products") return <DamagedProductsWorkspace onNotify={onNotify} />;
   if (module === "Categories") return <CategoryWorkspace onNotify={onNotify} />;
   if (module === "Orders") return <OrdersWorkspaceBoundary onNotify={onNotify} />;
   if (module === "Refund requests") return <RefundRequestsWorkspace onNotify={onNotify} />;
@@ -3882,6 +3886,315 @@ function ReportsWorkspace({
         {view === "inventory" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Complete inventory movement</strong><span>{report.inventoryRows.length} products</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Product</th><th>SKU</th><th>Category</th><th>Status</th><th>Movement</th><th>Stock</th><th>Units sold</th><th>Unit price</th><th>Stock value</th><th>Cost value</th></tr></thead><tbody>{report.inventoryRows.map((row) => <tr key={row.product.sku}><td>{row.product.name}</td><td>{row.product.sku}</td><td>{row.product.category}</td><td>{row.product.status}</td><td><span className={`report-movement ${row.movement.toLowerCase().replace(/\s+/g, "-")}`}>{row.movement}</span></td><td>{row.product.stock}</td><td>{row.units}</td><td>{formatAdminCurrency(parseReportMoney(row.product.price))}</td><td>{formatAdminCurrency(row.stockValue)}</td><td>{formatAdminCurrency(row.costValue)}</td></tr>)}</tbody></table></div></div>}
          {view === "orders" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Every confirmed order</strong><span>{report.orderRows.length} orders</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Order</th><th>Date</th><th>Customer</th><th>Status</th><th>Payment</th><th>Fulfilment</th><th>Items</th><th>Total</th><th>Phone</th></tr></thead><tbody>{report.orderRows.length ? report.orderRows.map((order) => <tr key={order.id}><td>{order.id}</td><td>{order.date}</td><td>{order.customerName}</td><td><span className={`report-order-status ${order.status.toLowerCase()}`}>{order.status}</span></td><td>{orderPaymentLabel(order)}</td><td>{order.fulfillmentMethod === "pickup" ? `Pickup · ${order.pickupHubName || "Hub"}` : "Delivery"}</td><td>{order.items?.reduce((sum, item) => sum + Math.max(0, Number(item.quantity) || 0), 0) || 0}</td><td>{order.total}</td><td>{order.userPhone || order.phone}</td></tr>) : <tr><td colSpan={9}>No confirmed orders in this period.</td></tr>}</tbody></table></div></div>}
          {view === "damaged" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Every damaged item</strong><span>{report.damagedRows.length} records · {report.damagedUnits} units</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Date</th><th>Product</th><th>SKU</th><th>Category</th><th>Quantity</th><th>Scope</th><th>Reason</th><th>Retail value</th><th>Cost value</th></tr></thead><tbody>{report.damagedRows.length ? report.damagedRows.map((row) => <tr key={row.id}><td>{row.createdAt.slice(0, 10)}</td><td>{row.productName}</td><td>{row.sku}</td><td>{row.category}</td><td>{row.quantity}</td><td>{row.stockScope}</td><td>{row.reason}</td><td>{formatAdminCurrency(row.retailValue)}</td><td>{formatAdminCurrency(row.costValue)}</td></tr>) : <tr><td colSpan={9}>No damaged items in this period.</td></tr>}</tbody></table></div></div>}
+      </section>
+    </section>
+  );
+}
+
+function DamagedProductsWorkspace({ onNotify }: { onNotify: (message: string) => void }) {
+  const [products, setProducts] = useState<AdminProduct[]>(adminProducts);
+  const [productDamages, setProductDamages] = useState<ProductDamageMap>({});
+  const [query, setQuery] = useState("");
+  const [restoringId, setRestoringId] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    const loadProducts = async () => {
+      const [remote, variantsRemote, variantTypeRemote, sizesRemote, sizeStockRemote] = await Promise.all([
+        fetchCatalogProducts(),
+        fetchStoreSetting("productVariants"),
+        fetchStoreSetting("productVariantType"),
+        fetchStoreSetting("productSizes"),
+        fetchStoreSetting("productSizeStock"),
+      ]);
+      if (!active) return;
+      let variantsMap: Record<string, ProductVariant[]> = {};
+      let variantTypeMap: Record<string, ProductVariantType> = {};
+      let sizesMap: Record<string, string[]> = {};
+      let sizeStockMap: Record<string, Record<string, number>> = {};
+      if (variantsRemote.value) {
+        try {
+          const parsed = JSON.parse(variantsRemote.value) as Record<string, ProductVariant[]>;
+          if (parsed && typeof parsed === "object") variantsMap = parsed;
+        } catch {
+          variantsMap = {};
+        }
+      }
+      if (variantTypeRemote.value) {
+        try {
+          const parsed = JSON.parse(variantTypeRemote.value) as Record<string, unknown>;
+          if (parsed && typeof parsed === "object") {
+            variantTypeMap = Object.fromEntries(
+              Object.entries(parsed).filter((entry): entry is [string, ProductVariantType] => entry[1] === "normal" || entry[1] === "size"),
+            );
+          }
+        } catch {
+          variantTypeMap = {};
+        }
+      }
+      if (sizesRemote.value) {
+        try {
+          const parsed = JSON.parse(sizesRemote.value) as Record<string, unknown>;
+          if (parsed && typeof parsed === "object") {
+            sizesMap = Object.fromEntries(
+              Object.entries(parsed).filter((entry): entry is [string, string[]] => Array.isArray(entry[1]) && entry[1].every((size) => typeof size === "string")),
+            );
+          }
+        } catch {
+          sizesMap = {};
+        }
+      }
+      if (sizeStockRemote.value) {
+        try {
+          const parsed = JSON.parse(sizeStockRemote.value) as Record<string, Record<string, number>>;
+          if (parsed && typeof parsed === "object") sizeStockMap = parsed;
+        } catch {
+          sizeStockMap = {};
+        }
+      }
+      if (!remote.error && remote.data !== null) {
+        setProducts(remote.data.filter((product) => !isDemoProduct(product)).map((product) => {
+          const variants = variantsMap[product.sku]?.length ? variantsMap[product.sku] : product.variants || [];
+          const configuredSizeStock = sizeStockMap[product.sku] || {};
+          const sizes = sizesMap[product.sku]?.length
+            ? sizesMap[product.sku]
+            : product.sizes?.length
+              ? product.sizes
+              : Object.keys(configuredSizeStock).length
+                ? Object.keys(configuredSizeStock)
+              : Array.from(new Set(variants.map((variant) => variant.size).filter((size): size is string => Boolean(size))));
+          const sizeStock = Object.keys(configuredSizeStock).length
+            ? configuredSizeStock
+            : Object.fromEntries(variants.filter((variant) => variant.size && variant.stock !== undefined).map((variant) => [variant.size!, variant.stock!])) as Record<string, number>;
+          const variantType = variantTypeMap[product.sku] || product.variantType || (sizes.length ? "size" : "normal");
+          const stockSummary = getReportStockSummary({ stock: product.stock, variantType, sizes, sizeStock, variants });
+          return {
+            name: product.name,
+            sku: product.sku,
+            category: product.category,
+            stock: stockSummary.stock,
+            price: formatAdminCurrency(product.price),
+            cost: formatAdminCurrency(product.cost ?? 0),
+            status: product.status,
+            image: product.image || adminPlaceholderImage,
+            hoverImage: product.hoverImage || product.image || adminPlaceholderImage,
+            sizes,
+            sizeStock,
+            variants,
+            variantType,
+          };
+        }));
+        return;
+      }
+      const stored = window.localStorage.getItem("fanzzy-products");
+      if (!stored) return;
+      try {
+        const parsed = JSON.parse(stored) as Array<Partial<AdminProduct> & { id?: string; price?: string | number; cost?: string | number }>;
+        if (!Array.isArray(parsed)) return;
+        setProducts(parsed.filter((product) => !isDemoProduct(product)).map((product) => ({
+          name: String(product.name || "Untitled product"),
+          sku: String(product.sku || product.id || ""),
+          category: String(product.category || "Uncategorised"),
+          stock: Number(product.stock) || 0,
+          price: typeof product.price === "number" ? formatAdminCurrency(product.price) : String(product.price || "₹0"),
+          cost: typeof product.cost === "number" ? formatAdminCurrency(product.cost) : String(product.cost || "₹0"),
+          status: product.status === "Draft" || product.status === "Low stock" ? product.status : "Published",
+          image: String(product.image || adminPlaceholderImage),
+          hoverImage: String(product.hoverImage || product.image || adminPlaceholderImage),
+          sizes: product.sizes || [],
+          variants: product.variants || [],
+          variantType: product.variantType || (product.sizes?.length ? "size" : "normal"),
+        })));
+      } catch {
+        // Keep the empty state if local catalog cache is malformed.
+      }
+    };
+    void loadProducts().catch(() => undefined);
+    window.addEventListener("fanzzy-products-updated", loadProducts);
+    return () => {
+      active = false;
+      window.removeEventListener("fanzzy-products-updated", loadProducts);
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const readLocalDamages = () => {
+      const stored = window.localStorage.getItem(localProductDamagesKey);
+      if (!stored) return;
+      try {
+        const parsed = JSON.parse(stored) as ProductDamageMap;
+        if (active && parsed && typeof parsed === "object" && !Array.isArray(parsed)) setProductDamages(parsed);
+      } catch {
+        // Ignore malformed local damage history.
+      }
+    };
+    const loadDamages = async () => {
+      const remote = await fetchStoreSetting("productDamages");
+      const stored = remote.value || window.localStorage.getItem(localProductDamagesKey);
+      if (!stored) return;
+      try {
+        const parsed = JSON.parse(stored) as ProductDamageMap;
+        if (active && parsed && typeof parsed === "object" && !Array.isArray(parsed)) setProductDamages(parsed);
+      } catch {
+        readLocalDamages();
+      }
+    };
+    void loadDamages().catch(readLocalDamages);
+    window.addEventListener("fanzzy-product-damages-updated", readLocalDamages);
+    window.addEventListener("storage", readLocalDamages);
+    return () => {
+      active = false;
+      window.removeEventListener("fanzzy-product-damages-updated", readLocalDamages);
+      window.removeEventListener("storage", readLocalDamages);
+    };
+  }, []);
+
+  const damagedRows = useMemo(() => {
+    const productsByKey = new Map<string, AdminProduct>();
+    products.forEach((product) => {
+      productsByKey.set(reportNameKey(product.name), product);
+      productsByKey.set(reportNameKey(product.sku), product);
+    });
+    return Object.values(productDamages)
+      .flat()
+      .map((record) => {
+        const product = (record.sku && productsByKey.get(reportNameKey(record.sku))) || productsByKey.get(reportNameKey(record.productName));
+        const quantity = Math.max(0, Number(record.quantity) || 0);
+        const unitPrice = product ? parseReportMoney(product.price) : 0;
+        const unitCost = product ? parseReportMoney(product.cost) : 0;
+        return {
+          ...record,
+          productName: product?.name || record.productName || record.sku,
+          category: product?.category || "Archived product",
+          currentStock: product ? getReportStockSummary(product).stock : null,
+          quantity,
+          retailValue: unitPrice * quantity,
+          costValue: unitCost * quantity,
+        };
+      })
+      .sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)));
+  }, [productDamages, products]);
+
+  const visibleRows = useMemo(() => {
+    const search = query.trim().toLowerCase();
+    if (!search) return damagedRows;
+    return damagedRows.filter((row) => [row.productName, row.sku, row.category, row.stockScope, row.reason].some((value) => String(value || "").toLowerCase().includes(search)));
+  }, [damagedRows, query]);
+  const totalUnits = damagedRows.reduce((sum, row) => sum + row.quantity, 0);
+  const totalCost = damagedRows.reduce((sum, row) => sum + row.costValue, 0);
+  const totalRetail = damagedRows.reduce((sum, row) => sum + row.retailValue, 0);
+  const restoreDamage = async (record: ProductDamageRecord) => {
+    if (restoringId) return;
+    const product = products.find((item) => item.sku === record.sku);
+    if (!product) {
+      onNotify("This damaged product is no longer in the catalog");
+      return;
+    }
+    setRestoringId(record.id);
+    try {
+      const quantity = Math.max(0, Math.floor(Number(record.quantity) || 0));
+      if (quantity < 1) {
+        onNotify("Damaged quantity is not valid");
+        return;
+      }
+      const scope = String(record.stockScope || "Product stock").trim().toLowerCase();
+      const variants = (product.variants || []).map((variant) => ({ ...variant }));
+      const sizeStock = { ...(product.sizeStock || {}) };
+      let restoredToScopedStock = false;
+      if (variants.length) {
+        const variantIndex = variants.findIndex((variant, index) => {
+          const label = product.variantType === "size"
+            ? variant.size || variant.name || `Size ${index + 1}`
+            : variant.name || `Option ${index + 1}`;
+          return label.trim().toLowerCase() === scope || `size ${label}`.trim().toLowerCase() === scope;
+        });
+        if (variantIndex >= 0) {
+          const variant = variants[variantIndex];
+          const label = product.variantType === "size" ? variant.size || variant.name || "" : "";
+          variant.stock = Math.max(0, Number(variant.stock) || 0) + quantity;
+          if (label) sizeStock[label] = Math.max(0, Number(sizeStock[label]) || 0) + quantity;
+          restoredToScopedStock = true;
+        }
+      }
+      if (!restoredToScopedStock && product.variantType === "size" && product.sizes?.length) {
+        const size = product.sizes.find((item) => item.trim().toLowerCase() === scope || `size ${item}`.trim().toLowerCase() === scope);
+        if (size) {
+          sizeStock[size] = Math.max(0, Number(sizeStock[size]) || 0) + quantity;
+          restoredToScopedStock = true;
+        }
+      }
+      const liveStock = restoredToScopedStock
+        ? variants.length
+          ? variants.reduce((total, variant) => total + Math.max(0, Number(variant.stock) || 0), 0)
+          : (product.sizes || []).reduce((total, size) => total + Math.max(0, Number(sizeStock[size]) || 0), 0)
+        : Math.max(0, Number(product.stock) || 0) + quantity;
+      const updated: AdminProduct = {
+        ...product,
+        stock: liveStock,
+        sizeStock,
+        variants,
+        status: liveStock > 0 ? "Published" : product.status,
+      };
+      const nextProducts = products.map((item) => item.sku === product.sku ? updated : item);
+      const remainingForProduct = (productDamages[record.sku] || []).filter((item) => item.id !== record.id);
+      const nextDamages: ProductDamageMap = { ...productDamages };
+      if (remainingForProduct.length) nextDamages[record.sku] = remainingForProduct;
+      else delete nextDamages[record.sku];
+      let remoteProductError: Error | null = null;
+      let settingErrors: Array<Error | null | void> = [];
+      try {
+        remoteProductError = await saveCatalogProduct(toCatalogProduct(updated));
+        settingErrors = await Promise.all([
+          saveProductSizes(nextProducts),
+          saveProductSizeStock(nextProducts),
+          saveProductVariants(nextProducts),
+          saveProductVariantTypes(nextProducts),
+          saveStoreSetting("productDamages", JSON.stringify(nextDamages)),
+        ]);
+      } catch (error) {
+        settingErrors = [error instanceof Error ? error : new Error(String(error))];
+      }
+      setProducts(nextProducts);
+      setProductDamages(nextDamages);
+      persistCatalog(nextProducts);
+      persistProductDamages(nextDamages);
+      const remoteError = remoteProductError || settingErrors.find((error): error is Error => error instanceof Error);
+      onNotify(remoteError ? "Damage removed locally; Supabase needs its tables" : `${quantity} unit${quantity === 1 ? "" : "s"} restored to ${product.name}`);
+    } finally {
+      setRestoringId("");
+    }
+  };
+
+  return (
+    <section className="panel module-workspace damaged-products-workspace">
+      <div className="module-workspace-head">
+        <div>
+          <p className="eyebrow">INVENTORY</p>
+          <h2>Damaged products</h2>
+          <p>Review every stock item marked as damaged from the product detail panel.</p>
+        </div>
+        <div className="module-actions">
+          <button className="module-secondary" onClick={() => onNotify("Open Products and choose Add damaged stock from a product")}>Record damage ↗</button>
+        </div>
+      </div>
+      <div className="report-kpi-grid">
+        <div className="report-kpi"><small>Damage records</small><strong>{damagedRows.length}</strong><span>All time</span></div>
+        <div className="report-kpi"><small>Damaged units</small><strong>{totalUnits}</strong><span>Removed from stock</span></div>
+        <div className="report-kpi"><small>Estimated cost</small><strong>{formatAdminCurrency(totalCost)}</strong><span>Based on product cost</span></div>
+        <div className="report-kpi"><small>Retail value</small><strong>{formatAdminCurrency(totalRetail)}</strong><span>Based on selling price</span></div>
+      </div>
+      <section className="report-detail-panel">
+        <div className="report-detail-head">
+          <div><p className="eyebrow">DAMAGE LOG</p><h3>Recorded damaged stock</h3><span>{visibleRows.length} visible records · {totalUnits} total units</span></div>
+          <label className="report-table-filter">Search damaged products<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Product, SKU, reason" /></label>
+        </div>
+        <div className="report-table-wrap">
+          <table className="report-detail-table damaged-products-table">
+            <thead><tr><th>Date</th><th>Product</th><th>SKU</th><th>Category</th><th>Quantity</th><th>Scope</th><th>Reason</th><th>Current stock</th><th>Cost value</th><th>Retail value</th><th>Action</th></tr></thead>
+            <tbody>{visibleRows.length ? visibleRows.map((row) => <tr key={row.id}><td>{row.createdAt.slice(0, 10)}</td><td>{row.productName}</td><td>{row.sku}</td><td>{row.category}</td><td>{row.quantity}</td><td>{row.stockScope}</td><td>{row.reason}</td><td>{row.currentStock ?? "Archived"}</td><td>{formatAdminCurrency(row.costValue)}</td><td>{formatAdminCurrency(row.retailValue)}</td><td><button className="module-secondary damage-restore-button" disabled={restoringId === row.id || row.currentStock === null} onClick={() => void restoreDamage(row)}>{restoringId === row.id ? "Restoring…" : "Remove from damage"}</button></td></tr>) : <tr><td colSpan={11}>{damagedRows.length ? "No damaged products match this search." : "No damaged stock has been recorded yet."}</td></tr>}</tbody>
+          </table>
+        </div>
       </section>
     </section>
   );
