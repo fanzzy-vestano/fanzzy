@@ -20,6 +20,7 @@ import {
   type CatalogCategorySection,
   type ProductVariantType,
 } from "../lib/supabase/catalog";
+import { isGenericLuxuryCategoryName } from "../lib/catalog-categories";
 import { printOrderBill } from "../lib/order-bill";
 import { storefrontImageProps } from "../lib/storefront-images";
 import {
@@ -211,7 +212,7 @@ const categoryImageFallbacks: Record<string, string> = {
 };
 const categoryImageFallback = (name: string, index: number) =>
   categoryImageFallbacks[name.trim().toLowerCase()] || Object.values(categoryImageFallbacks)[index % 4];
-const categoryFilterKey = (name: string) => name.trim().toLowerCase().replace(/\b(luxury|luxurious|premium)\b/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+const categoryFilterKey = (name: string) => name.replace(/\s*·\s*lx\s*$/i, "").trim().toLowerCase().replace(/\b(luxury|luxurious|premium)\b/g, "").replace(/[^a-z0-9]+/g, " ").trim();
 const categoryIdentityKey = (category: Pick<StorefrontCategory, "name" | "section">) => `${categoryFilterKey(category.name) || category.name.trim().toLowerCase()}::${category.section}`;
 const dedupeStorefrontCategories = (categories: StorefrontCategory[]) => {
   const seen = new Set<string>();
@@ -231,10 +232,10 @@ const isLuxuryProductCategory = (category: string) => /\s*·\s*lx\s*$/i.test(cat
 const baseProductCategory = (category: string) => category.replace(/\s*·\s*lx\s*$/i, "").trim();
 const productCatalogSection = (productCategory: string, categories: StorefrontCategory[]) => {
   if (isLuxuryProductCategory(productCategory)) return "luxury" as const;
-  const categoryName = baseProductCategory(productCategory).toLowerCase();
+  const categoryName = categoryFilterKey(productCategory) || baseProductCategory(productCategory).toLowerCase();
   const matchingSections = new Set(
     categories
-      .filter((category) => baseProductCategory(category.name).toLowerCase() === categoryName)
+      .filter((category) => (categoryFilterKey(category.name) || baseProductCategory(category.name).toLowerCase()) === categoryName)
       .map((category) => category.section),
   );
   return matchingSections.size === 1 && matchingSections.has("luxury") ? "luxury" as const : "normal" as const;
@@ -293,7 +294,8 @@ const matchesCatalogCategory = (
   categories: StorefrontCategory[] = [],
 ) => {
   if (section !== "all" && productCatalogSection(productCategory, categories) !== section) return false;
-  return baseProductCategory(productCategory).toLowerCase() === baseProductCategory(selectedCategory).toLowerCase();
+  if (isGenericLuxuryCategoryName(selectedCategory)) return productCatalogSection(productCategory, categories) === "luxury";
+  return (categoryFilterKey(productCategory) || baseProductCategory(productCategory).toLowerCase()) === (categoryFilterKey(selectedCategory) || baseProductCategory(selectedCategory).toLowerCase());
 };
 const persistStorefrontProductCache = (catalog: Product[]) => {
   if (typeof window === "undefined") return;
@@ -1403,11 +1405,30 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    const requestedCategory = new URLSearchParams(window.location.search).get("category")?.trim().toLowerCase();
-    if (!requestedCategory || !categories.length) return;
-    const matchingCategory = categories.find((category) => category.name.trim().toLowerCase() === requestedCategory);
+    const urlParams = new URLSearchParams(window.location.search);
+    const requestedCategory = urlParams.get("category")?.trim().toLowerCase();
+    const requestedSection = urlParams.get("section");
+    if (!categories.length) return;
+    if (!requestedCategory && (requestedSection === "normal" || requestedSection === "luxury")) {
+      setActiveCategory("All pieces");
+      setActiveCategorySection(requestedSection);
+      overlayPageState.current = { ...overlayPageState.current, activeCategory: "All pieces" };
+      return;
+    }
+    if (!requestedCategory) return;
+    if ((requestedSection === "luxury" || !requestedSection) && isGenericLuxuryCategoryName(requestedCategory)) {
+      setActiveCategory("All pieces");
+      setActiveCategorySection("luxury");
+      overlayPageState.current = { ...overlayPageState.current, activeCategory: "All pieces" };
+      return;
+    }
+    const matchingCategory = categories.find((category) =>
+      (category.name.trim().toLowerCase() === requestedCategory || categoryFilterKey(category.name) === categoryFilterKey(requestedCategory))
+      && (requestedSection !== "normal" && requestedSection !== "luxury" || category.section === requestedSection),
+    );
     if (!matchingCategory) return;
     setActiveCategory(matchingCategory.name);
+    setActiveCategorySection(matchingCategory.section);
     overlayPageState.current = { ...overlayPageState.current, activeCategory: matchingCategory.name };
   }, [categories]);
 

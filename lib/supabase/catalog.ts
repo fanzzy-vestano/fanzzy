@@ -1,5 +1,5 @@
 import { supabase } from "./client";
-import { mergeCatalogCategories } from "../catalog-categories";
+import { countProductsByCategoryKey, mergeCatalogCategories } from "../catalog-categories";
 import { prepareStoreImage } from "../store-image-upload";
 
 export type CatalogStatus = "Published" | "Draft" | "Low stock";
@@ -49,11 +49,7 @@ export type CatalogAgent = {
   createdAt?: string;
 };
 
-export const countCatalogProductsByCategory = (products: Array<Pick<CatalogProduct, "category">>) => products.reduce<Record<string, number>>((counts, product) => {
-  const key = product.category.trim().toLowerCase();
-  if (key) counts[key] = (counts[key] || 0) + 1;
-  return counts;
-}, {});
+export const countCatalogProductsByCategory = countProductsByCategoryKey;
 
 // Older category tables do not have the section column. Keep the existing
 // Luxury categories visible until those records are saved with an explicit
