@@ -293,8 +293,8 @@ const matchesCatalogCategory = (
   section: CatalogCategorySection | "all" = "all",
   categories: StorefrontCategory[] = [],
 ) => {
-  if (section !== "all" && productCatalogSection(productCategory, categories) !== section) return false;
   if (isGenericLuxuryCategoryName(selectedCategory)) return productCatalogSection(productCategory, categories) === "luxury";
+  if (section !== "all" && productCatalogSection(productCategory, categories) !== section) return false;
   return (categoryFilterKey(productCategory) || baseProductCategory(productCategory).toLowerCase()) === (categoryFilterKey(selectedCategory) || baseProductCategory(selectedCategory).toLowerCase());
 };
 const persistStorefrontProductCache = (catalog: Product[]) => {
