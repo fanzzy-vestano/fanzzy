@@ -23,6 +23,30 @@ export function mergeCatalogCategories<T extends CategoryRecord>(...sources: T[]
 
 const baseCategory = (name: string) => name.replace(/\s*·\s*lx\s*$/i, "").trim();
 
+const categoryFilterKey = (name: string) =>
+  baseCategory(name)
+    .toLowerCase()
+    .replace(/\b(luxury|luxurious|premium)\b/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+
+export const isGenericLuxuryCategoryName = (name: string) => {
+  const key = baseCategory(name).toLowerCase().replace(/[^a-z0-9]+/g, "");
+  return ["luxury", "luxurious", "luxuary", "luxuaries", "premium"].includes(key);
+};
+
+export const countProductsByCategoryKey = (products: Array<{ category: string }>) => products.reduce<Record<string, number>>((counts, product) => {
+  const rawCategory = product.category.trim();
+  const keys = new Set([
+    rawCategory.toLowerCase(),
+    baseCategory(rawCategory).toLowerCase(),
+    categoryFilterKey(rawCategory),
+  ].filter(Boolean));
+  if (/\s*·\s*lx\s*$/i.test(rawCategory)) keys.add("__luxury__");
+  keys.forEach((key) => { counts[key] = (counts[key] || 0) + 1; });
+  return counts;
+}, {});
+
 /** Build once per category snapshot; each product lookup is then constant-time. */
 export function createProductCategoryResolver(categories: CategoryRecord[]) {
   const sections = new Map<string, Set<string>>();

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mergeCatalogCategories, createProductCategoryResolver } from "../lib/catalog-categories.ts";
+import { mergeCatalogCategories, createProductCategoryResolver, countProductsByCategoryKey, isGenericLuxuryCategoryName } from "../lib/catalog-categories.ts";
 
 test("repeated shared/local category loads cannot multiply records", () => {
   const table = [{ name: "Earrings", section: "normal", pieces: 42, image: "earrings.jpg" }];
@@ -60,4 +60,24 @@ test("category resolution never rescans the category array for each product", ()
   assert.equal(nameReads, categories.length);
   for (let i = 0; i < 30000; i++) assert.equal(resolve("Bracelets L"), "Bracelets L · LX");
   assert.equal(nameReads, categories.length);
+});
+
+test("product counts normalize luxury category labels", () => {
+  const counts = countProductsByCategoryKey([
+    { category: "Luxurious · LX" },
+    { category: "Premium Rings · LX" },
+    { category: "Rings" },
+  ]);
+
+  assert.equal(counts.luxurious, 1);
+  assert.equal(counts[""], undefined);
+  assert.equal(counts.rings, 2);
+  assert.equal(counts.__luxury__, 2);
+});
+
+test("generic luxury collection names can represent the full luxury section", () => {
+  assert.equal(isGenericLuxuryCategoryName("Luxurious"), true);
+  assert.equal(isGenericLuxuryCategoryName("Luxuaries"), true);
+  assert.equal(isGenericLuxuryCategoryName("Luxury"), true);
+  assert.equal(isGenericLuxuryCategoryName("Necklaces L"), false);
 });
