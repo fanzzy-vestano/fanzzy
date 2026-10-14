@@ -41,6 +41,7 @@ import {
   type PromotionOfferStatus,
   type PromotionSelection,
 } from "../../lib/promotional-offers";
+import { parseMoneyValue, returnReasons, summarizeReturnableOrder, type ReturnOrderSummary, type WalkInReturnRecord } from "../../lib/walk-in-returns";
 import "../globals.css";
 import "../brand-polish.css";
 import "./admin.css";
@@ -124,6 +125,7 @@ type AdminPermission =
   | "Categories"
   | "Collections"
    | "Orders"
+   | "Return"
    | "Refund requests"
    | "Customers"
   | "Agents"
@@ -168,6 +170,7 @@ const allAdminPermissions: AdminPermission[] = [
   "Categories",
   "Collections",
   "Orders",
+  "Return",
   "Refund requests",
   "Customers",
   "Agents",
@@ -1065,7 +1068,7 @@ const ProductLibraryRow = memo(function ProductLibraryRow({
       </div>}
       <button className="product-list-main" onClick={() => onAction("open", product)}>
         <span className="module-row-number">{String(index + 1).padStart(2, "0")}</span>
-        <span className="product-row-thumb"><img src={product.image} alt="" /></span>
+        <span className="product-row-thumb">{product.image ? <img src={product.image} alt="" /> : <i aria-hidden="true">✦</i>}</span>
         <span className="product-row-copy">
           <strong>{product.name}</strong>
           <small>{product.stock === 0 ? "Draft" : `${product.stock} in stock`} · {product.category} · SKU {product.sku}</small>
@@ -1193,6 +1196,7 @@ const menu = [
   { label: "Categories", icon: "▦" },
   { label: "Collections", icon: "✧" },
   { label: "Orders", icon: "↗" },
+  { label: "Return", icon: "↩" },
   { label: "Refund requests", icon: "↩" },
   { label: "Customers", icon: "♧" },
   { label: "Agents", icon: "✦" },
@@ -2080,7 +2084,7 @@ function AdminDashboard() {
               {shownProducts.map((product) => (
                 <div className="table-row" key={product.sku}>
                   <div className="table-product">
-                    <img src={product.image} alt="" />
+                    {product.image ? <img src={product.image} alt="" /> : <span className="admin-order-item-placeholder" aria-hidden="true">✦</span>}
                     <span>
                       <strong>{product.name}</strong>
                       <small>{product.sku}</small>
@@ -2848,6 +2852,15 @@ const moduleContent: Record<
     secondary: "Export orders",
     rows: [],
   },
+  Return: {
+    eyebrow: "OPERATIONS",
+    title: "Return",
+    description:
+      "Review return requests, inspect order items, and track customer return status.",
+    primary: "Create return",
+    secondary: "Export returns",
+    rows: [],
+  },
   Customers: {
     eyebrow: "RELATIONSHIPS",
     title: "Customers",
@@ -2937,6 +2950,7 @@ function ModuleWorkspace({
   if (module === "Damaged Products") return <DamagedProductsWorkspace onNotify={onNotify} />;
   if (module === "Categories") return <CategoryWorkspace onNotify={onNotify} />;
   if (module === "Orders") return <OrdersWorkspaceBoundary onNotify={onNotify} />;
+  if (module === "Return") return <WalkInReturnsWorkspace onNotify={onNotify} />;
   if (module === "Refund requests") return <RefundRequestsWorkspace onNotify={onNotify} />;
   if (module === "Homepage") return <HomepageWorkspace onNotify={onNotify} />;
   if (module === "Delivery charge")
@@ -6213,6 +6227,240 @@ function PromotionOffersWorkspace({ onNotify }: { onNotify: (message: string) =>
     </section>
   );
 }
+
+function WalkInReturnsWorkspace({ onNotify }: { onNotify: (message: string) => void }) {
+  const [orderId, setOrderId] = useState("");
+  const [summary, setSummary] = useState<ReturnOrderSummary | null>(null);
+  const [summarySource, setSummarySource] = useState<"remote" | "local" | "">("");
+  const [selectedItemId, setSelectedItemId] = useState("");
+  const [quantity, setQuantity] = useState("1");
+  const [reason, setReason] = useState("");
+  const [description, setDescription] = useState("");
+  const [damaged, setDamaged] = useState(false);
+  const [refundMethod, setRefundMethod] = useState<"Cash" | "UPI">("Cash");
+  const [settlementStatus, setSettlementStatus] = useState<"Pending" | "Completed">("Completed");
+  const [refundReference, setRefundReference] = useState("");
+  const [cashAmount, setCashAmount] = useState("");
+  const [staffMember, setStaffMember] = useState("Admin staff");
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const selectedLine = useMemo(() => summary?.lines.find((line) => line.id === selectedItemId) || null, [selectedItemId, summary]);
+  const refundAmount = selectedLine ? Math.round(selectedLine.unitPrice * Math.max(0, Math.floor(Number(quantity) || 0)) * 100) / 100 : 0;
+  const orderReturns = summary?.returns || [];
+
+  const loadLocalReturnSummary = (lookupOrderId: string): ReturnOrderSummary | null => {
+    try {
+      const rawOrders = JSON.parse(window.localStorage.getItem("fanzzy-orders") || "[]") as unknown[];
+      const localOrder = Array.isArray(rawOrders)
+        ? rawOrders.map(normalizeOrderRecordForDisplay).find((order): order is OrderRecord => Boolean(order && order.id.toLowerCase() === lookupOrderId.toLowerCase()))
+        : null;
+      if (!localOrder) return null;
+      const rawReturns = JSON.parse(window.localStorage.getItem("fanzzy-walk-in-returns") || "[]") as WalkInReturnRecord[];
+      const localReturns = Array.isArray(rawReturns) ? rawReturns : [];
+      return summarizeReturnableOrder(localOrder, localReturns);
+    } catch {
+      return null;
+    }
+  };
+
+  useEffect(() => {
+    if (!selectedLine) return;
+    setQuantity((current) => {
+      const next = Math.min(Math.max(1, Math.floor(Number(current) || 1)), Math.max(1, selectedLine.remainingEligible));
+      return String(next);
+    });
+  }, [selectedLine]);
+
+  useEffect(() => {
+    if (refundMethod === "Cash") {
+      setSettlementStatus("Completed");
+      setCashAmount(refundAmount ? String(refundAmount) : "");
+    } else if (refundMethod === "UPI") {
+      setCashAmount("");
+    }
+  }, [refundAmount, refundMethod]);
+
+  const findOrder = async (event?: React.FormEvent<HTMLFormElement>) => {
+    event?.preventDefault();
+    const normalized = orderId.trim();
+    if (!normalized) {
+      setError("Enter the original order ID.");
+      setSummary(null);
+      return;
+    }
+    setLoading(true);
+    setError("");
+    setMessage("");
+    try {
+      const response = await adminApiFetch(`/admin/returns?orderId=${encodeURIComponent(normalized)}`, { cache: "no-store" });
+      const result = await response.json() as ReturnOrderSummary & { error?: string };
+      const nextSummary = response.ok ? result : loadLocalReturnSummary(normalized);
+      if (!nextSummary) throw new Error(result.error || "Order could not be found.");
+      setSummary(nextSummary);
+      setSummarySource(response.ok ? "remote" : "local");
+      const firstEligible = nextSummary.lines.find((line) => line.remainingEligible > 0);
+      setSelectedItemId(firstEligible?.id || "");
+      setQuantity("1");
+      setReason("");
+      setDescription("");
+      setDamaged(false);
+      setRefundReference("");
+      setMessage(`${nextSummary.order.id} loaded for walk-in return${response.ok ? "" : " from this browser's local order cache"}.`);
+    } catch (loadError) {
+      setSummary(null);
+      setSummarySource("");
+      setSelectedItemId("");
+      setError(loadError instanceof Error ? loadError.message : "Could not load that order.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const submitReturn = async () => {
+    if (!summary || !selectedLine || saving) return;
+    const returnQuantity = Math.floor(Number(quantity));
+    if (!Number.isFinite(returnQuantity) || returnQuantity < 1) return setError("Return quantity must be at least 1.");
+    if (returnQuantity > selectedLine.remainingEligible) return setError("Return quantity cannot exceed the remaining eligible quantity.");
+    if (!reason) return setError("Select a return reason.");
+    if (reason === "Other" && !description.trim()) return setError("Please provide a description for the selected return reason.");
+    if (refundMethod === "UPI" && settlementStatus === "Completed" && !refundReference.trim()) return setError("Enter the UPI transaction reference before marking the refund completed.");
+    if (refundMethod === "Cash" && settlementStatus === "Completed" && parseMoneyValue(cashAmount) < refundAmount) return setError("Cash amount handed back must cover the refund amount.");
+    if (summarySource === "local") return setError("This order is only available in this browser's local cache. Sync it to live order storage before recording a real return.");
+    const confirmMessage = `Confirm ${returnQuantity} item return for ${summary.order.id} and record ${formatAdminCurrency(refundAmount)} ${settlementStatus === "Completed" ? "refund paid" : "refund pending"}?`;
+    if (!window.confirm(confirmMessage)) return;
+    setSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      const response = await adminApiFetch("/admin/returns", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          orderId: summary.order.id,
+          orderItemId: selectedLine.id,
+          quantity: returnQuantity,
+          reason,
+          description,
+          damaged,
+          refundMethod,
+          refundReference,
+          settlementStatus,
+          cashAmount: parseMoneyValue(cashAmount),
+          staffMember,
+          clientRequestId: `walk-in-${summary.order.id}-${selectedLine.id}-${Date.now()}`,
+        }),
+      });
+      const result = await response.json() as { record?: WalkInReturnRecord; summary?: ReturnOrderSummary; error?: string };
+      if (!response.ok || !result.record || !result.summary) throw new Error(result.error || "Could not process the return.");
+      setSummary(result.summary);
+      const nextEligible = result.summary.lines.find((line) => line.remainingEligible > 0);
+      setSelectedItemId(nextEligible?.id || "");
+      setQuantity("1");
+      setReason("");
+      setDescription("");
+      setDamaged(false);
+      setRefundReference("");
+      setMessage(`Return ${result.record.id} recorded. Refund status: ${result.record.refundStatus}.`);
+      onNotify(`Return ${result.record.id} recorded`);
+      window.dispatchEvent(new Event("fanzzy-products-updated"));
+      window.dispatchEvent(new Event("fanzzy-product-damages-updated"));
+      window.dispatchEvent(new Event("fanzzy-orders-updated"));
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : "Could not process the return.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="panel module-workspace walk-in-returns-workspace">
+      <div className="module-workspace-head">
+        <div>
+          <p className="eyebrow">WALK-IN RETURNS</p>
+          <h2>Returns &amp; refunds</h2>
+          <p>Find the original order, select the exact item or variant, and record the customer refund.</p>
+        </div>
+        {summary && <div className="module-summary return-module-summary"><span><i className="status-light" />{summary.lines.filter((line) => line.remainingEligible > 0).length} eligible lines</span><strong>{formatAdminCurrency(summary.returns.reduce((sum, record) => sum + record.refundAmount, 0))}</strong></div>}
+      </div>
+
+      <form className="return-search-panel" onSubmit={(event) => void findOrder(event)}>
+        <label>Original order ID<input value={orderId} onChange={(event) => setOrderId(event.target.value)} placeholder="#FZ-..." autoComplete="off" /></label>
+        <button className="module-primary" type="submit" disabled={loading}>{loading ? "Finding…" : "Find order"}</button>
+      </form>
+
+      {error && <p className="return-alert return-alert-error" role="alert">{error}</p>}
+      {message && <p className="return-alert return-alert-success" role="status">{message}</p>}
+      {loading && <div className="refund-request-empty">Loading order details…</div>}
+
+      {summary && !loading && <>
+        <section className="return-order-card">
+          <div className="return-order-heading">
+            <div><p className="eyebrow">ORIGINAL ORDER</p><h3>{summary.order.id}</h3><span>{summary.order.date || summary.order.createdAt || "Date unavailable"}</span></div>
+            <strong>{summary.order.total || "₹0"}</strong>
+          </div>
+          <dl className="return-order-details">
+            <div><dt>Customer</dt><dd>{summary.order.customerName || "Not provided"}</dd></div>
+            <div><dt>Contact</dt><dd>{summary.order.userPhone || summary.order.phone || summary.order.email || summary.order.userEmail || "Not provided"}</dd></div>
+            <div><dt>Order status</dt><dd>{summary.order.status || "Unknown"}</dd></div>
+            <div><dt>Payment</dt><dd>{summary.order.paymentStatus || "Unknown"} · {summary.order.posPaymentMethod ? `POS ${summary.order.posPaymentMethod}` : summary.order.paymentMethod || "Online"}</dd></div>
+            <div><dt>Discount</dt><dd>{summary.order.coupon ? `${summary.order.coupon} · ${formatAdminCurrency(summary.order.couponDiscount || 0)}` : "No coupon recorded"}</dd></div>
+          </dl>
+        </section>
+
+        <section className="return-products-panel">
+          <div className="report-detail-head">
+            <div><p className="eyebrow">ORDER PRODUCTS</p><h3>Select returned product</h3><span>Returns cannot exceed the remaining eligible quantity.</span></div>
+          </div>
+          <div className="return-line-list">
+            {summary.lines.length ? summary.lines.map((line) => (
+              <button className={`return-line-card${selectedItemId === line.id ? " active" : ""}`} key={line.id} type="button" disabled={line.remainingEligible < 1} onClick={() => { setSelectedItemId(line.id); setQuantity("1"); }}>
+                {line.image ? <img src={line.image} alt="" /> : <span className="admin-order-item-placeholder" aria-hidden="true">✦</span>}
+                <span><strong>{line.productName}</strong><small>{line.sku}{line.variantName ? ` · ${line.variantName}` : ""}{line.size ? ` · Size ${line.size}` : ""}</small>{line.promotionLabel && <small>{line.promotionLabel}</small>}</span>
+                <b>{line.quantity} bought</b>
+                <em>{line.previouslyReturned} returned · {line.remainingEligible} eligible</em>
+                <strong>{formatAdminCurrency(line.lineTotal)}</strong>
+              </button>
+            )) : <p className="refund-request-empty">This order has no saved product lines.</p>}
+          </div>
+        </section>
+
+        {selectedLine && <section className="return-form-panel">
+          <div className="report-detail-head">
+            <div><p className="eyebrow">RETURN DETAILS</p><h3>{selectedLine.productName}</h3><span>{selectedLine.remainingEligible} unit{selectedLine.remainingEligible === 1 ? "" : "s"} still eligible</span></div>
+            <strong>{formatAdminCurrency(refundAmount)}</strong>
+          </div>
+          <div className="return-form-grid">
+            <label>Return quantity<input type="number" min="1" max={selectedLine.remainingEligible} value={quantity} onChange={(event) => setQuantity(event.target.value)} onWheel={(event) => event.currentTarget.blur()} /></label>
+            <label>Return reason<select value={reason} onChange={(event) => { const next = event.target.value; setReason(next); if (next !== "Other") setDescription(""); }}><option value="">Select reason</option>{returnReasons.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
+            {reason && <label className="return-form-wide">Description<textarea value={description} onChange={(event) => setDescription(event.target.value)} placeholder={reason === "Other" ? "Required for Other" : "Optional notes"} /></label>}
+            <label className="return-check"><input type="checkbox" checked={damaged} onChange={(event) => setDamaged(event.target.checked)} /> Product is damaged<span>{damaged ? "Will not be added to sellable stock." : "Will be restocked after confirmation."}</span></label>
+            <label>Refund method<select value={refundMethod} onChange={(event) => setRefundMethod(event.target.value as "Cash" | "UPI")}><option>Cash</option><option>UPI</option></select></label>
+            <label>Refund status<select value={settlementStatus} onChange={(event) => setSettlementStatus(event.target.value as "Pending" | "Completed")} disabled={refundMethod === "Cash"}><option>Pending</option><option>Completed</option></select></label>
+            {refundMethod === "Cash" ? <label>Cash handed back<input value={cashAmount} onChange={(event) => setCashAmount(event.target.value)} placeholder={formatAdminCurrency(refundAmount)} /></label> : <label>UPI reference<input value={refundReference} onChange={(event) => setRefundReference(event.target.value)} placeholder="Transaction reference" /></label>}
+            <label>Staff member<input value={staffMember} onChange={(event) => setStaffMember(event.target.value)} /></label>
+          </div>
+          <div className="return-refund-summary">
+            <span><small>Selected item</small><strong>{selectedLine.productName}</strong></span>
+            <span><small>Quantity</small><strong>{Math.max(0, Math.floor(Number(quantity) || 0))}</strong></span>
+            <span><small>Refund amount</small><strong>{formatAdminCurrency(refundAmount)}</strong></span>
+            <span><small>Inventory</small><strong>{damaged ? "Damaged record only" : "Restock exact item"}</strong></span>
+          </div>
+          <div className="product-detail-actions">
+            <button className="module-primary" type="button" disabled={saving || selectedLine.remainingEligible < 1} onClick={() => void submitReturn()}>{saving ? "Processing…" : "Confirm return & refund"}</button>
+          </div>
+        </section>}
+
+        <section className="return-history-panel">
+          <div className="report-detail-head"><div><p className="eyebrow">RETURN HISTORY</p><h3>Previous returns for this order</h3><span>{orderReturns.length} record{orderReturns.length === 1 ? "" : "s"}</span></div></div>
+          {orderReturns.length ? <div className="return-history-list">{orderReturns.map((record) => <article key={record.id}><span><strong>{record.id}</strong><small>{record.productName}{record.variantName ? ` · ${record.variantName}` : ""}{record.size ? ` · Size ${record.size}` : ""}</small></span><span>{record.quantity} unit{record.quantity === 1 ? "" : "s"}</span><span>{record.reason}</span><span>{record.damaged ? "Damaged" : "Restocked"}</span><strong>{formatAdminCurrency(record.refundAmount)}</strong><i className={`status-pill ${record.refundStatus.toLowerCase().replace(/\s+/g, "-")}`}>{record.refundStatus}</i></article>)}</div> : <p className="refund-request-empty">No returns have been recorded for this order yet.</p>}
+        </section>
+      </>}
+    </section>
+  );
+}
+
 
 function RefundRequestsWorkspace({ onNotify }: { onNotify: (message: string) => void }) {
   const [requests, setRequests] = useState<RefundRequest[]>([]);
