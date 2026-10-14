@@ -214,6 +214,7 @@ const categoryImageFallback = (name: string, index: number) =>
   categoryImageFallbacks[name.trim().toLowerCase()] || Object.values(categoryImageFallbacks)[index % 4];
 const categoryFilterKey = (name: string) => name.replace(/\s*·\s*lx\s*$/i, "").trim().toLowerCase().replace(/\b(luxury|luxurious|premium)\b/g, "").replace(/[^a-z0-9]+/g, " ").trim();
 const categoryIdentityKey = (category: Pick<StorefrontCategory, "name" | "section">) => `${categoryFilterKey(category.name) || category.name.trim().toLowerCase()}::${category.section}`;
+const isLegacyLuxuryCategoryName = (name: string) => /\s+l$/i.test(name.trim());
 const dedupeStorefrontCategories = (categories: StorefrontCategory[]) => {
   const seen = new Set<string>();
   return categories.filter((category) => {
@@ -1593,10 +1594,13 @@ export default function Home() {
     () => categories,
     [categories],
   );
-  const filterCategories = useMemo(() => ({
-    normal: dedupeStorefrontCategories(storefrontCategories.filter((category) => category.section !== "luxury")),
-    luxury: dedupeStorefrontCategories(storefrontCategories.filter((category) => category.section === "luxury")),
-  }), [storefrontCategories]);
+  const filterCategories = useMemo(() => {
+    const luxury = dedupeStorefrontCategories(storefrontCategories.filter((category) => category.section === "luxury"));
+    const luxuryCategoryKeys = new Set(luxury.map((category) => categoryFilterKey(category.name)).filter(Boolean));
+    const normal = dedupeStorefrontCategories(storefrontCategories.filter((category) => category.section !== "luxury"))
+      .filter((category) => !isLegacyLuxuryCategoryName(category.name) || !luxuryCategoryKeys.has(categoryFilterKey(category.name)));
+    return { normal, luxury };
+  }, [storefrontCategories]);
   useEffect(() => {
     if (activeCategory === "All pieces") return;
     const matchingCategory = storefrontCategories.find((category) =>
