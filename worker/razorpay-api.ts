@@ -319,7 +319,7 @@ const verifySignature = async (orderId: string, paymentId: string, signature: st
 };
 
 const verifyPayment = async (request: Request, env: WorkerEnv) => {
-  let body: { razorpayOrderId?: unknown; razorpayPaymentId?: unknown; razorpaySignature?: unknown };
+  let body: { razorpayOrderId?: unknown; razorpayPaymentId?: unknown; razorpaySignature?: unknown; posSale?: unknown; posAmount?: unknown };
   try {
     body = await request.json() as typeof body;
   } catch {
@@ -333,9 +333,14 @@ const verifyPayment = async (request: Request, env: WorkerEnv) => {
 
   try {
     const response = await fetch(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}`, { headers: { Authorization: razorpayAuth(env) } });
-    const payment = await response.json() as { id?: string; order_id?: string; status?: string; notes?: Record<string, unknown>; error?: { description?: string } };
+    const payment = await response.json() as { id?: string; order_id?: string; status?: string; method?: string; amount?: number; notes?: Record<string, unknown>; error?: { description?: string } };
     if (!response.ok || payment.id !== paymentId || payment.order_id !== orderId) {
       return json(request, { error: payment.error?.description || "Razorpay payment could not be confirmed" }, 502);
+    }
+    if (body.posSale === true) {
+      const expectedAmount = Number(body.posAmount);
+      if (payment.status !== "captured" || payment.method !== "upi" || !Number.isInteger(expectedAmount) || Number(payment.amount) !== expectedAmount) return json(request, { error: "Razorpay has not confirmed the exact UPI payment amount" }, 400);
+      return json(request, { verified: true, razorpayOrderId: orderId, razorpayPaymentId: paymentId });
     }
     const inventoryAdjusted = await withInventoryMutationLock(() => finalizeOrderInventory(env, payment));
     return json(request, { verified: true, razorpayOrderId: orderId, razorpayPaymentId: paymentId, inventoryAdjusted });

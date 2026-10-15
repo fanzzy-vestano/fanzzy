@@ -210,9 +210,39 @@ const defaultDeliveryCharge = { enabled: false, amount: 99, freeAboveEnabled: fa
 type PaymentSettings = { online: boolean; cod: boolean; provider: string; codCharge: number };
 const defaultPaymentSettings: PaymentSettings = { online: true, cod: true, provider: "Razorpay", codCharge: 0 };
 const adminRazorpayApiBaseUrl = (process.env.NEXT_PUBLIC_RAZORPAY_API_URL ?? "").replace(/\/$/, "");
-const adminRazorpayApiUrl = (path: "pos-qr") => adminRazorpayApiBaseUrl
+const adminRazorpayApiUrl = (path: "order" | "verify") => adminRazorpayApiBaseUrl
   ? `${adminRazorpayApiBaseUrl}/${path}`
   : `/api/razorpay/${path}`;
+type RazorpayCheckoutResponse = { razorpay_order_id: string; razorpay_payment_id: string; razorpay_signature: string };
+type RazorpayCheckoutOptions = {
+  key: string;
+  amount: number;
+  currency: string;
+  name: string;
+  description: string;
+  order_id: string;
+  prefill: { name: string; contact: string; email?: string };
+  notes: { address: string; fanzzy_order_id: string };
+  theme: { color: string };
+  method: { upi: boolean };
+  handler: (response: RazorpayCheckoutResponse) => void;
+  modal: { ondismiss: () => void };
+};
+type RazorpayCheckout = { open: () => void };
+const loadAdminRazorpayCheckout = () => new Promise<new (options: RazorpayCheckoutOptions) => RazorpayCheckout>((resolve, reject) => {
+  const existing = (window as Window & { Razorpay?: new (options: RazorpayCheckoutOptions) => RazorpayCheckout }).Razorpay;
+  if (existing) return resolve(existing);
+  const script = document.createElement("script");
+  script.src = "https://checkout.razorpay.com/v1/checkout.js";
+  script.async = true;
+  script.onload = () => {
+    const razorpay = (window as Window & { Razorpay?: new (options: RazorpayCheckoutOptions) => RazorpayCheckout }).Razorpay;
+    if (razorpay) resolve(razorpay);
+    else reject(new Error("Razorpay checkout did not load"));
+  };
+  script.onerror = () => reject(new Error("Razorpay checkout could not load"));
+  document.body.appendChild(script);
+});
 type RefundRequestStatus = "Requested" | "Approved" | "Rejected" | "Refunded";
 type RefundRequest = {
   id: string;
@@ -524,21 +554,13 @@ type OrderItem = { name: string; productName?: string; quantity: number; price: 
 type DelhiveryScan = { status: string; date?: string; location?: string; instructions?: string };
 type PosPaymentMethod = "Cash" | "UPI" | "Card";
 type PosQrState = {
-  status: "idle" | "loading" | "ready" | "paid" | "error" | "expired";
-  id?: string;
-  imageUrl?: string;
-  mode?: "native_qr";
+  status: "idle" | "loading" | "ready" | "opening" | "pending" | "paid" | "error" | "cancelled";
+  orderId?: string;
+  keyId?: string;
   amount?: number;
-  closeBy?: number;
   paymentId?: string;
+  signature?: string;
   message?: string;
-};
-
-const formatQrCountdown = (seconds: number) => {
-  const safeSeconds = Math.max(0, Math.floor(seconds));
-  const minutes = Math.floor(safeSeconds / 60);
-  const remainder = safeSeconds % 60;
-  return `${minutes}:${String(remainder).padStart(2, "0")}`;
 };
 type OrderRecord = {
   id: string;
@@ -8526,9 +8548,9 @@ function PosWorkspace({
   const [checkoutBusy, setCheckoutBusy] = useState(false);
   const [lastSale, setLastSale] = useState<OrderRecord | null>(null);
   const [posQr, setPosQr] = useState<PosQrState>({ status: "idle" });
-  const [posQrNow, setPosQrNow] = useState(() => Math.floor(Date.now() / 1000));
   const [posQrRefresh, setPosQrRefresh] = useState(0);
   const posQrRef = useRef<PosQrState>({ status: "idle" });
+  const posOrderIdRef = useRef<string>("");
   const posQrRequestRef = useRef(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const lookupProductRef = useRef<(value: string) => void>(() => undefined);
@@ -8762,7 +8784,7 @@ function PosWorkspace({
   const discount = Math.min(subtotal, Math.max(0, Number(discountValue) || 0));
   const total = Math.max(0, subtotal - discount);
   const qrPaymentFingerprint = cartLines.map(({ selection, quantity }) => `${selection.key}:${quantity}`).sort().join("|");
-  const upiPaymentActive = paymentMethod === "UPI" && (posQr.status === "loading" || posQr.status === "ready" || posQr.status === "paid");
+  const upiPaymentActive = paymentMethod === "UPI" && (posQr.status === "loading" || posQr.status === "ready" || posQr.status === "opening" || posQr.status === "pending" || posQr.status === "paid");
   const upiPaymentConfirmed = paymentMethod === "UPI" && posQr.status === "paid" && Boolean(posQr.paymentId);
   const visibleProducts = useMemo(() => {
     const query = productSearch.trim().toLowerCase();
@@ -8771,114 +8793,52 @@ function PosWorkspace({
 
   useEffect(() => {
     const requestNumber = ++posQrRequestRef.current;
-    const previousQr = posQrRef.current;
-    if (previousQr.id && previousQr.status !== "paid") {
-      void fetch(`${adminRazorpayApiUrl("pos-qr")}?id=${encodeURIComponent(previousQr.id)}`, { method: "DELETE" }).catch(() => undefined);
-    }
     posQrRef.current = { status: "idle" };
-
+    posOrderIdRef.current = "";
     if (paymentMethod !== "UPI" || !qrPaymentFingerprint || total < 1) {
       const idleTimer = window.setTimeout(() => setPosQr({ status: "idle" }), 0);
       return () => window.clearTimeout(idleTimer);
     }
-
     const timer = window.setTimeout(async () => {
       const loadingState: PosQrState = { status: "loading" };
-      posQrRef.current = loadingState;
-      setPosQr(loadingState);
+      posQrRef.current = loadingState; setPosQr(loadingState);
       try {
-        const response = await fetch(adminRazorpayApiUrl("pos-qr"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ amount: Math.round(total * 100), reference: `POS-${Date.now()}` }),
-        });
-        const payload = await response.json() as { id?: string; imageUrl?: string; mode?: "native_qr"; amount?: number; closeBy?: number; error?: string };
-        if (!response.ok || !payload.id || !payload.imageUrl || payload.mode !== "native_qr") throw new Error(payload.error || "Razorpay native UPI QR is unavailable for this account.");
-        if (posQrRequestRef.current !== requestNumber) {
-          void fetch(`${adminRazorpayApiUrl("pos-qr")}?id=${encodeURIComponent(payload.id)}`, { method: "DELETE" }).catch(() => undefined);
-          return;
-        }
-        const readyState: PosQrState = { status: "ready", id: payload.id, imageUrl: payload.imageUrl, mode: payload.mode, amount: payload.amount || Math.round(total * 100), closeBy: payload.closeBy };
-        posQrRef.current = readyState;
-        setPosQr(readyState);
-      } catch (qrError) {
+        const token = globalThis.crypto?.randomUUID?.().replace(/-/g, "").slice(-6).toUpperCase() || String(Date.now()).slice(-6);
+        const fanzzyOrderId = `#FZ-POS-${token}`; posOrderIdRef.current = fanzzyOrderId;
+        const response = await fetch(adminRazorpayApiUrl("order"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ amount: Math.round(total * 100), receipt: `POS-${token}`, fanzzyOrderId }) });
+        const payload = await response.json() as { id?: string; keyId?: string; amount?: number; error?: string };
+        if (!response.ok || !payload.id || !payload.keyId) throw new Error(payload.error || "Razorpay order creation failed.");
         if (posQrRequestRef.current !== requestNumber) return;
-        const rawMessage = qrError instanceof Error ? qrError.message : "Could not create the Razorpay payment QR.";
-        const message = /requested url|not found|not enabled|feature|native upi qr/i.test(rawMessage)
-          ? "Razorpay native UPI QR is not enabled for this merchant account. Enable Razorpay QR Codes before accepting POS UPI payments."
-          : rawMessage;
-        const errorState: PosQrState = { status: "error", message };
-        posQrRef.current = errorState;
-        setPosQr(errorState);
+        const readyState: PosQrState = { status: "ready", orderId: payload.id, keyId: payload.keyId, amount: payload.amount || Math.round(total * 100) };
+        posQrRef.current = readyState; setPosQr(readyState);
+      } catch (paymentError) {
+        if (posQrRequestRef.current !== requestNumber) return;
+        const errorState: PosQrState = { status: "error", message: paymentError instanceof Error ? paymentError.message : "Could not create the Razorpay payment order." };
+        posQrRef.current = errorState; setPosQr(errorState);
       }
     }, 250);
     return () => window.clearTimeout(timer);
   }, [paymentMethod, posQrRefresh, qrPaymentFingerprint, total]);
 
-  useEffect(() => {
-    if (posQr.status !== "ready" || !posQr.id) return;
-    let active = true;
-    let checking = false;
-    const checkPayment = async () => {
-      if (checking) return;
-      if (posQr.closeBy && Math.floor(Date.now() / 1000) >= posQr.closeBy) {
-        const expiredState: PosQrState = { ...posQr, status: "expired", message: "This Razorpay QR expired. Generate a new QR to continue." };
-        posQrRef.current = expiredState;
-        setPosQr(expiredState);
-        return;
-      }
-      checking = true;
-      try {
-        const response = await fetch(`${adminRazorpayApiUrl("pos-qr")}?id=${encodeURIComponent(posQr.id!)}`, { cache: "no-store" });
-        const payload = await response.json() as { paid?: boolean; paymentId?: string; amount?: number; status?: string; error?: string };
-        if (!response.ok) throw new Error(payload.error || "Could not check the UPI payment.");
-        if (!active) return;
-        if (payload.status === "expired" || payload.status === "closed" || payload.status === "cancelled") {
-          const expiredState: PosQrState = { ...posQr, status: "expired", message: "This Razorpay QR is no longer active. Generate a new QR to continue." };
-          posQrRef.current = expiredState;
-          setPosQr(expiredState);
-          return;
-        }
-        if (!payload.paid || !payload.paymentId) return;
-        if (Number(payload.amount) !== Number(posQr.amount)) {
-          const mismatchState: PosQrState = { ...posQr, status: "error", message: "Razorpay reported a payment with a different amount. Do not complete this sale." };
-          posQrRef.current = mismatchState;
-          setPosQr(mismatchState);
-          return;
-        }
-        const paidState: PosQrState = { ...posQr, status: "paid", paymentId: payload.paymentId };
-        posQrRef.current = paidState;
-        setPosQr(paidState);
-        onNotify(`UPI payment received · ${payload.paymentId}`);
-      } catch {
-        // Keep the active QR visible and retry. A transient status check must
-        // never make the cashier generate a second QR for the same sale.
-      } finally {
-        checking = false;
-      }
-    };
-    void checkPayment();
-    const interval = window.setInterval(() => void checkPayment(), 2500);
-    return () => {
-      active = false;
-      window.clearInterval(interval);
-    };
-  }, [onNotify, posQr]);
-
-  useEffect(() => {
-    if (posQr.status !== "ready" || !posQr.closeBy) return;
-    const updateClock = () => setPosQrNow(Math.floor(Date.now() / 1000));
-    updateClock();
-    const interval = window.setInterval(updateClock, 1000);
-    return () => window.clearInterval(interval);
-  }, [posQr.status, posQr.closeBy]);
-
-  useEffect(() => () => {
-    const currentQr = posQrRef.current;
-    if (currentQr.id && currentQr.status !== "paid") {
-      void fetch(`${adminRazorpayApiUrl("pos-qr")}?id=${encodeURIComponent(currentQr.id)}`, { method: "DELETE", keepalive: true }).catch(() => undefined);
-    }
-  }, []);
+  const startUpiCheckout = async () => {
+    const current = posQrRef.current;
+    if ((current.status !== "ready" && current.status !== "cancelled") || !current.orderId || !current.keyId || checkoutBusy) return;
+    const openingState: PosQrState = { ...current, status: "opening" }; posQrRef.current = openingState; setPosQr(openingState);
+    try {
+      const Razorpay = await loadAdminRazorpayCheckout();
+      const checkout = new Razorpay({
+        key: current.keyId, amount: current.amount || Math.round(total * 100), currency: "INR", name: "Fanzzy", description: `Fanzzy POS sale ${posOrderIdRef.current}`, order_id: current.orderId,
+        prefill: { name: customerName.trim() || "Walk-in customer", contact: customerPhone.trim() }, notes: { address: "In-store POS sale", fanzzy_order_id: posOrderIdRef.current }, theme: { color: "#4b1c2b" }, method: { upi: true },
+        handler: (payment) => { void (async () => { try {
+          const response = await fetch(adminRazorpayApiUrl("verify"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ razorpayOrderId: payment.razorpay_order_id, razorpayPaymentId: payment.razorpay_payment_id, razorpaySignature: payment.razorpay_signature, posAmount: current.amount, posSale: true }) });
+          const result = await response.json() as { verified?: boolean; error?: string }; if (!response.ok || !result.verified) throw new Error(result.error || "Payment verification failed.");
+          const paidState: PosQrState = { ...current, status: "paid", paymentId: payment.razorpay_payment_id, signature: payment.razorpay_signature }; posQrRef.current = paidState; setPosQr(paidState); onNotify(`UPI payment received · ${payment.razorpay_payment_id}`);
+        } catch (error) { const failedState: PosQrState = { ...current, status: "error", message: error instanceof Error ? error.message : "Payment could not be verified." }; posQrRef.current = failedState; setPosQr(failedState); setError(failedState.message || "Payment could not be verified."); } })(); },
+        modal: { ondismiss: () => { const cancelledState: PosQrState = { ...current, status: "cancelled", message: "UPI payment was cancelled. Retry when ready." }; posQrRef.current = cancelledState; setPosQr(cancelledState); } },
+      });
+      const pendingState: PosQrState = { ...current, status: "pending" }; posQrRef.current = pendingState; setPosQr(pendingState); checkout.open();
+    } catch (error) { const failedState: PosQrState = { ...current, status: "error", message: error instanceof Error ? error.message : "Could not open Razorpay Checkout." }; posQrRef.current = failedState; setPosQr(failedState); }
+  };
 
   const updateQuantity = (selection: PosCartSelection, delta: number) => {
     if (upiPaymentActive) {
@@ -8983,8 +8943,8 @@ function PosWorkspace({
         paymentStatus: paymentMethod === "Cash" ? "cod_collected" : "paid",
         posPaymentMethod: paymentMethod,
         posSale: true,
+        razorpayOrderId: paymentMethod === "UPI" ? posQr.orderId : undefined,
         razorpayPaymentId: paymentMethod === "UPI" ? posQr.paymentId : undefined,
-        razorpayQrCodeId: paymentMethod === "UPI" ? posQr.id : undefined,
         coupon: discount > 0 ? "POS discount" : undefined,
         couponDiscount: discount,
         inventoryAdjusted: true,
@@ -9064,17 +9024,17 @@ function PosWorkspace({
           <div className="pos-customer-fields"><label>Customer name <input value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="Walk-in customer" /></label><label>Mobile number <input value={customerPhone} onChange={(event) => setCustomerPhone(event.target.value.replace(/\D/g, "").slice(0, 10))} inputMode="numeric" placeholder="Optional" /></label></div>
           <div className="pos-payment-section"><span>Payment method</span><div>{(["Cash", "UPI", "Card"] as PosPaymentMethod[]).map((method) => <button type="button" key={method} className={paymentMethod === method ? "active" : ""} onClick={() => choosePaymentMethod(method)}>{method}</button>)}</div></div>
           {paymentMethod === "UPI" && cartLines.length > 0 && <section className={`pos-upi-qr pos-upi-qr-${posQr.status}`} aria-live="polite">
-            {posQr.status === "loading" && <><span className="pos-upi-qr-loader" /><div><strong>Creating Razorpay QR…</strong><small>The QR will include the exact bill amount.</small></div></>}
-            {posQr.status === "error" && <><span className="pos-upi-qr-error">!</span><div><strong>QR unavailable</strong><small>{posQr.message}</small><button type="button" onClick={() => setPosQrRefresh((current) => current + 1)}>Retry</button></div></>}
-            {posQr.status === "expired" && <><span className="pos-upi-qr-error">!</span><div><strong>QR expired</strong><small>{posQr.message}</small><button type="button" onClick={() => setPosQrRefresh((current) => current + 1)}>Generate a new QR</button></div></>}
-            {(posQr.status === "ready" || posQr.status === "paid") && posQr.imageUrl && <>
-              <img src={posQr.imageUrl} alt={`Razorpay UPI QR for ${formatAdminCurrency(total)}`} />
-              <div><small>RAZORPAY UPI</small><strong>{posQr.status === "paid" ? "Payment received" : `Scan to pay ${formatAdminCurrency(total)}`}</strong><span>{posQr.status === "paid" ? `Confirmed · ${posQr.paymentId}` : "Waiting for payment confirmation…"}</span>{posQr.status === "ready" && posQr.closeBy && <small>Expires in {formatQrCountdown(posQr.closeBy - posQrNow)}</small>}</div>
+            {posQr.status === "loading" && <><span className="pos-upi-qr-loader" /><div><strong>Preparing Razorpay Checkout…</strong><small>UPI payment will open securely in Razorpay Checkout.</small></div></>}
+            {posQr.status === "error" && <><span className="pos-upi-qr-error">!</span><div><strong>UPI unavailable</strong><small>{posQr.message}</small><button type="button" onClick={() => setPosQrRefresh((current) => current + 1)}>Retry</button></div></>}
+            {posQr.status === "cancelled" && <><span className="pos-upi-qr-error">!</span><div><strong>Payment cancelled</strong><small>{posQr.message}</small><button type="button" onClick={() => void startUpiCheckout()}>Retry UPI payment</button></div></>}
+            {(posQr.status === "ready" || posQr.status === "opening" || posQr.status === "pending" || posQr.status === "paid") && <>
+              <span className={posQr.status === "paid" ? "pos-upi-qr-success" : "pos-upi-qr-loader"} />
+              <div><small>RAZORPAY CHECKOUT</small><strong>{posQr.status === "paid" ? "Payment received" : posQr.status === "ready" ? `Pay ${formatAdminCurrency(total)} with UPI` : posQr.status === "opening" ? "Opening secure payment…" : "Complete payment in Razorpay…"}</strong><span>{posQr.status === "paid" ? `Confirmed · ${posQr.paymentId}` : "UPI, QR and supported payment methods are available."}</span></div>
               <b className={posQr.status === "paid" ? "is-paid" : ""}>{posQr.status === "paid" ? "✓" : "•••"}</b>
             </>}
           </section>}
           <div className="pos-totals"><label><span>Subtotal</span><strong>{formatAdminCurrency(subtotal)}</strong></label><label><span>Discount</span><span className="pos-discount-input">₹<input value={discountValue} onChange={(event) => setDiscountValue(event.target.value.replace(/[^0-9.]/g, ""))} inputMode="decimal" placeholder="0" disabled={upiPaymentActive} /></span></label><label className="pos-grand-total"><span>Total</span><strong>{formatAdminCurrency(total)}</strong></label><small>Prices are inclusive of applicable GST.</small></div>
-          <button className="pos-pay-button" type="button" disabled={!cartLines.length || checkoutBusy || (paymentMethod === "UPI" && !upiPaymentConfirmed)} onClick={() => void completeSale()}>{checkoutBusy ? "Completing sale…" : paymentMethod === "UPI" ? upiPaymentConfirmed ? `Complete ${formatAdminCurrency(total)} · UPI paid` : posQr.status === "loading" ? "Creating Razorpay QR…" : `Waiting for UPI payment · ${formatAdminCurrency(total)}` : `Pay ${formatAdminCurrency(total)} · ${paymentMethod}`} <span>→</span></button>
+          <button className="pos-pay-button" type="button" disabled={!cartLines.length || checkoutBusy || (paymentMethod === "UPI" && !upiPaymentConfirmed && posQr.status !== "ready" && posQr.status !== "cancelled")} onClick={() => void (paymentMethod === "UPI" && !upiPaymentConfirmed ? startUpiCheckout() : completeSale())}>{checkoutBusy ? "Completing sale…" : paymentMethod === "UPI" ? upiPaymentConfirmed ? `Complete ${formatAdminCurrency(total)} · UPI paid` : posQr.status === "cancelled" ? `Retry UPI payment · ${formatAdminCurrency(total)}` : `Pay with UPI · ${formatAdminCurrency(total)}` : `Pay ${formatAdminCurrency(total)} · ${paymentMethod}`} <span>→</span></button>
           {lastSale && <div className="pos-sale-complete"><span>✓</span><div><strong>Sale completed</strong><small>{lastSale.id} · {lastSale.total}</small></div><button type="button" onClick={() => void printOrderBill(lastSale)}>Print receipt</button></div>}
         </aside>
       </div>
