@@ -5,6 +5,7 @@ import { Component, memo, useCallback, useEffect, useMemo, useRef, useState, typ
 import { Eye, Pencil, Printer, Trash2 } from "lucide-react";
 import QRCode from "react-qr-code";
 import { createProductCategoryResolver, mergeCatalogCategories } from "../../lib/catalog-categories";
+import { countAdminCategoryProducts } from "../../lib/catalog/category-counts";
 import {
   fetchCatalogCategories,
   fetchCatalogProducts,
@@ -7834,6 +7835,19 @@ const mergeCategoriesFromProducts = (
   return inferLegacyCategorySections(nextCategories);
 };
 
+const snapshotCategoryCounts = <T extends { name: string; pieces: number; section?: CategorySection }>(
+  categories: T[],
+  products: Array<{ category: string; vendorId?: string }> | null,
+) => products ? categories.map((category) => ({
+  ...category,
+  // The Admin card count is based on Fanzzy-owned products. Publish that
+  // same value so the storefront cannot display a stale category-table count.
+  pieces: products.filter((product) => !product.vendorId &&
+    baseProductCategory(product.category).toLowerCase() === baseProductCategory(category.name).toLowerCase() &&
+    productCategorySection(product.category, categories) === (category.section || "normal"),
+  ).length,
+})) : categories;
+
 const categorySectionDetails: Array<{
   key: CategorySection;
   label: string;
@@ -7928,8 +7942,21 @@ function CategoryWorkspace({
         fetchCatalogProducts(),
         fetchStoreSetting("categoryCatalog"),
       ]);
-      const allProducts = productsRemote.data || [];
+      let cachedProducts: Array<{ category: string; vendorId?: string }> | null = null;
+      try {
+        const storedProducts = window.localStorage.getItem("fanzzy-products");
+        if (storedProducts) {
+          const parsed = JSON.parse(storedProducts);
+          if (Array.isArray(parsed)) cachedProducts = parsed.filter((product) => product && typeof product.category === "string");
+        }
+      } catch {
+        cachedProducts = null;
+      }
+      const allProducts = productsRemote.data || cachedProducts || [];
       const fanzzyProducts = allProducts.filter((product) => !product.vendorId);
+      // A missing product response means the catalog is unavailable, not that
+      // every category has zero products. Preserve the saved Admin counts.
+      const hasProductSnapshot = Array.isArray(productsRemote.data) || Array.isArray(cachedProducts);
       const categoryKey = (name: string, section: CategorySection = "normal") => `${baseProductCategory(name).toLowerCase()}::${section}`;
       const fanzzyCategoryKeys = new Set(fanzzyProducts.map((product) => categoryKey(
         product.category,
@@ -7942,7 +7969,7 @@ function CategoryWorkspace({
           .filter((key) => !fanzzyCategoryKeys.has(key)),
       );
       const isVendorOnlyCategory = (category: { name: string; section?: CategorySection }) => vendorOnlyCategoryKeys.has(categoryKey(category.name, category.section || "normal"));
-      if (active) setCategoryProducts(fanzzyProducts);
+      if (active) setCategoryProducts(hasProductSnapshot ? fanzzyProducts : null);
       let localCategories: AdminCategory[] = [];
       let sharedCategories: AdminCategory[] = [];
       const stored = window.localStorage.getItem("fanzzy-categories");
@@ -8009,7 +8036,9 @@ function CategoryWorkspace({
           fanzzyProducts,
         );
         setCategories(nextCategories);
-        persistCategories(nextCategories, false);
+        // Publish the complete Admin category snapshot so the storefront
+        // renders exactly the same category names and sections.
+        persistCategories(snapshotCategoryCounts(nextCategories, hasProductSnapshot ? fanzzyProducts : null));
         return;
       }
       if (active) {
@@ -8018,6 +8047,7 @@ function CategoryWorkspace({
           fanzzyProducts,
         );
         if (nextCategories.length) setCategories(nextCategories);
+        if (nextCategories.length) persistCategories(snapshotCategoryCounts(nextCategories, hasProductSnapshot ? fanzzyProducts : null));
       }
     };
     void loadCategories();
@@ -8027,10 +8057,7 @@ function CategoryWorkspace({
   }, []);
   const getCategoryPieceCount = (category: AdminCategory) => {
     if (!categoryProducts) return category.pieces;
-    return categoryProducts.filter((product) =>
-      baseProductCategory(product.category).toLowerCase() === baseProductCategory(category.name).toLowerCase() &&
-      productCategorySection(product.category, categories) === category.section,
-    ).length;
+    return countAdminCategoryProducts(category, categories, categoryProducts);
   };
   const saveCategory = async () => {
     if (!name.trim()) return onNotify("Category name is required");
@@ -8057,7 +8084,7 @@ function CategoryWorkspace({
     const remoteError = await saveCatalogCategory(category);
     const nextCategories = [...categories, category];
     setCategories(nextCategories);
-    persistCategories(nextCategories);
+    persistCategories(snapshotCategoryCounts(nextCategories, categoryProducts));
     setName("");
     setCategoryImage("");
     setCategoryFile(null);
@@ -8119,12 +8146,13 @@ function CategoryWorkspace({
       category.name === selectedCategory.name && category.section === selectedCategory.section ? updatedCategory : category,
     );
     updateLocalProductCategories(selectedCategory.name, updatedCategory.name, selectedCategory.section, updatedCategory.section);
-    setCategoryProducts((current) => current?.map((product) => ({
+    const renamedProducts = categoryProducts?.map((product) => ({
       ...product,
       category: renamedProductCategory(product.category, selectedCategory.name, updatedCategory.name, selectedCategory.section, updatedCategory.section),
-    })) || current);
+    })) || [];
+    setCategoryProducts(() => renamedProducts);
     setCategories(nextCategories);
-    persistCategories(nextCategories);
+    persistCategories(snapshotCategoryCounts(nextCategories, renamedProducts));
     setSelectedCategory(updatedCategory);
     setEditImageFile(null);
     setIsEditing(false);
@@ -8141,7 +8169,7 @@ function CategoryWorkspace({
     const remoteError = await removeCatalogCategory(category.name);
     const nextCategories = categories.filter((item) => item.name !== category.name);
     setCategories(nextCategories);
-    persistCategories(nextCategories);
+    persistCategories(snapshotCategoryCounts(nextCategories, categoryProducts));
     if (selectedCategory?.name === category.name) setSelectedCategory(null);
     onNotify(
       remoteError
@@ -8267,7 +8295,7 @@ function CategoryWorkspace({
       </div>
       <div className="category-sections">
         {categorySectionDetails.map((section) => {
-          const sectionCategories = categories.filter((category) => category.section === section.key && !(section.key === "luxury" && category.name.trim().toLowerCase() === "rings"));
+          const sectionCategories = categories.filter((category) => category.section === section.key);
           return (
             <section className="category-section" key={section.key} aria-labelledby={`${section.key}-categories-title`}>
               <div className="category-section-heading">
@@ -9264,7 +9292,6 @@ function ProductLibraryWorkspace({
           ...knownCategories.filter((category) => !remoteIdentities.has(categoryIdentity(category.name, category.section))),
         ]);
         setCatalogCategories(nextCategories);
-        persistCategories(nextCategories, false);
         return;
       }
       if (sharedCategories.length) {

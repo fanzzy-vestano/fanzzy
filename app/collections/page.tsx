@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { countCatalogProductsByCategory, fetchCatalogCategories, fetchCatalogProducts, fetchStoreSetting, inferLegacyCategorySections, type CatalogCategorySection } from "../../lib/supabase/catalog";
+import { countAdminCategoryProducts, type CategoryCountProduct } from "../../lib/catalog/category-counts";
+import { fetchCatalogCategories, fetchCatalogProducts, fetchStoreSetting, inferLegacyCategorySections, type CatalogCategorySection } from "../../lib/supabase/catalog";
 import { isGenericLuxuryCategoryName } from "../../lib/catalog-categories";
 import { storefrontImageProps } from "../../lib/storefront-images";
 import "../globals.css";
@@ -18,14 +19,6 @@ const defaultCollections: Collection[] = [
 const collectionImageFallbacks: Record<string, string> = Object.fromEntries(defaultCollections.map((collection) => [collection.name.toLowerCase(), collection.image]));
 const collectionImageFallback = (name: string, index: number) =>
   collectionImageFallbacks[name.trim().toLowerCase()] || defaultCollections[index % defaultCollections.length].image;
-const collectionCountKey = (name: string) =>
-  name
-    .replace(/\s*·\s*lx\s*$/i, "")
-    .trim()
-    .toLowerCase()
-    .replace(/\b(luxury|luxurious|premium)\b/g, "")
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
 const collectionLink = (collection: Collection) =>
   isGenericLuxuryCategoryName(collection.name) && collection.section === "luxury"
     ? `${siteBasePath}/?section=luxury#shop`
@@ -35,7 +28,7 @@ const collectionIdentity = (collection: Pick<Collection, "name" | "section">) =>
 
 export default function CollectionsPage() {
   const [collections, setCollections] = useState(defaultCollections);
-  const [productCounts, setProductCounts] = useState<Record<string, number> | null>(null);
+  const [catalogProducts, setCatalogProducts] = useState<CategoryCountProduct[] | null>(null);
   const [activeSection, setActiveSection] = useState<CatalogCategorySection | null>(null);
 
   useEffect(() => {
@@ -43,8 +36,8 @@ export default function CollectionsPage() {
     const syncCollections = async () => {
       const stored = window.localStorage.getItem("fanzzy-categories");
       // Counts should never delay downloading and displaying category images.
-      void fetchCatalogProducts().then((result) => {
-        if (active && result.data) setProductCounts(countCatalogProductsByCategory(result.data));
+      void fetchCatalogProducts("all").then((result) => {
+        if (active && result.data) setCatalogProducts(result.data as CategoryCountProduct[]);
       }).catch(() => undefined);
       let localCollections: Collection[] = [];
       if (stored) {
@@ -137,8 +130,7 @@ export default function CollectionsPage() {
     </header>
     <section className="collections-intro"><p className="eyebrow">THE FANZZY COLLECTIONS</p><h1>Find your <em>signature.</em></h1><p>Explore every category and find the pieces that meet your mood.</p><a className="button button-dark" href={`${siteBasePath}/#shop`}>Shop the full edit <span>↗</span></a></section>
     <section className="collections-grid" aria-label="Fanzzy collections">{collectionGroups.map(({ section, collections: sectionCollections }) => sectionCollections.length ? <div className="collection-group" id={section} key={section}><div className="collection-group-heading"><h2>{section === "luxury" ? "Luxury Category" : "Everyday Collection"}</h2></div><div className="collection-group-grid">{sectionCollections.map((collection, index) => {
-      const countKey = isGenericLuxuryCategoryName(collection.name) && collection.section === "luxury" ? "__luxury__" : collectionCountKey(collection.name);
-      const count = productCounts ? productCounts[countKey] ?? productCounts[collection.name.trim().toLowerCase()] ?? 0 : null;
+      const count = catalogProducts ? countAdminCategoryProducts(collection, collections, catalogProducts) : null;
       return <a className={`category-card collection-card category-${index + 1}`} key={`${collection.section}-${collection.name}`} href={collectionLink(collection)}><img {...storefrontImageProps(collection.image || collectionImageFallback(collection.name, index), "(max-width: 640px) 46vw, 24vw")} loading={index < 4 ? "eager" : "lazy"} decoding="async" alt={collection.name} /><span className="category-overlay" /><span className="category-info"><strong>{collection.name}</strong><small>{count !== null ? `${count} pieces` : collection.count}</small></span></a>;
     })}</div></div> : null)}</section>
     <footer className="collections-footer"><a href={`${siteBasePath}/`} className="text-link">← Back to Fanzzy</a><span>Made with intention in India.</span></footer>

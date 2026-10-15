@@ -1,3 +1,4 @@
+import { filterCatalogProducts, type CatalogScope } from "../catalog/catalog-visibility";
 import { supabase } from "./client";
 import { countProductsByCategoryKey, mergeCatalogCategories } from "../catalog-categories";
 import { prepareStoreImage } from "../store-image-upload";
@@ -145,16 +146,23 @@ const asCategory = (row: Record<string, unknown>): CatalogCategory => ({
   section: row.section === "luxury" || row.section === "normal" ? row.section : undefined,
 });
 
-export async function fetchCatalogProducts() {
+export async function fetchCatalogProducts(scope: CatalogScope = "all") {
   if (!supabase) return { data: null, error: new Error("Supabase is not configured") };
-  const result = await supabase.from("products").select("*,vendors(business_name,slug)").order("created_at", { ascending: true });
+  const read = (select: string) => {
+    let query = supabase!.from("products").select(select);
+    if (scope !== "all") query = query.neq("status", "Draft");
+    if (scope === "general") query = query.is("vendor_id", null);
+    if (typeof scope === "object") query = query.eq("vendor_id", scope.vendorId).eq("vendor_status", "Approved").eq("public_vendor_visible", true);
+    return query.order("created_at", { ascending: true });
+  };
+  const result = await read("*,vendors(business_name,slug)");
   if (!result.error) {
-    return { data: result.data?.map((row) => asProduct(row as Record<string, unknown>)) ?? null, error: null };
+    return { data: result.data ? filterCatalogProducts(result.data.map((row) => asProduct(row as unknown as Record<string, unknown>)), scope) : null, error: null };
   }
   // Vendor relations may not exist yet in an older production schema. The
   // catalog itself must remain available while vendor metadata is optional.
-  const fallback = await supabase.from("products").select("*").order("created_at", { ascending: true });
-  return { data: fallback.data?.map((row) => asProduct(row as Record<string, unknown>)) ?? null, error: fallback.error };
+  const fallback = await read("*");
+  return { data: fallback.data ? filterCatalogProducts(fallback.data.map((row) => asProduct(row as unknown as Record<string, unknown>)), scope) : null, error: fallback.error };
 }
 
 export async function saveCatalogProduct(product: CatalogProduct) {

@@ -2,6 +2,9 @@
 
 /* eslint-disable react-hooks/set-state-in-effect, react/no-unescaped-entities */
 
+import { hasValidSellingPrice } from "../lib/catalog/purchase-eligibility.js";
+import { filterCatalogProducts } from "../lib/catalog/catalog-visibility";
+
 import { memo, type FormEvent, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   fetchCatalogCategories,
@@ -99,7 +102,9 @@ type ProductImageAdjustments = {
 };
 type StorefrontPageHistoryState = {
   activeCategory: string;
+  activeCategorySection: CatalogCategorySection | "all";
   search: string;
+  productSort: string;
   scrollY: number;
 };
 type DeliveryCharge = { enabled: boolean; amount: number; freeAboveEnabled: boolean; freeAbove: number };
@@ -213,12 +218,17 @@ const categoryImageFallbacks: Record<string, string> = {
 const categoryImageFallback = (name: string, index: number) =>
   categoryImageFallbacks[name.trim().toLowerCase()] || Object.values(categoryImageFallbacks)[index % 4];
 const categoryFilterKey = (name: string) => name.replace(/\s*·\s*lx\s*$/i, "").trim().toLowerCase().replace(/\b(luxury|luxurious|premium)\b/g, "").replace(/[^a-z0-9]+/g, " ").trim();
-const categoryIdentityKey = (category: Pick<StorefrontCategory, "name" | "section">) => `${categoryFilterKey(category.name) || category.name.trim().toLowerCase()}::${category.section}`;
-const isLegacyLuxuryCategoryName = (name: string) => /\s+l$/i.test(name.trim());
+// Admin category records are distinct by their exact display name and
+// section. Do not collapse similarly named categories during storefront
+// rendering; category matching is handled separately by categoryFilterKey.
+const categoryIdentityKey = (category: Pick<StorefrontCategory, "name" | "section">) => `${category.name.trim().replace(/\s+/g, " ").toLowerCase()}::${category.section}`;
 const dedupeStorefrontCategories = (categories: StorefrontCategory[]) => {
   const seen = new Set<string>();
   return categories.filter((category) => {
-    const key = categoryIdentityKey(category);
+    // Preserve every distinct Admin label. Product matching uses the
+    // normalized categoryFilterKey separately; it must not collapse display
+    // rows such as differently spelled or suffixed Admin categories.
+    const key = `${category.name.trim().toLowerCase()}::${category.section}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -246,17 +256,9 @@ const mergeStorefrontCategoriesFromProducts = (
   products: Array<{ category: string; vendorId?: string }>,
   vendorCategoryNames: string[],
 ) => {
-  const vendorCategoryNameKeys = new Set(
-    [
-      ...vendorCategoryNames,
-      ...products.filter((product) => product.vendorId).map((product) => product.category),
-    ]
-      .map((name) => baseProductCategory(String(name || "")).toLowerCase())
-      .filter(Boolean),
-  );
-  const nextCategories = dedupeStorefrontCategories(categories).filter(
-    (category) => !vendorCategoryNameKeys.has(baseProductCategory(category.name).toLowerCase()),
-  );
+  // Admin categories are authoritative. Keep every saved category visible,
+  // including empty categories; vendor-only categories are never added below.
+  const nextCategories = dedupeStorefrontCategories(categories);
   const categoryByIdentity = new Map(
     nextCategories.map((category, index) => [categoryIdentityKey(category), index]),
   );
@@ -270,10 +272,8 @@ const mergeStorefrontCategoriesFromProducts = (
     const identity = categoryIdentityKey({ name, section });
     productCounts.set(identity, (productCounts.get(identity) || 0) + 1);
     if (categoryByIdentity.has(identity)) return;
-    // Vendor-defined categories belong to that vendor's storefront. Their
-    // products remain visible in All pieces, but the private category name
-    // must not become a filter in Fanzzy's main storefront catalog.
-    if (product.vendorId || vendorCategoryNameKeys.has(name.toLowerCase())) return;
+    // Vendor ownership decides visibility even when category names overlap.
+    if (product.vendorId) return;
     categoryByIdentity.set(identity, nextCategories.length);
     nextCategories.push({
       name,
@@ -285,7 +285,7 @@ const mergeStorefrontCategoriesFromProducts = (
 
   return nextCategories.map((category) => {
     const count = productCounts.get(categoryIdentityKey(category));
-    return count === undefined ? category : { ...category, count: `${count} pieces` };
+    return { ...category, count: `${count ?? 0} pieces` };
   });
 };
 const matchesCatalogCategory = (
@@ -298,17 +298,18 @@ const matchesCatalogCategory = (
   if (section !== "all" && productCatalogSection(productCategory, categories) !== section) return false;
   return (categoryFilterKey(productCategory) || baseProductCategory(productCategory).toLowerCase()) === (categoryFilterKey(selectedCategory) || baseProductCategory(selectedCategory).toLowerCase());
 };
+const storefrontProductCacheKey = "fanzzy-storefront-products-v2";
 const persistStorefrontProductCache = (catalog: Product[]) => {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem("fanzzy-products", JSON.stringify(catalog));
+    window.localStorage.setItem(storefrontProductCacheKey, JSON.stringify(catalog));
     return;
   } catch {
     // Large data-URL images can exceed localStorage in a test browser. Keep
     // the complete product list cached while dropping only those heavy blobs.
   }
   try {
-    window.localStorage.setItem("fanzzy-products", JSON.stringify(catalog.map((product) => ({
+    window.localStorage.setItem(storefrontProductCacheKey, JSON.stringify(catalog.map((product) => ({
       ...product,
       image: product.image.startsWith("data:") ? "" : product.image,
       hoverImage: product.hoverImage?.startsWith("data:") ? "" : product.hoverImage,
@@ -448,6 +449,56 @@ const overlayHistoryUrl = (layers: string[], productId?: string) => {
   if (productId) url.searchParams.set("fanzzy-product", productId);
   else url.searchParams.delete("fanzzy-product");
   return url.href;
+};
+const scrollToPageAnchor = (event: { preventDefault: () => void }, id: string) => {
+  event.preventDefault();
+  const target = document.getElementById(id);
+  if (!target) return;
+
+  // Hash links are handled explicitly so the browser's smooth-anchor
+  // animation cannot race the app's manual scroll restoration. pushState
+  // preserves normal Back/Forward history without triggering a second native
+  // anchor scroll.
+  const url = new URL(window.location.href);
+  url.hash = id;
+  const writeHistory = window.location.hash === `#${id}` ? window.history.replaceState.bind(window.history) : window.history.pushState.bind(window.history);
+  writeHistory({ ...window.history.state, fanzzyAnchor: id }, "", url.href);
+  const root = document.documentElement;
+  const previousScrollBehavior = root.style.scrollBehavior;
+  root.style.scrollBehavior = "auto";
+  window.scrollTo({ left: 0, top: target.getBoundingClientRect().top + window.scrollY, behavior: "instant" });
+  root.style.scrollBehavior = previousScrollBehavior;
+};
+const overlayReturnScrollStorageKey = "fanzzy-overlay-return-scroll-y";
+const restoreStorefrontScrollPosition = (scrollY: number) => {
+  let attempts = 0;
+  let stableFrames = 0;
+  const root = document.documentElement;
+  const body = document.body;
+  const previousRootMinHeight = root.style.minHeight;
+  const previousBodyMinHeight = body.style.minHeight;
+  const requiredMinHeight = `${Math.max(0, scrollY) + window.innerHeight}px`;
+  root.style.minHeight = requiredMinHeight;
+  body.style.minHeight = requiredMinHeight;
+  const restore = () => {
+    attempts += 1;
+    const pageHasReachedPosition = document.documentElement.scrollHeight >= scrollY + window.innerHeight;
+    if (!pageHasReachedPosition && attempts < 600) {
+      window.scrollTo({ left: 0, top: scrollY, behavior: "instant" });
+      window.requestAnimationFrame(restore);
+      return;
+    }
+    window.scrollTo({ left: 0, top: scrollY, behavior: "instant" });
+    if (Math.abs(window.scrollY - scrollY) > 1) stableFrames = 0;
+    else stableFrames += 1;
+    if (stableFrames < 30 && attempts < 600) {
+      window.requestAnimationFrame(restore);
+      return;
+    }
+    root.style.minHeight = previousRootMinHeight;
+    body.style.minHeight = previousBodyMinHeight;
+  };
+  window.requestAnimationFrame(restore);
 };
 const blockedHeroImage = "photo-1599643478518-a784e5dc4c8f";
 const initialHeroSlides: string[] = [];
@@ -670,8 +721,10 @@ const isProductOutOfStock = (product: Product) => getProductVariantType(product)
     : product.stock <= 0;
 
 const ProductCard = memo(function ProductCard({ product, wished, promotions, cartQuantity, isLuxury, onWishlist, onAdd, onDecrease, onIncrease, onQuickView, onImageZoom }: { product: Product; wished: boolean; promotions: PromotionOffer[]; cartQuantity: number; isLuxury?: boolean; onWishlist: () => void; onAdd: () => void; onDecrease: () => void; onIncrease: () => void; onQuickView: () => void; onImageZoom: () => void }) {
+  const isPriceUnavailable = !hasValidSellingPrice(product.price);
   const isOutOfStock = isProductOutOfStock(product);
   const discountPercent = getProductDiscountPercent(product);
+  const showProductTag = Boolean(product.tag && !(isLuxury && product.tag.trim().toLowerCase() === "premium edit"));
   const [touchImageRevealed, setTouchImageRevealed] = useState(false);
   const suppressNextImageClick = useRef(false);
   const handleImageSurfacePointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
@@ -699,11 +752,10 @@ const ProductCard = memo(function ProductCard({ product, wished, promotions, car
           <img className={`product-image product-image-zoom primary-image ${isOutOfStock ? "stock-out-image" : ""}`} loading="lazy" decoding="async" src={product.image} alt={product.name} style={imageAdjustmentStyle(product.imageAdjustments)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onImageZoom(); }} role="button" tabIndex={0} title="Click to zoom" />
           <img className={`product-image product-image-zoom hover-image ${isOutOfStock ? "stock-out-image" : ""}`} loading="lazy" decoding="async" fetchPriority="low" src={product.hoverImage} alt="" aria-hidden="true" />
         </div>
-        <span className="product-discount-badge">{discountPercent}% off</span>
-        {isLuxury && <span className="luxury-product-label">Premium edit</span>}
-        {product.tag && <span className="product-tag with-discount">{product.tag}</span>}
+        {!isPriceUnavailable && discountPercent > 0 && <span className="product-discount-badge">{discountPercent}% off</span>}
+        {showProductTag && <span className="product-tag with-discount">{product.tag}</span>}
         {promotions.slice(0, 1).map((offer) => <span className="promotion-badge" key={offer.id}>{offerTypeLabel(offer)}</span>)}
-        {product.stock === 1 && <span className={`low-stock-badge ${product.tag ? "with-tag" : ""} with-discount`}>Only 1 available</span>}
+        {product.stock === 1 && <span className={`low-stock-badge ${showProductTag ? "with-tag" : ""} with-discount`}>Only 1 available</span>}
         {isOutOfStock && <span className="stock-out-overlay">Sold out</span>}
         <button className={`wishlist-button ${wished ? "is-wished" : ""}`} onClick={onWishlist} aria-label={wished ? `Remove ${product.name} from wishlist` : `Add ${product.name} to wishlist`}>{wished ? "♥" : "♡"}</button>
         <button className="quick-view" onClick={onQuickView}>Quick view <span>↗</span></button>
@@ -714,10 +766,10 @@ const ProductCard = memo(function ProductCard({ product, wished, promotions, car
           <h3>{product.name}</h3>
           {product.vendorId && product.vendorName && <a className="product-sold-by" href={product.vendorSlug ? `/vendors/store/?slug=${encodeURIComponent(product.vendorSlug)}` : "/vendors"}>{product.vendorName}’S PRODUCT</a>}
         </div>
-        {cartQuantity > 0 ? <div className="product-cart-control is-added"><button type="button" onClick={onDecrease} aria-label={`Decrease ${product.name} quantity`}>−</button><span>{cartQuantity}</span><button type="button" onClick={onIncrease} aria-label={`Increase ${product.name} quantity`}>+</button></div> : <button className="add-to-cart-button" type="button" onClick={onAdd} disabled={isOutOfStock} aria-label={isOutOfStock ? `${product.name} is sold out` : `Add ${product.name} to cart`}>Add to cart</button>}
+        {cartQuantity > 0 ? <div className="product-cart-control is-added"><button type="button" onClick={onDecrease} aria-label={`Decrease ${product.name} quantity`}>−</button><span>{cartQuantity}</span><button type="button" onClick={onIncrease} aria-label={`Increase ${product.name} quantity`}>+</button></div> : <button className="add-to-cart-button" type="button" onClick={onAdd} disabled={isOutOfStock || isPriceUnavailable} aria-label={isPriceUnavailable ? `${product.name} is unavailable` : isOutOfStock ? `${product.name} is sold out` : `Add ${product.name} to cart`}>{isPriceUnavailable ? "Unavailable" : "Add to cart"}</button>}
       </div>
       {getProductVariantType(product) === "normal" && product.variants?.length ? <button className="product-variants-preview" onClick={onQuickView} aria-label={`View ${product.name} variants`}><span>{product.variants.length} colour / model option{product.variants.length === 1 ? "" : "s"}</span><span className="product-variant-thumbs">{product.variants.slice(0, 4).map((variant) => <img loading="lazy" decoding="async" fetchPriority="low" key={`${product.id}-${variant.name}`} src={variant.image || product.image} alt={variant.name} style={imageAdjustmentStyle(variant.adjustments)} />)}</span><b>View ↗</b></button> : null}
-      <div className="price-row"><span>{formatINR(getCustomerPrice(product))}</span><del>{formatINR(getComparePrice(product))}</del></div>
+      <div className="price-row"><span>{isPriceUnavailable ? "Price unavailable" : formatINR(getCustomerPrice(product))}</span>{!isPriceUnavailable && <del>{formatINR(getComparePrice(product))}</del>}</div>
     </article>
   );
 }, (previous, next) => previous.product === next.product
@@ -727,7 +779,9 @@ const ProductCard = memo(function ProductCard({ product, wished, promotions, car
   && previous.cartQuantity === next.cartQuantity);
 
 export default function Home() {
-  const [products, setProducts] = useState<Product[]>(defaultProducts);
+  // Vendor products remain available to carts created in vendor storefronts.
+  const [catalogProducts, setProducts] = useState<Product[]>(defaultProducts);
+  const products = useMemo(() => filterCatalogProducts(catalogProducts, "general"), [catalogProducts]);
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [categoryRecords, setCategories] = useState(defaultCategories);
   const [vendorCategoryNames, setVendorCategoryNames] = useState<string[]>([]);
@@ -798,9 +852,10 @@ export default function Home() {
   const [quickProduct, setQuickProduct] = useState<Product | null>(() => readOverlayProduct());
   const [quickProductImageOverride, setQuickProductImageOverride] = useState<string | null>(null);
   const overlayHistoryStack = useRef<string[]>([]);
-  const overlayPageState = useRef<StorefrontPageHistoryState>({ activeCategory: "All pieces", search: "", scrollY: 0 });
+  const overlayPageState = useRef<StorefrontPageHistoryState>({ activeCategory: "All pieces", activeCategorySection: "all", search: "", productSort: "price-low", scrollY: 0 });
   const overlayScrollY = useRef<number | null>(null);
   const overlayHistoryCleanup = useRef(false);
+  const overlayControlClose = useRef(false);
   const overlayClosedFromBack = useRef(false);
   const overlayLastBackUrl = useRef<string | null>(null);
   const quickProductCloseRequested = useRef(false);
@@ -859,7 +914,9 @@ export default function Home() {
     if (overlayHistoryStack.current.length === 0) {
       const pageHistoryState: StorefrontPageHistoryState = {
         activeCategory,
+        activeCategorySection,
         search,
+        productSort,
         scrollY: Math.round(window.scrollY),
       };
       const scrollY = pageHistoryState.scrollY;
@@ -889,13 +946,14 @@ export default function Home() {
     }
 
     setCartOpen(true);
-  }, [activeCategory, cartOpen, search]);
+  }, [activeCategory, activeCategorySection, cartOpen, productSort, search]);
   const selectCategory = useCallback((category: string, section: CatalogCategorySection | "all" = "all") => {
     setActiveCategory(category);
     setActiveCategorySection(section);
     overlayPageState.current = {
       ...overlayPageState.current,
       activeCategory: category,
+      activeCategorySection: section,
       scrollY: Math.round(window.scrollY),
     };
   }, []);
@@ -914,6 +972,7 @@ export default function Home() {
     overlayPageState.current = {
       ...overlayPageState.current,
       activeCategory: "All pieces",
+      activeCategorySection: section,
       scrollY: Math.round(window.scrollY),
     };
   }, []);
@@ -996,7 +1055,7 @@ export default function Home() {
       // these requests ran one by one, leaving an old cached list on screen
       // while the storefront waited for every product setting to finish.
       const [remote, settings] = await Promise.all([
-        fetchCatalogProducts(),
+        fetchCatalogProducts("public"),
         fetchStoreSettings(["productVariants", "productVariantType", "productSizes", "productSizeStock", "productImageAdjustments", "productBillNames", "productSupplierNames"]),
       ]);
       const {
@@ -1088,13 +1147,13 @@ export default function Home() {
           // Ignore malformed local variant cache.
         }
       }
-      const stored = window.localStorage.getItem("fanzzy-products");
+      const stored = window.localStorage.getItem(storefrontProductCacheKey);
       let localProducts: Product[] = [];
       if (stored) {
         try {
           const parsed: unknown = JSON.parse(stored);
           if (Array.isArray(parsed)) {
-            localProducts = parsed.filter((product) => !isDemoProduct(product as { name?: string; sku?: string })).map(normalizeStoredProduct).filter((product): product is Product => product !== null).map((product) => {
+            localProducts = filterCatalogProducts(parsed, "general").filter((product) => !isDemoProduct(product as { name?: string; sku?: string })).map(normalizeStoredProduct).filter((product): product is Product => product !== null).map((product) => {
               const savedVariants = getProductSetting(variantsMap, product.sku, product.id);
               const savedSizes = getProductSetting(sizesMap, product.sku, product.id);
               const savedSizeStock = getProductSetting(sizeStockMap, product.sku, product.id);
@@ -1110,7 +1169,7 @@ export default function Home() {
             });
           }
         } catch {
-          window.localStorage.removeItem("fanzzy-products");
+          window.localStorage.removeItem(storefrontProductCacheKey);
         }
       }
       if (!remote.error && remote.data !== null) {
@@ -1168,7 +1227,7 @@ export default function Home() {
         setCatalogLoading(false);
         return;
       }
-      if (localProducts.length) setProducts(localProducts);
+      if (localProducts.length) setProducts(filterCatalogProducts(localProducts, "general"));
       else setProducts(defaultProducts);
       setCatalogLoading(false);
     };
@@ -1185,17 +1244,14 @@ export default function Home() {
     };
     const onProductsUpdated = () => { runSyncProducts(); };
     const unsubscribeFromCatalogProducts = subscribeToCatalogProducts(runSyncProducts);
-    const refreshProductsOnFocus = () => { runSyncProducts(); };
     const unsubscribeFromProductSettings = (['productVariants', 'productVariantType', 'productSizes', 'productSizeStock', 'productBillNames', 'productSupplierNames'] as const)
       .map((key) => subscribeToStoreSetting(key, () => { void syncProducts().catch(() => undefined); }));
-    window.addEventListener("focus", refreshProductsOnFocus);
     window.addEventListener("storage", onProductsStorage);
     window.addEventListener("fanzzy-products-updated", onProductsUpdated);
     return () => {
       active = false;
       unsubscribeFromCatalogProducts();
       unsubscribeFromProductSettings.forEach((unsubscribe) => unsubscribe());
-      window.removeEventListener("focus", refreshProductsOnFocus);
       window.removeEventListener("storage", onProductsStorage);
       window.removeEventListener("fanzzy-products-updated", onProductsUpdated);
     };
@@ -1297,13 +1353,11 @@ export default function Home() {
     const unsubscribeFromVendorCategories = subscribeToVendorCategories(runSyncCategories);
     window.addEventListener("storage", runSyncCategories);
     window.addEventListener("fanzzy-categories-updated", runSyncCategories);
-    window.addEventListener("focus", runSyncCategories);
     return () => {
       active = false;
       unsubscribeFromVendorCategories();
       window.removeEventListener("storage", runSyncCategories);
       window.removeEventListener("fanzzy-categories-updated", runSyncCategories);
-      window.removeEventListener("focus", runSyncCategories);
     };
   }, []);
 
@@ -1432,6 +1486,19 @@ export default function Home() {
     setActiveCategorySection(matchingCategory.section);
     overlayPageState.current = { ...overlayPageState.current, activeCategory: matchingCategory.name };
   }, [categories]);
+
+  // Collection cards arrive from /collections with a shop hash. Browser
+  // anchor restoration can run before this client page mounts, so explicitly
+  // reveal the filtered product section after the category is applied.
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    if (!window.location.hash || window.location.hash.slice(1) !== "shop") return;
+    if (!urlParams.get("category") && !urlParams.get("section")) return;
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById("shop")?.scrollIntoView({ behavior: "auto", block: "start" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [categories.length]);
 
   useEffect(() => {
     let syncInFlight = false;
@@ -1573,6 +1640,11 @@ export default function Home() {
         return categoryMatch && searchMatch;
       })
       .sort((left, right) => {
+        if (activeCategorySection === "all") {
+          const leftSection = productCatalogSection(left.category, categories) === "luxury" ? 1 : 0;
+          const rightSection = productCatalogSection(right.category, categories) === "luxury" ? 1 : 0;
+          if (leftSection !== rightSection) return leftSection - rightSection;
+        }
         // Keep low-to-high as the initial storefront order, while allowing customers to change it.
         switch (productSort) {
           case "price-high":
@@ -1595,10 +1667,11 @@ export default function Home() {
     [categories],
   );
   const filterCategories = useMemo(() => {
-    const luxury = dedupeStorefrontCategories(storefrontCategories.filter((category) => category.section === "luxury"));
-    const luxuryCategoryKeys = new Set(luxury.map((category) => categoryFilterKey(category.name)).filter(Boolean));
-    const normal = dedupeStorefrontCategories(storefrontCategories.filter((category) => category.section !== "luxury"))
-      .filter((category) => !isLegacyLuxuryCategoryName(category.name) || !luxuryCategoryKeys.has(categoryFilterKey(category.name)));
+    const luxury = storefrontCategories.filter((category) => category.section === "luxury");
+    // Admin section metadata is authoritative. A normal category may end in
+    // "L" and must not be hidden just because a similarly named luxury
+    // category exists.
+    const normal = storefrontCategories.filter((category) => category.section !== "luxury");
     return { normal, luxury };
   }, [storefrontCategories]);
   useEffect(() => {
@@ -1645,7 +1718,7 @@ export default function Home() {
 
   const cartItems = Object.entries(cart).flatMap(([cartKey, quantity]) => {
     const productId = cartKey.split("::", 1)[0];
-    const product = products.find((item) => matchesProductKey(item, productId));
+    const product = catalogProducts.find((item) => matchesProductKey(item, productId));
     return product ? [{ ...product, cartKey, quantity, variant: cartVariants[cartKey] ?? null, size: cartSizes[cartKey] ?? null, promotion: cartPromotionLines[cartKey] ?? null }] : [];
   });
   const getProductCartLines = (product: Product) => cartItems.filter((item) => item.id === product.id && !item.promotion);
@@ -1660,9 +1733,9 @@ export default function Home() {
   };
   const cartStockIssues = cartItems.filter((product) => {
     const availableStock = getSelectionStock(product, product.variant, product.size);
-    return availableStock <= 0 || product.quantity > availableStock;
+    return !hasValidSellingPrice(product.price) || availableStock <= 0 || product.quantity > availableStock;
   });
-  const cartHasSoldOutItems = cartStockIssues.some((product) => getSelectionStock(product, product.variant, product.size) <= 0);
+  const cartHasSoldOutItems = cartStockIssues.some((product) => !hasValidSellingPrice(product.price) || getSelectionStock(product, product.variant, product.size) <= 0);
   // Keep the badge and the drawer in sync when an old cart line no longer
   // resolves to a product in the current catalog.
   const cartCount = cartItems.reduce((sum, item) => sum + item.quantity, 0);
@@ -1984,6 +2057,7 @@ export default function Home() {
     announce(wishlist.includes(id) ? "Removed from wishlist" : "Saved to wishlist");
   };
   const addToCart = (product: Product, variant: ProductVariant | null = null, size: string | null = null) => {
+    if (!hasValidSellingPrice(product.price)) return announce(`${product.name} is currently unavailable`);
     if (getProductVariantType(product) === "normal" && product.variants?.length && !variant) {
       openQuickProduct(product);
       return;
@@ -2007,6 +2081,7 @@ export default function Home() {
   };
   const addPromotionToCart = (offer: PromotionOffer) => {
     if (!quickProduct) return;
+    if (!hasValidSellingPrice(quickProduct.price)) return announce(`${quickProduct.name} is currently unavailable`);
     const paidSelection = makePromotionSelection(quickProduct, selectedVariant, selectedSize);
     const paid = Array.from({ length: offer.type === "bundle" ? 0 : offer.buyQuantity }, () => paidSelection);
     const free = offer.type === "bundle" ? [] : selectedFreeSelections;
@@ -2014,6 +2089,7 @@ export default function Home() {
     const error = validatePromotionSelection(offer, offer.type === "bundle" ? bundle : paid, free);
     if (error) return announce(error);
     const chosen = offer.type === "bundle" ? bundle : [...paid, ...free];
+    if (chosen.some((selection) => !hasValidSellingPrice(catalogProducts.find((product) => product.id === selection.productId)?.price))) return announce("One of the selected products is currently unavailable");
     if (chosen.some((selection) => (selection.stock || 0) <= 0)) return announce("One of the selected variants is out of stock");
     const selectedQuantities = new Map<string, number>();
     chosen.forEach((selection) => selectedQuantities.set(selectionKey(selection), (selectedQuantities.get(selectionKey(selection)) || 0) + 1));
@@ -2062,7 +2138,8 @@ export default function Home() {
   };
   const updateQuantity = (cartKey: string, delta: number) => {
     const productId = cartKey.split("::", 1)[0];
-    const product = products.find((item) => item.id === productId);
+    const product = catalogProducts.find((item) => item.id === productId);
+    if (delta > 0 && product && !hasValidSellingPrice(product.price)) return announce(`${product.name} is currently unavailable`);
     const variant = cartVariants[cartKey];
     const size = cartSizes[cartKey];
     if (delta > 0 && product && getSelectionStock(product, variant, size) <= (cart[cartKey] ?? 0)) return announce(`${product.name}${size ? ` · Size ${size}` : ""} has no more stock available`);
@@ -2144,6 +2221,34 @@ export default function Home() {
   ]);
   const activeOverlayKey = activeOverlayLayers.join("|");
   const quickViewOpen = Boolean(quickProduct);
+  const openZoomedImage = useCallback((image: { src: string; alt: string; adjustments?: ImageAdjustments }) => {
+    if (!zoomedImage) {
+      const scrollY = Math.round(window.scrollY);
+      overlayScrollY.current = scrollY;
+      window.sessionStorage.setItem(overlayReturnScrollStorageKey, String(scrollY));
+    }
+    setZoomedImage(image);
+  }, [zoomedImage]);
+  const closeZoomedImage = useCallback(() => {
+    const nextLayers = activeOverlayLayers.filter((layer) => layer !== "zoomedImage");
+    const restoreScrollY = Number(overlayPageState.current?.scrollY ?? overlayScrollY.current);
+    overlayControlClose.current = true;
+    window.history.replaceState(
+      { ...window.history.state, fanzzyOverlay: nextLayers.at(-1), fanzzyPage: overlayPageState.current },
+      "",
+      overlayHistoryUrl(nextLayers, quickProduct?.id),
+    );
+    setZoomedImage(null);
+    if (Number.isFinite(restoreScrollY) && restoreScrollY >= 0) restoreStorefrontScrollPosition(restoreScrollY);
+  }, [activeOverlayLayers, quickProduct?.id]);
+
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("fanzzy-overlay") || new URLSearchParams(window.location.search).get("fanzzy-product")) return;
+    const storedScrollY = Number(window.sessionStorage.getItem(overlayReturnScrollStorageKey));
+    window.sessionStorage.removeItem(overlayReturnScrollStorageKey);
+    if (!Number.isFinite(storedScrollY) || storedScrollY <= 0) return;
+    restoreStorefrontScrollPosition(storedScrollY);
+  }, []);
 
   useLayoutEffect(() => {
     if (!quickViewOpen) return;
@@ -2182,18 +2287,49 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    const restoreAnchorAfterHistoryNavigation = () => {
+      // Overlay history owns scroll restoration while a drawer or product
+      // detail is open. Let that path restore its saved listing position.
+      if (activeOverlayLayers.length || new URLSearchParams(window.location.search).has("fanzzy-overlay")) return;
+      const id = window.location.hash.slice(1);
+      if (!id) return;
+      const frame = window.requestAnimationFrame(() => {
+        const target = document.getElementById(id);
+        if (!target) return;
+        const root = document.documentElement;
+        const previousScrollBehavior = root.style.scrollBehavior;
+        root.style.scrollBehavior = "auto";
+        window.scrollTo({ left: 0, top: target.getBoundingClientRect().top + window.scrollY, behavior: "instant" });
+        root.style.scrollBehavior = previousScrollBehavior;
+      });
+      return frame;
+    };
+    const onHistoryNavigation = () => { restoreAnchorAfterHistoryNavigation(); };
+    window.addEventListener("popstate", onHistoryNavigation);
+    window.addEventListener("hashchange", onHistoryNavigation);
+    return () => {
+      window.removeEventListener("popstate", onHistoryNavigation);
+      window.removeEventListener("hashchange", onHistoryNavigation);
+    };
+  }, [activeOverlayLayers.length]);
+
+  useEffect(() => {
     const savedPageState = window.history.state?.fanzzyPage as Partial<StorefrontPageHistoryState> | undefined;
     const urlParams = new URLSearchParams(window.location.search);
     const restoringOverlay = Boolean(window.history.state?.fanzzyOverlay || urlParams.get("fanzzy-overlay") || urlParams.get("fanzzy-product"));
     if (!savedPageState || !restoringOverlay) return;
     const restoredPageState: StorefrontPageHistoryState = {
       activeCategory: savedPageState.activeCategory || "All pieces",
+      activeCategorySection: savedPageState.activeCategorySection === "normal" || savedPageState.activeCategorySection === "luxury" ? savedPageState.activeCategorySection : "all",
       search: typeof savedPageState.search === "string" ? savedPageState.search : "",
+      productSort: typeof savedPageState.productSort === "string" ? savedPageState.productSort : "price-low",
       scrollY: Number.isFinite(Number(savedPageState.scrollY)) ? Number(savedPageState.scrollY) : 0,
     };
     overlayPageState.current = restoredPageState;
     if (savedPageState.activeCategory) setActiveCategory(restoredPageState.activeCategory);
+    setActiveCategorySection(restoredPageState.activeCategorySection);
     if (typeof savedPageState.search === "string") setSearch(restoredPageState.search);
+    setProductSort(restoredPageState.productSort);
   }, []);
 
   useLayoutEffect(() => {
@@ -2210,7 +2346,9 @@ export default function Home() {
       // returns to this same listing page instead of leaving the storefront.
       const restoredPageHistoryState: StorefrontPageHistoryState = {
         activeCategory,
+        activeCategorySection,
         search,
+        productSort,
         scrollY: Math.round(window.scrollY),
       };
       overlayPageState.current = restoredPageHistoryState;
@@ -2249,6 +2387,12 @@ export default function Home() {
       return;
     }
 
+    if (overlayControlClose.current) {
+      overlayControlClose.current = false;
+      overlayHistoryStack.current = activeOverlayLayers;
+      return;
+    }
+
     const previousIsCurrentPrefix = previousLayers.every(
       (layer, index) => activeOverlayLayers[index] === layer,
     );
@@ -2262,7 +2406,9 @@ export default function Home() {
       overlayLastBackUrl.current = null;
       const pageHistoryState: StorefrontPageHistoryState = {
         activeCategory,
+        activeCategorySection,
         search,
+        productSort,
         scrollY: Math.round(window.scrollY),
       };
       overlayPageState.current = pageHistoryState;
@@ -2270,14 +2416,13 @@ export default function Home() {
         {
           ...window.history.state,
           fanzzyPage: pageHistoryState,
-          __vinext_scrollX: window.scrollX,
-          __vinext_scrollY: window.scrollY,
         },
         "",
         window.location.href,
       );
       if (previousLayers.length === 0) {
         overlayScrollY.current = Math.round(window.scrollY);
+        window.sessionStorage.setItem(overlayReturnScrollStorageKey, String(overlayScrollY.current));
         window.history.replaceState(
           {
             ...window.history.state,
@@ -2313,7 +2458,14 @@ export default function Home() {
           "",
           overlayHistoryUrl(activeOverlayLayers),
         );
-        if (!activeOverlayLayers.length) overlayScrollY.current = null;
+        if (!activeOverlayLayers.length) {
+          const restoreScrollY = Number(overlayPageState.current?.scrollY ?? overlayScrollY.current);
+          if (Number.isFinite(restoreScrollY) && restoreScrollY >= 0) {
+            restoreStorefrontScrollPosition(restoreScrollY);
+          }
+          overlayScrollY.current = null;
+          window.sessionStorage.removeItem(overlayReturnScrollStorageKey);
+        }
         return;
       }
       // An on-screen close button already removed the layer. Consume its
@@ -2322,7 +2474,12 @@ export default function Home() {
       overlayHistoryStack.current = activeOverlayLayers;
       overlayHistoryCleanup.current = true;
       if (activeOverlayLayers.length === 0) {
+        const restoreScrollY = Number(overlayPageState.current?.scrollY ?? overlayScrollY.current);
+        if (Number.isFinite(restoreScrollY) && restoreScrollY >= 0) {
+          restoreStorefrontScrollPosition(restoreScrollY);
+        }
         overlayScrollY.current = null;
+        window.sessionStorage.removeItem(overlayReturnScrollStorageKey);
       }
       window.history.go(-removedLayerCount);
       return;
@@ -2331,7 +2488,9 @@ export default function Home() {
       // reuses the current entry instead of adding a misleading extra Back step.
       const pageHistoryState: StorefrontPageHistoryState = {
         activeCategory,
+        activeCategorySection,
         search,
+        productSort,
         scrollY: Math.round(window.scrollY),
       };
       overlayPageState.current = pageHistoryState;
@@ -2348,7 +2507,7 @@ export default function Home() {
     }
 
     overlayHistoryStack.current = activeOverlayLayers;
-  }, [activeCategory, activeOverlayKey, activeOverlayLayers, search]);
+  }, [activeCategory, activeCategorySection, activeOverlayKey, activeOverlayLayers, productSort, search]);
 
   useEffect(() => {
     // Keep the current listing snapshot up to date without adding a history
@@ -2356,7 +2515,9 @@ export default function Home() {
     // open, before a product view replaces that drawer in the same entry.
     const pageHistoryState: StorefrontPageHistoryState = {
       activeCategory,
+      activeCategorySection,
       search,
+      productSort,
       scrollY: Math.round(window.scrollY),
     };
     overlayPageState.current = pageHistoryState;
@@ -2365,7 +2526,7 @@ export default function Home() {
       "",
       window.location.href,
     );
-  }, [activeCategory, search]);
+  }, [activeCategory, activeCategorySection, productSort, search]);
 
   useEffect(() => {
     const listingPath = window.location.pathname;
@@ -2375,11 +2536,18 @@ export default function Home() {
       // URL's #shop anchor, losing the customer's position further down the
       // product list. Real route navigation must still reach the router.
       if (window.location.pathname !== listingPath) return;
-      if (overlayHistoryCleanup.current || (activeOverlayLayers.length > 0 && event.state?.fanzzyPage)) {
+      // Any Back event while a storefront overlay is open belongs to the
+      // overlay history entry. Stop the router from treating it as a route
+      // navigation and jumping to the page's hero anchor.
+      if (overlayHistoryCleanup.current || activeOverlayLayers.length > 0) {
         event.stopImmediatePropagation();
       }
       if (overlayHistoryCleanup.current) {
         overlayHistoryCleanup.current = false;
+        const restoreScrollY = Number(overlayPageState.current?.scrollY ?? overlayScrollY.current);
+        if (Number.isFinite(restoreScrollY) && restoreScrollY >= 0) {
+          restoreStorefrontScrollPosition(restoreScrollY);
+        }
         return;
       }
       if (overlayClosedFromBack.current) return;
@@ -2395,7 +2563,20 @@ export default function Home() {
       overlayHistoryStack.current = activeOverlayLayers.slice(0, -1);
 
       if (pageHistoryState?.activeCategory) setActiveCategory(pageHistoryState.activeCategory);
+      if (pageHistoryState?.activeCategorySection === "normal" || pageHistoryState?.activeCategorySection === "luxury" || pageHistoryState?.activeCategorySection === "all") setActiveCategorySection(pageHistoryState.activeCategorySection);
       if (typeof pageHistoryState?.search === "string") setSearch(pageHistoryState.search);
+      if (typeof pageHistoryState?.productSort === "string") setProductSort(pageHistoryState.productSort);
+
+      const storedScrollY = Number(window.sessionStorage.getItem(overlayReturnScrollStorageKey));
+      const restoreScrollY = Number.isFinite(storedScrollY) && storedScrollY >= 0
+        ? storedScrollY
+        : Number(overlayScrollY.current ?? pageHistoryState?.scrollY);
+      if (Number.isFinite(restoreScrollY) && restoreScrollY >= 0) {
+        // The browser and the router can both attempt scroll restoration after
+        // popstate. Wait until the product list has its saved height, then
+        // return to the product that opened the overlay.
+        restoreStorefrontScrollPosition(restoreScrollY);
+      }
 
       switch (topLayer) {
         case "zoomedImage": setZoomedImage(null); break;
@@ -2513,7 +2694,7 @@ export default function Home() {
   };
   const openCheckout = async () => {
     if (!cartItems.length) return announce("Add a piece to your cart first");
-    if (cartStockIssues.length) return announce(cartHasSoldOutItems ? "Remove sold out items before checkout" : "Reduce item quantities before checkout");
+    if (cartStockIssues.length) return announce(cartHasSoldOutItems ? "Remove unavailable items before checkout" : "Reduce item quantities before checkout");
     if (!authUser) {
       window.localStorage.setItem(checkoutAfterAuthKey, "1");
       setCartOpen(false);
@@ -2579,7 +2760,7 @@ export default function Home() {
   const decrementLocalInventory = (items: NonNullable<CustomerOrder["items"]>) => {
     const normalizeInventoryKey = (value?: string) => String(value || "").trim().replace(/[^a-z0-9]/gi, "").toLowerCase();
     let changed = false;
-    const next = products.map((product) => {
+    const next = catalogProducts.map((product) => {
         const matchingItems = items.filter((item) => {
           const itemId = normalizeInventoryKey(item.productId);
           return itemId && (itemId === normalizeInventoryKey(product.id) || itemId === normalizeInventoryKey(product.sku));
@@ -2633,6 +2814,7 @@ export default function Home() {
     if (!changed) return false;
     setProducts(next);
     window.localStorage.setItem("fanzzy-products", JSON.stringify(next));
+    persistStorefrontProductCache(next);
     const variantCache = Object.fromEntries(next.filter((product) => product.variants?.length).flatMap((product) => [
       [product.sku, product.variants],
       [product.id, product.variants],
@@ -2800,7 +2982,7 @@ export default function Home() {
       setAuthOpen(true);
       return;
     }
-    if (cartStockIssues.length) return announce(cartHasSoldOutItems ? "Remove sold out items before checkout" : "Reduce item quantities before checkout");
+    if (cartStockIssues.length) return announce(cartHasSoldOutItems ? "Remove unavailable items before checkout" : "Reduce item quantities before checkout");
     if (!paymentSettings.online && !paymentSettings.cod) return announce("No payment method is currently available. Please try again shortly.");
     if (paymentMethod === "online" && !paymentSettings.online) return announce("Online payment is currently unavailable. Choose COD instead.");
     if (paymentMethod === "cod" && !paymentSettings.cod) return announce("COD is currently unavailable. Choose online payment instead.");
@@ -3125,8 +3307,8 @@ export default function Home() {
       <div className="announcement"><div className="announcement-promo"><strong>{announcementText}</strong><button onClick={() => announce("Explore the collection below")}>Explore now&nbsp; ↗</button></div><span className="announcement-powered">Driven by Excellence. Powered by Vestano Retail</span></div>
 
       <header className="site-header">
-        <a href="#top" className="wordmark" aria-label="fanZZy home"><img {...storefrontImageProps("/fanzzy-mark.png", "110px")} decoding="async" alt="fanZZy" className="brand-logo" /><span className="navbar-brand-name">fanZZy</span></a>
-        <nav className="desktop-nav" aria-label="Main navigation"><a href="#shop">Shop</a><a href="#categories">Collections</a><a href="#story">The journal</a><a href={`${siteBasePath}/track-order`}>Track order</a><a href="#footer">About</a></nav>
+        <a href="#top" className="wordmark" aria-label="fanZZy home" onClick={(event) => scrollToPageAnchor(event, "top")}><img {...storefrontImageProps("/fanzzy-mark.png", "110px")} decoding="async" alt="fanZZy" className="brand-logo" /><span className="navbar-brand-name">fanZZy</span></a>
+        <nav className="desktop-nav" aria-label="Main navigation"><a href="#shop">Shop</a><a href="#categories">Collections</a><a href="#story">The journal</a><a href={`${siteBasePath}/track-order`}>Track order</a><a href="#footer" onClick={(event) => scrollToPageAnchor(event, "footer")}>About</a></nav>
         <div className="header-actions">
           <label className="navbar-search"><span aria-hidden="true">⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search jewellery" onFocus={openSearch} aria-label="Search jewellery" />{search && <button className="navbar-search-clear" type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => setSearch("")} aria-label="Clear search">×</button>}</label>
           <button className="header-action-with-icon saved-header-action" onClick={() => setSavedOpen(true)} aria-label="View saved pieces"><svg className="header-action-icon" viewBox="0 0 16 16" aria-hidden="true" fill="none"><path d="M8 13.25S2.75 10.15 2.75 6.55A2.55 2.55 0 0 1 8 5.8a2.55 2.55 0 0 1 5.25.75C13.25 10.15 8 13.25 8 13.25Z" /></svg><span className="action-label">Saved</span>{wishlist.length > 0 && <b>{wishlist.length}</b>}</button>
@@ -3143,7 +3325,7 @@ export default function Home() {
           <a href="#categories" onClick={() => setMobileNavOpen(false)}>Collections <span>↗</span></a>
           <a href="#story" onClick={() => setMobileNavOpen(false)}>The journal <span>↗</span></a>
           <a href={`${siteBasePath}/track-order`} onClick={() => setMobileNavOpen(false)}>Track order <span>↗</span></a>
-          <a href="#footer" onClick={() => setMobileNavOpen(false)}>About <span>↗</span></a>
+          <a href="#footer" onClick={(event) => { setMobileNavOpen(false); scrollToPageAnchor(event, "footer"); }}>About <span>↗</span></a>
         </nav>
         <div className="mobile-nav-actions">
           <button onClick={() => { setMobileNavOpen(false); openSearch(); }}>Search the collection <span>⌕</span></button>
@@ -3154,7 +3336,7 @@ export default function Home() {
         </div>
       </div>}
 
-      {heroSlides.length > 0 && <section className="hero hero-background" id="top"><div className="hero-slide-layer" key={heroSlides[heroSlideIndex]}><img {...storefrontImageProps(heroSlides[heroSlideIndex], "100vw")} fetchPriority="high" decoding="async" alt="Fanzzy collection highlight" /></div></section>}
+      {heroSlides.length > 0 && <section className="hero hero-background"><div className="hero-slide-layer" key={heroSlides[heroSlideIndex]}><img {...storefrontImageProps(heroSlides[heroSlideIndex], "100vw")} fetchPriority="high" decoding="async" alt="Fanzzy collection highlight" /></div></section>}
 
       <section className="section-block" id="categories"><div className="category-showcase"><div className="category-intro"><h2>Find your <em>signature.</em></h2></div><div className="category-section-grids">{categoryGroups.map(({ section, categories: sectionCategories }) => sectionCategories.length ? <div className={`category-display-group ${section === "luxury" ? "luxury-category-group" : "normal-category-group"}`} key={section}><a className="category-group-heading" href={`${siteBasePath}/collections#${section}`} aria-label={`View all ${section === "luxury" ? "Luxury" : "Everyday Collection"} categories`}><div><h3>{section === "luxury" ? "Luxury Category" : "Everyday Collection"}</h3></div><span className="category-group-link">View <span>↗</span></span></a><div className="category-grid">{sectionCategories.map((category, index) => <button className={`category-card category-${index + 1}`} key={category.name} onClick={() => openCategoryProducts(category.name, section)}><img {...storefrontImageProps(category.image || categoryImageFallback(category.name, index), "(max-width: 640px) 46vw, 24vw")} loading={index < 4 ? "eager" : "lazy"} decoding="async" alt={category.name} /><span className="category-overlay" /><span className="category-info"><strong>{category.name}</strong><small>{getCategoryPieceCount(category)} pieces</small></span></button>)}</div></div> : null)}</div></div></section>
       {vendors.length > 0 && <section className="section-block vendor-strip-section" aria-labelledby="vendor-strip-title"><div className="vendor-strip-heading"><div><p className="eyebrow">SHOP BY VENDOR</p><h2 id="vendor-strip-title">Meet the <em>makers.</em></h2></div><a className="text-link" href={`${siteBasePath}/vendors`}>View all vendors <span>↗</span></a></div><div className="vendor-strip" role="list">{vendors.map((vendor) => { const image = vendor.logoUrl || vendor.coverUrl; return <a className="vendor-strip-card" href={`${siteBasePath}/vendors/store/?slug=${encodeURIComponent(vendor.slug)}`} key={vendor.id} role="listitem"><span className="vendor-strip-logo">{image ? <img loading="lazy" decoding="async" src={image} alt="" /> : <strong>{vendor.businessName.trim().charAt(0).toUpperCase()}</strong>}</span><span className="vendor-strip-copy"><strong>{vendor.businessName}</strong><small>{vendor.featured ? "Featured vendor" : "Explore store"} <span>↗</span></small></span></a>; })}</div></section>}
@@ -3162,14 +3344,14 @@ export default function Home() {
       <section className="manifesto"><p className="eyebrow">THE FANZZY STANDARD</p><h2>Jewellery with a point of view.<br /><em>Made for your everyday extraordinary.</em></h2><p className="manifesto-copy">Fanzzy is a study in contrast — soft and sculptural, familiar and unexpected. Every piece is made in small batches with considered materials and a little bit of magic.</p></section>
 
 
-      <section className={`section-block product-section${activeCategorySection === "luxury" ? " luxury-filter-active" : ""}`} id="shop"><div className="section-heading"><div><p className="eyebrow">CURATED FOR YOU</p><h2>Pieces worth <em>keeping.</em></h2></div><a className="text-link" href="#footer">Shop all <span>↗</span></a></div>{promotionalOffers.length > 0 && <div className="storefront-offer-rail"><span className="eyebrow">LIVE OFFERS</span><div className="storefront-offer-list">{promotionalOffers.map((offer) => <button key={offer.id} onClick={() => { const first = products.find((product) => offersForProduct(product).some((item) => item.id === offer.id)); if (first) openQuickProduct(first); }}>{offerTypeLabel(offer)} {offer.freeQuantity > 0 && <span className="offer-free-label">FREE</span>} <b>↗</b></button>)}</div></div>}<div className="filter-row"><div className="filter-pills"><button className={activeCategory === "All pieces" ? "active" : ""} onClick={() => selectCategory("All pieces")}>All pieces</button>{filterCategories.normal.map((category) => <button className={`${activeCategory === category.name && (activeCategorySection === "all" || activeCategorySection === category.section) ? "active " : ""}`} key={`${category.section}-${category.name}`} onClick={() => selectCategory(category.name, category.section)}>{category.name}{duplicateFilterCategoryKeys.has(categoryFilterKey(category.name)) && <span className="category-section-marker"> · Normal</span>}</button>)}{filterCategories.luxury.length > 0 && <span className="luxury-category-badge">Luxury categories</span>}{filterCategories.luxury.map((category) => <button className={`${activeCategory === category.name && (activeCategorySection === "all" || activeCategorySection === category.section) ? "active " : ""}luxury-category-filter`} key={`${category.section}-${category.name}`} onClick={() => selectCategory(category.name, category.section)}>{category.name}{duplicateFilterCategoryKeys.has(categoryFilterKey(category.name)) && <span className="category-section-marker is-luxury"> · Luxury</span>}</button>)}</div><div className="filter-tools"><label className="product-sort-control"><span>Sort by</span><select value={productSort} onChange={(event) => setProductSort(event.target.value)} aria-label="Sort products"><option value="price-low">Price: low to high</option><option value="price-high">Price: high to low</option><option value="featured">Featured</option><option value="name">Name: A to Z</option><option value="stock">Availability</option></select></label><span className="result-count">{catalogLoading ? "Loading pieces…" : `${filteredProducts.length} pieces`}</span></div></div><div className="product-grid">{catalogLoading ? <p className="muted">Loading pieces…</p> : filteredProducts.map((product) => { const productPromotions = promotionsByProductId.get(product.id) ?? []; const productIsLuxury = productCatalogSection(product.category, categories) === "luxury"; return <ProductCard key={product.id} product={product} isLuxury={productIsLuxury} promotions={productPromotions} cartQuantity={getProductCartQuantity(product)} wished={wishlist.includes(product.id)} onWishlist={() => toggleWishlist(product.id)} onAdd={() => (getProductVariantType(product) === "normal" && product.variants?.length) || (getProductVariantType(product) === "size" && product.sizes?.length) || productPromotions.length ? openQuickProduct(product) : addToCart(product)} onDecrease={() => decreaseProductCart(product)} onIncrease={() => increaseProductCart(product)} onQuickView={() => openQuickProduct(product)} onImageZoom={() => setZoomedImage({ src: product.image, alt: product.name, adjustments: product.imageAdjustments })} />; })}</div></section>
+      <section className={`section-block product-section${activeCategorySection === "luxury" ? " luxury-filter-active" : ""}`} id="shop"><div className="section-heading"><div><p className="eyebrow">CURATED FOR YOU</p><h2>Pieces worth <em>keeping.</em></h2></div><a className="text-link" href="#footer">Shop all <span>↗</span></a></div>{promotionalOffers.length > 0 && <div className="storefront-offer-rail"><span className="eyebrow">LIVE OFFERS</span><div className="storefront-offer-list">{promotionalOffers.map((offer) => <button key={offer.id} onClick={() => { const first = products.find((product) => offersForProduct(product).some((item) => item.id === offer.id)); if (first) openQuickProduct(first); }}>{offerTypeLabel(offer)} {offer.freeQuantity > 0 && <span className="offer-free-label">FREE</span>} <b>↗</b></button>)}</div></div>}<div className="filter-row"><div className="filter-pills"><button className={activeCategory === "All pieces" ? "active" : ""} onClick={() => selectCategory("All pieces")}>All pieces</button>{filterCategories.normal.map((category) => <button className={`${activeCategory === category.name && (activeCategorySection === "all" || activeCategorySection === category.section) ? "active " : ""}`} key={`${category.section}-${category.name}`} onClick={() => selectCategory(category.name, category.section)}>{category.name}{duplicateFilterCategoryKeys.has(categoryFilterKey(category.name)) && <span className="category-section-marker"> · Normal</span>}</button>)}{filterCategories.luxury.length > 0 && <span className="luxury-category-badge">Luxury categories</span>}{filterCategories.luxury.map((category) => <button className={`${activeCategory === category.name && (activeCategorySection === "all" || activeCategorySection === category.section) ? "active " : ""}luxury-category-filter`} key={`${category.section}-${category.name}`} onClick={() => selectCategory(category.name, category.section)}>{category.name}{duplicateFilterCategoryKeys.has(categoryFilterKey(category.name)) && <span className="category-section-marker is-luxury"> · Luxury</span>}</button>)}</div><div className="filter-tools"><label className="product-sort-control"><span>Sort by</span><select value={productSort} onChange={(event) => setProductSort(event.target.value)} aria-label="Sort products"><option value="price-low">Price: low to high</option><option value="price-high">Price: high to low</option><option value="featured">Featured</option><option value="name">Name: A to Z</option><option value="stock">Availability</option></select></label><span className="result-count">{catalogLoading ? "Loading pieces…" : `${filteredProducts.length} pieces`}</span></div></div><div className="product-grid">{catalogLoading ? <p className="muted">Loading pieces…</p> : !filteredProducts.length ? <p className="muted">No pieces found. Try another category or search.</p> : filteredProducts.map((product) => { const productPromotions = promotionsByProductId.get(product.id) ?? []; const productIsLuxury = productCatalogSection(product.category, categories) === "luxury"; return <ProductCard key={product.id} product={product} isLuxury={productIsLuxury} promotions={productPromotions} cartQuantity={getProductCartQuantity(product)} wished={wishlist.includes(product.id)} onWishlist={() => toggleWishlist(product.id)} onAdd={() => (getProductVariantType(product) === "normal" && product.variants?.length) || (getProductVariantType(product) === "size" && product.sizes?.length) || productPromotions.length ? openQuickProduct(product) : addToCart(product)} onDecrease={() => decreaseProductCart(product)} onIncrease={() => increaseProductCart(product)} onQuickView={() => openQuickProduct(product)} onImageZoom={() => openZoomedImage({ src: product.image, alt: product.name, adjustments: product.imageAdjustments })} />; })}</div></section>
       <section className="editorial" id="story"><div className="editorial-image"><img loading="lazy" decoding="async" src="https://images.unsplash.com/photo-1515562141207-7a88fb7ce338?auto=format&fit=crop&w=1100&q=85" alt="Close-up of sculptural gold jewelry" /><span>THE ART OF<br /><em>ADORNMENT</em></span></div><div className="editorial-copy"><p className="eyebrow">A NOTE FROM THE STUDIO</p><h2>Less noise.<br /><em>More meaning.</em></h2><p>There is beauty in the in-between. The way a quiet chain layers with your favourite shirt. A ring that becomes part of your hand. Fanzzy is made for these small rituals — the ones that make a day feel like yours.</p><a className="button button-dark" href="#footer">Read our story <span>↗</span></a><div className="editorial-sign">F / 19<br /></div></div></section>
 
       <section className="offer-banner"><div><p className="eyebrow light">{activeCampaign ? activeCampaign.kind === "Coupon" ? "EXCLUSIVE OFFER" : "SEASONAL EDIT" : "LIMITED OFFER"}</p><h2>{activeCampaign ? activeCampaign.name : "Buy 1, get 1"}<br /><em>{activeCampaign ? "is here." : "on us."}</em></h2></div><div><p>{activeCampaign ? <>{activeCampaign.detail}{activeCampaign.discount && <> · <strong>{activeCampaign.discount}</strong></>}{activeCampaign.code && <> with code <strong>{activeCampaign.code}</strong></>}</> : <>Choose two eligible pieces and enjoy our Buy 1 Get 1 offer.</>}</p>{activeCampaign?.code ? <button className="button button-light" onClick={() => { const code = activeCampaign.code ?? ""; navigator.clipboard?.writeText(code); announce(`Code copied: ${code}`); }}>Copy code <span>↗</span></button> : <button className="button button-light" onClick={() => announce(activeCampaign && isBogoCampaign(activeCampaign) ? `${getBogoOfferLabel(activeCampaign)} offer opened` : "Offer collection opened")}>Shop the offer <span>↗</span></button>}</div></section>
 
       <section className="newsletter"><div><p className="eyebrow">THE FANZZY LETTER</p><h2>A little light<br /><em>in your inbox.</em></h2></div><form onSubmit={subscribeNewsletter}><p>New drops, studio notes, and 10% off your first order — no noise, promise.</p><div className="email-line"><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Your email address" aria-label="Your email address" required /><button aria-label="Subscribe to newsletter">↗</button></div>{(subscribed || newsletterMessage) && <span className="success-message">{newsletterMessage}</span>}</form></section>
 
-      <footer className="site-footer" id="footer"><div className="footer-brand"><a href="#top" className="wordmark wordmark-light"><img {...storefrontImageProps("/fanzzy-mark.png", "110px")} decoding="async" alt="Fanzzy" className="brand-logo" /></a><p>Quietly remarkable jewellery<br />for all your becoming.</p></div><div><p className="eyebrow light">Explore</p><a href="#shop">New arrivals</a><a href="#shop">Bestsellers</a><a href="#categories">Collections</a><a href="#shop">Gift cards</a></div><div><p className="eyebrow light">Need a hand?</p><a href="#footer">Contact us</a><a href="#footer">Shipping & returns</a><a href="#footer">Care guide</a><a href="#footer">FAQs</a></div><div><p className="eyebrow light">Follow along</p><a href="https://www.instagram.com/fanzzy.in/?hl=en" target="_blank" rel="noreferrer">Instagram ↗</a><a href="https://www.facebook.com/profile.php?id=61593401750910" target="_blank" rel="noreferrer">Facebook ↗</a><a href="https://www.pinterest.com/fanzzyv/" target="_blank" rel="noreferrer">Pinterest ↗</a><a href="#footer">WhatsApp ↗</a><p className="footer-small">Made with intention in India.<br />© Fanzzy 2024</p></div><div className="footer-bottom"><button type="button" onClick={() => setPrivacyOpen(true)}>Privacy</button><button type="button" onClick={() => setTermsOpen(true)}>Terms</button><button type="button" onClick={() => setReturnPolicyOpen(true)}>Return Policy</button><span>Accessibility</span><span>India / INR ₹</span></div></footer>
+      <footer className="site-footer" id="footer"><div className="footer-brand"><a href="#top" className="wordmark wordmark-light" onClick={(event) => scrollToPageAnchor(event, "top")}><img {...storefrontImageProps("/fanzzy-mark.png", "110px")} decoding="async" alt="Fanzzy" className="brand-logo" /></a><p>Quietly remarkable jewellery<br />for all your becoming.</p></div><div><p className="eyebrow light">Explore</p><a href="#shop">New arrivals</a><a href="#shop">Bestsellers</a><a href="#categories">Collections</a><a href="#shop">Gift cards</a></div><div><p className="eyebrow light">Need a hand?</p><a href="#footer">Contact us</a><a href="#footer">Shipping & returns</a><a href="#footer">Care guide</a><a href="#footer">FAQs</a></div><div><p className="eyebrow light">Follow along</p><a href="https://www.instagram.com/fanzzy.in/?hl=en" target="_blank" rel="noreferrer">Instagram ↗</a><a href="https://www.facebook.com/profile.php?id=61593401750910" target="_blank" rel="noreferrer">Facebook ↗</a><a href="https://www.pinterest.com/fanzzyv/" target="_blank" rel="noreferrer">Pinterest ↗</a><a href="#footer">WhatsApp ↗</a><p className="footer-small">Made with intention in India.<br />© Fanzzy 2024</p></div><div className="footer-bottom"><button type="button" onClick={() => setPrivacyOpen(true)}>Privacy</button><button type="button" onClick={() => setTermsOpen(true)}>Terms</button><button type="button" onClick={() => setReturnPolicyOpen(true)}>Return Policy</button><span>Accessibility</span><span>India / INR ₹</span></div></footer>
 
       <button className={`whatsapp-float ${cartItems.length > 0 && !cartOpen && cartPreviewOpen ? "cart-preview-visible" : ""}`} onClick={() => setAssistantOpen(true)} aria-label="Open Fanzzy AI Assistant">✦ <span>Chat with AI</span></button>
 
@@ -3193,13 +3375,13 @@ export default function Home() {
       {returnPolicyOpen && <div className="drawer-backdrop terms-backdrop" onClick={() => setReturnPolicyOpen(false)}><section className="terms-modal" role="dialog" aria-modal="true" aria-labelledby="return-policy-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">FANZZY</p><h2 id="return-policy-title">Return Policy</h2></div><button aria-label="Close return policy" onClick={() => setReturnPolicyOpen(false)}>×</button></div><div className="terms-content"><p>Customers may request a return for eligible products within the return period mentioned on our website.</p><p>Once a return request is approved, the <strong>customer must send the product to the return hub/address provided by Fanzzy</strong>.</p><ul><li>The product must be unused, undamaged, and returned in its original packaging with all tags/accessories intact.</li><li><strong>Return courier/shipping charges must be paid by the customer. Fanzzy will not bear the cost of sending the returned product to our hub.</strong></li><li>Customers are responsible for safely packing and dispatching the return item.</li><li>We recommend using a trackable courier service. Fanzzy will not be responsible for return parcels lost or damaged during transit.</li><li>Refund/replacement processing will begin only after the returned item reaches our hub and successfully passes the quality inspection.</li><li>Original delivery/shipping charges, if any, are non-refundable unless the return is due to a wrong or defective product supplied by Fanzzy.</li><li>Products that are used, damaged, altered, or returned without original packaging may not be eligible for refund or replacement.</li><li>Certain products may be marked as <strong>non-returnable</strong> for hygiene or other applicable reasons.</li></ul><p>If a customer receives a <strong>wrong, damaged, or defective product</strong>, they should contact Fanzzy customer support within the specified return period with the order details and supporting photos/videos.</p></div></section></div>}
       {privacyOpen && <div className="drawer-backdrop terms-backdrop" onClick={() => setPrivacyOpen(false)}><section className="terms-modal" role="dialog" aria-modal="true" aria-labelledby="privacy-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">FANZZY</p><h2 id="privacy-title">Privacy Policy</h2></div><button aria-label="Close privacy policy" onClick={() => setPrivacyOpen(false)}>×</button></div><div className="terms-content"><p>At <strong>Fanzzy</strong>, we respect and protect your privacy. We collect necessary information such as your name, contact details, address, and order information to process orders, arrange delivery, manage returns/refunds, and provide customer support.</p><p>Your information may be shared with trusted <strong>payment, courier, and service partners</strong> only when required to complete our services. We do not sell customers' personal information to third parties.</p><p>We take reasonable measures to keep your information secure. By using the Fanzzy website, you agree to this Privacy Policy and any updates made to it.</p></div></section></div>}
 
-      {assistantOpen && <div className="drawer-backdrop" onClick={() => setAssistantOpen(false)}><aside className="assistant-drawer" role="dialog" aria-modal="true" aria-labelledby="assistant-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">FANZZY AI</p><h2 id="assistant-title">How can I help?</h2></div><button aria-label="Close AI assistant" onClick={() => setAssistantOpen(false)}>×</button></div><div className="assistant-messages" aria-live="polite">{assistantMessages.map((message, index) => <div className={`assistant-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.text}{message.productIds?.length ? <div className="assistant-product-actions">{message.productIds.map((productId) => { const product = products.find((item) => item.id === productId); return product ? <button key={product.id} onClick={() => { openQuickProduct(product); setAssistantOpen(false); }}>View {product.name} · {formatINR(getCustomerPrice(product))} ↗</button> : null; })}</div> : null}</span></div>)}</div><div className="assistant-prompts"><button onClick={() => sendAssistantMessage("Help me choose a gift")}>Choose a gift</button><button onClick={() => sendAssistantMessage("Track my order")}>Track my order</button><button onClick={() => sendAssistantMessage("How do I care for my jewellery?")}>Jewellery care</button></div><form className="assistant-form" onSubmit={(event) => { event.preventDefault(); sendAssistantMessage(); }}><input value={assistantInput} onChange={(event) => setAssistantInput(event.target.value)} placeholder="Ask Fanzzy Assistant..." aria-label="Ask Fanzzy Assistant" /><button type="submit" aria-label="Send message">↗</button></form></aside></div>}
+      {assistantOpen && <div className="drawer-backdrop" onClick={() => setAssistantOpen(false)}><aside className="assistant-drawer" role="dialog" aria-modal="true" aria-labelledby="assistant-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">FANZZY AI</p><h2 id="assistant-title">How can I help?</h2></div><button aria-label="Close AI assistant" onClick={() => setAssistantOpen(false)}>×</button></div><div className="assistant-messages" aria-live="polite">{assistantMessages.map((message, index) => <div className={`assistant-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.text}{message.productIds?.length ? <div className="assistant-product-actions">{message.productIds.map((productId) => { const product = catalogProducts.find((item) => item.id === productId); return product ? <button key={product.id} onClick={() => { openQuickProduct(product); setAssistantOpen(false); }}>View {product.name} · {formatINR(getCustomerPrice(product))} ↗</button> : null; })}</div> : null}</span></div>)}</div><div className="assistant-prompts"><button onClick={() => sendAssistantMessage("Help me choose a gift")}>Choose a gift</button><button onClick={() => sendAssistantMessage("Track my order")}>Track my order</button><button onClick={() => sendAssistantMessage("How do I care for my jewellery?")}>Jewellery care</button></div><form className="assistant-form" onSubmit={(event) => { event.preventDefault(); sendAssistantMessage(); }}><input value={assistantInput} onChange={(event) => setAssistantInput(event.target.value)} placeholder="Ask Fanzzy Assistant..." aria-label="Ask Fanzzy Assistant" /><button type="submit" aria-label="Send message">↗</button></form></aside></div>}
 
       {searchOpen && <div className="overlay search-overlay" role="dialog" aria-modal="true" aria-label="Search"><div className="overlay-top"><span className="wordmark"><img {...storefrontImageProps("/fanzzy-mark.png", "110px")} decoding="async" alt="Fanzzy" className="brand-logo" /></span><button onClick={closeSearch}>Close&nbsp; ×</button></div><div className="search-content"><p className="eyebrow">SEARCH THE COLLECTION</p><div className="large-search"><input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Try “gold hoops”" /><span>⌕</span></div>{search && <div className="search-results">{filteredProducts.length ? filteredProducts.map((product) => <button key={product.id} onClick={() => { openQuickProduct(product) }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(getCustomerPrice(product))}</small></span><b>↗</b></button>) : <p className="muted">No pieces found. Try another search.</p>}</div>}{!search && <div className="search-suggestions"><span>Trending now</span><button onClick={() => setSearch("hoops")}>Hoops</button><button onClick={() => setSearch("pearl")}>Pearls</button><button onClick={() => setSearch("chain")}>Chains</button></div>}</div></div>}
 
       {orderConfirmation && <div className="drawer-backdrop" onClick={() => setOrderConfirmation(null)}><section className="order-confirmation" role="dialog" aria-modal="true" aria-labelledby="order-confirmation-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close order confirmation" onClick={() => setOrderConfirmation(null)}>×</button><p className="eyebrow">{orderConfirmation.paymentMethod === "cod" ? "COD ORDER CONFIRMED" : "PAYMENT SUCCESSFUL"}</p><h2 id="order-confirmation-title">{orderConfirmation.paymentMethod === "cod" ? "Your order is confirmed." : "Your payment is complete."}</h2><p>{orderConfirmation.paymentMethod === "cod" ? <>Please pay <strong>{orderConfirmation.total}</strong> to the delivery partner when order <strong>{orderConfirmation.id}</strong> arrives.</> : <>We received <strong>{orderConfirmation.total}</strong> for order <strong>{orderConfirmation.id}</strong>. Your order has been confirmed.</>}</p>{orderConfirmation.fulfillmentMethod === "pickup" && <p className="pickup-confirmation"><strong>Pickup from {orderConfirmation.pickupHubName || "hub"}</strong><br />{orderConfirmation.pickupHubPlace || "Pickup place saved with your order."}<br /><small>No delivery charges.</small></p>}{orderConfirmation.razorpayPaymentId && <p className="payment-reference">Payment ID: {orderConfirmation.razorpayPaymentId}</p>}<div className="confirmation-actions"><button className="button button-dark" type="button" disabled={printingBillId !== null} aria-busy={printingBillId === orderConfirmation.id} onClick={() => void downloadBill(orderConfirmation)}>{printingBillId === orderConfirmation.id ? "Printing…" : "Print bill"} <span>↗</span></button><button className="save-text" onClick={() => { setOrderConfirmation(null); setOrdersOpen(true); }}>View my orders</button></div></section></div>}
 
-      {savedOpen && <div className="drawer-backdrop" onClick={() => setSavedOpen(false)}><aside className="orders-drawer saved-drawer" role="dialog" aria-modal="true" aria-labelledby="saved-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR EDIT</p><h2 id="saved-title">Saved pieces</h2></div><button aria-label="Close saved pieces" onClick={() => setSavedOpen(false)}>×</button></div>{wishlist.length ? <div className="saved-list">{wishlist.map((productId) => { const product = products.find((item) => item.id === productId); return product ? <article className="saved-card" key={product.id}><button className="saved-product" onClick={() => { openQuickProduct(product); setSavedOpen(false); }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(getCustomerPrice(product))}</small></span><b>↗</b></button><div className="saved-card-actions"><button className="module-secondary" onClick={() => { addToCart(product); setSavedOpen(false); }}>Add to cart</button><button className="saved-remove" onClick={() => toggleWishlist(product.id)}>Remove</button></div></article> : null; })}</div> : <div className="orders-empty saved-empty"><div>♡</div><h3>Your edit is waiting.</h3><p>Tap the heart on any piece to keep it close while you decide.</p><button className="button button-dark" onClick={() => setSavedOpen(false)}>Explore pieces <span>↗</span></button></div>}</aside></div>}
+      {savedOpen && <div className="drawer-backdrop" onClick={() => setSavedOpen(false)}><aside className="orders-drawer saved-drawer" role="dialog" aria-modal="true" aria-labelledby="saved-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR EDIT</p><h2 id="saved-title">Saved pieces</h2></div><button aria-label="Close saved pieces" onClick={() => setSavedOpen(false)}>×</button></div>{wishlist.length ? <div className="saved-list">{wishlist.map((productId) => { const product = catalogProducts.find((item) => item.id === productId); return product ? <article className="saved-card" key={product.id}><button className="saved-product" onClick={() => { openQuickProduct(product); setSavedOpen(false); }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(getCustomerPrice(product))}</small></span><b>↗</b></button><div className="saved-card-actions"><button className="module-secondary" onClick={() => { addToCart(product); setSavedOpen(false); }}>Add to cart</button><button className="saved-remove" onClick={() => toggleWishlist(product.id)}>Remove</button></div></article> : null; })}</div> : <div className="orders-empty saved-empty"><div>♡</div><h3>Your edit is waiting.</h3><p>Tap the heart on any piece to keep it close while you decide.</p><button className="button button-dark" onClick={() => setSavedOpen(false)}>Explore pieces <span>↗</span></button></div>}</aside></div>}
 
       {profileOpen && <div className="drawer-backdrop" onClick={() => setProfileOpen(false)}><aside className="orders-drawer profile-drawer" role="dialog" aria-modal="true" aria-labelledby="profile-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR FANZZY ACCOUNT</p><h2 id="profile-title">Profile</h2></div><button aria-label="Close profile" onClick={() => setProfileOpen(false)}>×</button></div>{authUser ? <div className="profile-content"><div className="profile-avatar" aria-hidden="true">{profileName.slice(0, 1).toUpperCase()}</div><p className="eyebrow">SIGNED IN</p><h3>{profileName}</h3><p className="profile-welcome">Your saved pieces, cart and order history stay together here.</p><dl className="profile-details"><div><dt>Login mobile number</dt><dd>{authUser.phone}</dd></div><div><dt>Account ID</dt><dd>{authUser.id}</dd></div></dl><div className="profile-shortcuts"><button onClick={() => { setProfileOpen(false); setOrdersOpen(true); }}><span>Orders</span><b>{orders.length.toString().padStart(2, "0")} ↗</b></button><button onClick={() => { setProfileOpen(false); setSavedOpen(true); }}><span>Saved</span><b>{wishlist.length.toString().padStart(2, "0")} ♡</b></button></div><button className="button button-dark full-width" onClick={() => { setProfileOpen(false); openCart(); }}>Open my cart <span>↗</span></button><button className="profile-sign-out" onClick={signOut}>Sign out</button></div> : <div className="profile-content profile-signed-out"><div className="profile-avatar" aria-hidden="true">○</div><p className="eyebrow">NOT SIGNED IN</p><h3>Welcome to Fanzzy.</h3><p>Sign in with a one-time SMS code to keep your cart and orders connected to your mobile number.</p><button className="button button-dark full-width" onClick={() => { setProfileOpen(false); setAuthMessage(""); setAuthOpen(true); }}>Sign in with mobile OTP <span>↗</span></button></div>}</aside></div>}
 
@@ -3207,7 +3389,7 @@ export default function Home() {
 
       {customerTrackingOrder && customerTrackingOrder.fulfillmentMethod !== "pickup" && <div className="drawer-backdrop customer-tracking-backdrop" onClick={() => setCustomerTrackingOrder(null)}><section className="customer-tracking-modal" role="dialog" aria-modal="true" aria-labelledby="customer-tracking-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" type="button" aria-label="Close order tracking" onClick={() => setCustomerTrackingOrder(null)}>×</button><header><p className="eyebrow">ORDER TRACKING</p><h2 id="customer-tracking-title">{customerTrackingOrder.id}</h2><p>{customerTrackingOrder.status} · {customerTrackingOrder.total}</p></header><section className="customer-tracking-destination"><p className="eyebrow">DELIVERY ADDRESS</p><strong>{customerTrackingOrder.customerName}</strong><span>{customerTrackingOrder.address || "Delivery address not available."}</span></section>{customerTrackingOrder.delhiveryAwb ? (() => { const liveStatus = customerTrackingOrder.delhiveryLiveStatus || (customerTrackingOrder.delhiveryShipmentStatus === "created" ? "Ready to ship" : "Order received"); const currentStage = customerTrackingStageIndex(liveStatus); const scans = customerTrackingOrder.delhiveryScans || []; return <><section className="customer-tracking-summary"><div><small>DELHIVERY AWB</small><strong>{customerTrackingOrder.delhiveryAwb}</strong></div><div><small>LIVE STATUS</small><strong>{liveStatus}</strong>{customerTrackingOrder.delhiveryLiveLocation && <span>{customerTrackingOrder.delhiveryLiveLocation}</span>}</div></section><a className="customer-tracking-link" href={customerTrackingOrder.delhiveryTrackingUrl || `https://www.delhivery.com/tracking?uniqueIdentifier=${encodeURIComponent(customerTrackingOrder.delhiveryAwb)}`} target="_blank" rel="noreferrer">Open Delhivery tracking ↗</a><section className="customer-tracking-timeline"><p className="eyebrow">LIVE DELIVERY TIMELINE</p><ol className="tracking-stage-list" aria-label="Delhivery delivery progress">{customerTrackingStages.map((stage, index) => { const current = index === currentStage; const completed = index < currentStage; const scan = scans.find((candidate) => stage.match.test(`${candidate.status} ${candidate.instructions || ""}`)); const date = scan?.date || (current ? customerTrackingOrder.delhiveryLiveStatusDate : index === 0 ? customerTrackingOrder.delhiveryShipmentCreatedAt || customerTrackingOrder.createdAt : index === 1 ? customerTrackingOrder.delhiveryPickupRequestDate : ""); const detail = current ? index === 2 && customerTrackingOrder.delhiveryLiveLocation ? `Moving through ${customerTrackingOrder.delhiveryLiveLocation}.` : index === 3 ? "Your parcel is out for delivery today." : index === 4 ? "Your order has been delivered." : index === 1 ? "Pickup has been scheduled with Delhivery." : "Your parcel is being prepared." : completed ? "Completed" : "Waiting for update"; return <li className={`${completed ? "completed " : ""}${current ? "current" : "upcoming"}`} aria-current={current ? "step" : undefined} key={stage.key}><span className="tracking-stage-dot" /><div><strong>{stage.label}</strong><small>{detail}</small>{date && <time>{formatTrackingDate(date)}</time>}</div></li>; })}</ol>{scans.length > 0 && <div className="tracking-scan-summary"><strong>Latest courier scan</strong><span>{scans[0].status}{scans[0].location ? ` · ${scans[0].location}` : ""}</span>{scans[0].date && <time>{formatTrackingDate(scans[0].date)}</time>}</div>}</section></>; })() : <div className="customer-tracking-notice"><strong>Delhivery tracking is not available yet</strong><span>{customerTrackingOrder.delhiveryShipmentStatus === "failed" ? customerTrackingOrder.delhiveryShipmentError || "Shipment creation needs attention before tracking can begin." : "The tracking timeline will appear after your shipment and AWB are created."}</span></div>}</section></div>}
 
-      {cartOpen && <div className="drawer-backdrop cart-backdrop" onClick={() => setCartOpen(false)}><aside className="cart-drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR CART</p><h2>{cartCount ? `${cartCount} piece${cartCount > 1 ? "s" : ""}` : "A little empty"}</h2></div><button onClick={() => setCartOpen(false)}>×</button></div>{cartItems.length ? <><div className="drawer-items">{cartItems.map((product) => <div className={`drawer-item${getVariantStock(product, product.variant) <= 0 ? " drawer-item-sold-out" : ""}`} key={product.cartKey}><img src={product.variant?.image || product.image} alt="" style={imageAdjustmentStyle(product.variant?.adjustments || product.imageAdjustments)} /><div><strong>{product.name}</strong>{product.variant?.name && <small className="cart-variant-name">{product.variant.name}</small>}{product.size && <small className="cart-variant-name">Size {product.size}</small>}{product.promotion && <small className={`cart-promotion-label ${product.promotion.role === "free" ? "is-free" : ""}`}>{product.promotion.role === "free" ? `FREE · ${product.promotion.label}` : product.promotion.role === "bundle" ? `${product.promotion.label} · allocated price` : product.promotion.label}</small>}{getVariantStock(product, product.variant) <= 0 && <small className="cart-stock-label">Sold out</small>}<small>{formatINR(getCartLinePrice(product))}{product.promotion && product.promotion.role === "bundle" && product.promotion.linePrice !== product.promotion.regularPrice ? <del className="cart-regular-price">{formatINR(product.promotion.regularPrice)}</del> : null}</small><div className="quantity"><button onClick={() => updateQuantity(product.cartKey, -1)} aria-label={`Decrease ${product.name} quantity`}>−</button><span>{product.quantity}</span><button onClick={() => updateQuantity(product.cartKey, 1)} aria-label={`Increase ${product.name} quantity`}>+</button></div></div><div className="cart-item-actions"><b>{formatINR(getCartLinePrice(product) * product.quantity)}</b><button className="cart-remove" onClick={() => removeFromCart(product.cartKey)} aria-label={`Remove ${product.name} from cart`}>Remove</button></div></div>)}</div><div className="cart-fulfillment"><p className="field-label">Receive your order</p><div className="cart-fulfillment-options"><button type="button" className={fulfillmentMethod === "delivery" ? "active" : ""} onClick={() => setFulfillmentMethod("delivery")}>Home delivery<small>Delivery in 4–6 working days</small></button><button type="button" className={fulfillmentMethod === "pickup" ? "active" : ""} onClick={() => { setFulfillmentMethod("pickup"); if (!selectedPickupHubId && pickupHubs[0]) setSelectedPickupHubId(pickupHubs[0].id); }} disabled={!pickupHubs.length}>Hub pickup<small>{pickupHubs.length ? "Collect from a hub" : "No hubs available"}</small></button></div>{fulfillmentMethod === "pickup" && pickupHubs.length > 0 && <select aria-label="Pickup hub" value={selectedPickupHubId} onChange={(event) => setSelectedPickupHubId(event.target.value)}><option value="">Select pickup hub</option>{pickupHubs.map((hub) => <option key={hub.id} value={hub.id}>{hub.name} · {hub.place}</option>)}</select>}{fulfillmentMethod === "pickup" && !pickupHubs.length && <small className="cart-fulfillment-help">Add a pickup hub in Admin before choosing hub pickup.</small>}</div><div className="drawer-footer">{cartStockIssues.length > 0 && <div className="cart-stock-warning" role="alert"><strong>Remove sold out items before checkout</strong><span>{cartHasSoldOutItems ? "This cart contains an unavailable item." : "One or more quantities are above the available stock."}</span><button type="button" className="cart-remove-unavailable" onClick={() => { cartStockIssues.forEach((item) => removeFromCart(item.cartKey)); announce("Unavailable items removed from cart"); }}>Remove unavailable items</button></div>}<div><span>Subtotal</span><strong>{formatINR(subtotal)}</strong></div>{cartItems.some((item) => item.promotion?.role === "bundle") && <div className="offer-total"><span>Bundle regular total</span><strong>{formatINR(cartItems.reduce((sum, item) => sum + (item.promotion?.regularPrice || 0) * item.quantity, 0))}</strong></div>}{cartItems.some((item) => item.promotion?.role === "free") && <div className="offer-total"><span>Free-item discount</span><strong>Applied</strong></div>}{bogoDiscount > 0 && <div className="offer-total"><span>{bogoOfferLabel} discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="offer-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div><span>Delivery</span><strong>{deliveryTotal > 0 ? formatINR(deliveryTotal) : "Free"}</strong></div><div className="drawer-total"><span>Total</span><strong>{formatINR(orderTotal)}</strong></div><p>{cartItems.some((item) => item.promotion) ? "Promotion items are linked by offer group ID for inventory, returns, and refunds." : deliveryTotal > 0 ? "Delivery charge applied to this order." : deliveryCharge.freeAboveEnabled ? `Free delivery on orders above ${formatINR(deliveryCharge.freeAbove)}.` : "Complimentary shipping."}</p><button className="button button-dark full-width" onClick={openCheckout} disabled={cartStockIssues.length > 0} title={cartStockIssues.length > 0 ? "Remove unavailable items before checkout" : undefined}>Proceed to buy <span>↗</span></button></div></> : <div className="empty-bag"><div>✦</div><p>Your future favourites<br />belong here.</p><button className="text-link" onClick={() => setCartOpen(false)}>Continue shopping <span>↗</span></button></div>}</aside></div>}
+      {cartOpen && <div className="drawer-backdrop cart-backdrop" onClick={() => setCartOpen(false)}><aside className="cart-drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR CART</p><h2>{cartCount ? `${cartCount} piece${cartCount > 1 ? "s" : ""}` : "A little empty"}</h2></div><button onClick={() => setCartOpen(false)}>×</button></div>{cartItems.length ? <><div className="drawer-items">{cartItems.map((product) => <div className={`drawer-item${getVariantStock(product, product.variant) <= 0 ? " drawer-item-sold-out" : ""}`} key={product.cartKey}><img src={product.variant?.image || product.image} alt="" style={imageAdjustmentStyle(product.variant?.adjustments || product.imageAdjustments)} /><div><strong>{product.name}</strong>{product.variant?.name && <small className="cart-variant-name">{product.variant.name}</small>}{product.size && <small className="cart-variant-name">Size {product.size}</small>}{product.promotion && <small className={`cart-promotion-label ${product.promotion.role === "free" ? "is-free" : ""}`}>{product.promotion.role === "free" ? `FREE · ${product.promotion.label}` : product.promotion.role === "bundle" ? `${product.promotion.label} · allocated price` : product.promotion.label}</small>}{getVariantStock(product, product.variant) <= 0 && <small className="cart-stock-label">Sold out</small>}<small>{formatINR(getCartLinePrice(product))}{product.promotion && product.promotion.role === "bundle" && product.promotion.linePrice !== product.promotion.regularPrice ? <del className="cart-regular-price">{formatINR(product.promotion.regularPrice)}</del> : null}</small><div className="quantity"><button onClick={() => updateQuantity(product.cartKey, -1)} aria-label={`Decrease ${product.name} quantity`}>−</button><span>{product.quantity}</span><button onClick={() => updateQuantity(product.cartKey, 1)} aria-label={`Increase ${product.name} quantity`}>+</button></div></div><div className="cart-item-actions"><b>{formatINR(getCartLinePrice(product) * product.quantity)}</b><button className="cart-remove" onClick={() => removeFromCart(product.cartKey)} aria-label={`Remove ${product.name} from cart`}>Remove</button></div></div>)}</div><div className="cart-fulfillment"><p className="field-label">Receive your order</p><div className="cart-fulfillment-options"><button type="button" className={fulfillmentMethod === "delivery" ? "active" : ""} onClick={() => setFulfillmentMethod("delivery")}>Home delivery<small>Delivery in 4–6 working days</small></button><button type="button" className={fulfillmentMethod === "pickup" ? "active" : ""} onClick={() => { setFulfillmentMethod("pickup"); if (!selectedPickupHubId && pickupHubs[0]) setSelectedPickupHubId(pickupHubs[0].id); }} disabled={!pickupHubs.length}>Hub pickup<small>{pickupHubs.length ? "Collect from a hub" : "No hubs available"}</small></button></div>{fulfillmentMethod === "pickup" && pickupHubs.length > 0 && <select aria-label="Pickup hub" value={selectedPickupHubId} onChange={(event) => setSelectedPickupHubId(event.target.value)}><option value="">Select pickup hub</option>{pickupHubs.map((hub) => <option key={hub.id} value={hub.id}>{hub.name} · {hub.place}</option>)}</select>}{fulfillmentMethod === "pickup" && !pickupHubs.length && <small className="cart-fulfillment-help">Add a pickup hub in Admin before choosing hub pickup.</small>}</div><div className="drawer-footer">{cartStockIssues.length > 0 && <div className="cart-stock-warning" role="alert"><strong>Remove unavailable items before checkout</strong><span>{cartHasSoldOutItems ? "This cart contains an unavailable item." : "One or more quantities are above the available stock."}</span><button type="button" className="cart-remove-unavailable" onClick={() => { cartStockIssues.forEach((item) => removeFromCart(item.cartKey)); announce("Unavailable items removed from cart"); }}>Remove unavailable items</button></div>}<div><span>Subtotal</span><strong>{formatINR(subtotal)}</strong></div>{cartItems.some((item) => item.promotion?.role === "bundle") && <div className="offer-total"><span>Bundle regular total</span><strong>{formatINR(cartItems.reduce((sum, item) => sum + (item.promotion?.regularPrice || 0) * item.quantity, 0))}</strong></div>}{cartItems.some((item) => item.promotion?.role === "free") && <div className="offer-total"><span>Free-item discount</span><strong>Applied</strong></div>}{bogoDiscount > 0 && <div className="offer-total"><span>{bogoOfferLabel} discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="offer-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div><span>Delivery</span><strong>{deliveryTotal > 0 ? formatINR(deliveryTotal) : "Free"}</strong></div><div className="drawer-total"><span>Total</span><strong>{formatINR(orderTotal)}</strong></div><p>{cartItems.some((item) => item.promotion) ? "Promotion items are linked by offer group ID for inventory, returns, and refunds." : deliveryTotal > 0 ? "Delivery charge applied to this order." : deliveryCharge.freeAboveEnabled ? `Free delivery on orders above ${formatINR(deliveryCharge.freeAbove)}.` : "Complimentary shipping."}</p><button className="button button-dark full-width" onClick={openCheckout} disabled={cartStockIssues.length > 0} title={cartStockIssues.length > 0 ? "Remove unavailable items before checkout" : undefined}>Proceed to buy <span>↗</span></button></div></> : <div className="empty-bag"><div>✦</div><p>Your future favourites<br />belong here.</p><button className="text-link" onClick={() => setCartOpen(false)}>Continue shopping <span>↗</span></button></div>}</aside></div>}
 
       {authOpen && <div className="drawer-backdrop auth-backdrop" onClick={closeAuth}><section className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close sign in" onClick={closeAuth}>×</button><p className="eyebrow">SECURE MOBILE LOGIN</p><h2 id="auth-title">Continue with your mobile number.</h2><p className="auth-intro">Enter your mobile number and receive a one-time code by SMS. No password is required.</p><div className="otp-auth-form"><label>Mobile number<input type="tel" value={authPhone} onChange={(event) => { setAuthPhone(event.target.value); setAuthOtp(""); setOtpSent(false); setOtpCooldown(0); }} placeholder="+91 98765 43210" inputMode="tel" autoComplete="tel" disabled={authLoading} /></label>{otpSent && <label>6-digit verification code<input value={authOtp} onChange={(event) => setAuthOtp(event.target.value.replace(/\D/g, "").slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" maxLength={6} placeholder="Enter 6-digit SMS code" disabled={authLoading} onKeyDown={(event) => { if (event.key === "Enter") void verifyOtp(); }} /></label>}{otpSent ? <><button className="google-sign-in" type="button" onClick={() => void verifyOtp()} disabled={authLoading}><span className="email-otp-mark" aria-hidden="true">✦</span>{authLoading ? "Please wait…" : "Verify SMS code"}<span aria-hidden="true">↗</span></button><div className="otp-fallback-actions"><button className="auth-resend" type="button" onClick={() => void sendOtp()} disabled={authLoading || otpCooldown > 0}>{otpCooldown > 0 ? `Resend SMS in ${otpCooldown}s` : "Resend SMS OTP"}</button></div></> : <div className="otp-channel-actions"><button className="google-sign-in" type="button" onClick={() => void sendOtp()} disabled={authLoading}><span className="email-otp-mark" aria-hidden="true">✦</span>{authLoading ? "Please wait…" : "Send SMS code"}<span aria-hidden="true">↗</span></button></div>}</div>{authMessage && <p className="auth-message" role="alert">{authMessage}</p>}<p className="auth-note">Your orders and cart are saved to this verified mobile number.</p></section></div>}
 
@@ -3362,14 +3544,11 @@ export default function Home() {
       )}
 
 
-      {quickProduct && <div className="drawer-backdrop" onClick={closeQuickProduct}><div className="quick-modal" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close quick view" onClick={closeQuickProduct}>×</button><div className="quick-image" onClick={() => setZoomedImage({ src: quickProductImageOverride || selectedVariant?.image || quickProduct.image, alt: selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name, adjustments: quickProductImageOverride ? undefined : selectedVariant?.adjustments || quickProduct.imageAdjustments })} title="Click to zoom"><img src={quickProductImageOverride || selectedVariant?.image || quickProduct.image} alt={selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name} style={imageAdjustmentStyle(quickProductImageOverride ? undefined : selectedVariant?.adjustments || quickProduct.imageAdjustments)} /></div><div className="quick-copy"><p className="eyebrow">{quickProduct.category}</p><h2>{quickProduct.name}</h2><div className="price-row"><span>{formatINR(getCustomerPrice(quickProduct))}</span><del>{formatINR(getComparePrice(quickProduct))}</del></div>{getProductVariantType(quickProduct) === "normal" && quickProduct.variants?.length ? <div className="variant-picker"><span>Choose colour / series / model</span><div>{quickProduct.variants.map((variant, index) => { const variantStock = getVariantStock(quickProduct, variant); return <button key={`${quickProduct.id}-${variant.name || index}`} disabled={variantStock <= 0} className={`${selectedVariant?.name === variant.name && selectedVariant?.image === variant.image ? "active" : ""} ${variantStock <= 0 ? "sold-out" : ""}`} onClick={() => { setQuickProductImageOverride(null); setSelectedVariant(variant); }}><img src={variant.image || quickProduct.image} alt="" style={imageAdjustmentStyle(variant.adjustments)} /><span>{variant.name || `Option ${index + 1}`} · {variantStock > 0 ? `${variantStock} available` : "Sold out"}</span></button>; })}</div></div> : null}{getProductVariantType(quickProduct) === "size" && getProductSizes(quickProduct).length ? <div className="size-picker"><span>Choose size</span><div>{getProductSizes(quickProduct).map((size) => { const sizeVariant = getSizeVariant(quickProduct, size); const stock = getSelectionStock(quickProduct, selectedVariant, size); return <button type="button" key={size} disabled={stock <= 0} className={`${selectedSize === size ? "active" : ""} ${stock <= 0 ? "sold-out" : ""}`} onClick={() => { setQuickProductImageOverride(null); setSelectedSize(size); }}>{sizeVariant?.image ? <img src={sizeVariant.image} alt="" /> : null}Size {size} · {stock > 0 ? `${stock} available` : "Sold out"}</button>; })}</div></div> : null}{quickOffers.length > 0 && <div className="storefront-promotion-picker"><span className="promotion-picker-label">Special offer available</span><div className="storefront-promotion-tabs">{quickOffers.map((offer) => <button key={offer.id} className={activeQuickOffer?.id === offer.id ? "active" : ""} onClick={() => { setSelectedPromotion(offer); setSelectedFreeSelections([]); setSelectedBundleSelections([]); }}>{offerTypeLabel(offer)}</button>)}</div>{activeQuickOffer?.type === "bundle" ? <div className="promotion-selection-panel"><strong>Select Any {activeQuickOffer.bundleQuantity} Items for ₹{activeQuickOffer.fixedBundlePrice.toLocaleString("en-IN")}</strong><small>{selectedBundleSelections.length} of {activeQuickOffer.bundleQuantity} selected · regular prices are allocated proportionally</small><div className="promotion-choice-grid">{quickBundleChoices.filter((selection) => isSelectionEligible(activeQuickOffer, selection, "paid")).map((selection, index) => { const product = products.find((item) => item.id === selection.productId); const active = selectedBundleSelections.some((item) => selectionKey(item) === selectionKey(selection)); const stock = selection.stock || 0; return <button key={`${selectionKey(selection)}-${index}`} disabled={stock <= 0 || (!active && selectedBundleSelections.length >= activeQuickOffer.bundleQuantity)} className={active ? "active" : ""} onClick={() => setSelectedBundleSelections((current) => active ? current.filter((item) => selectionKey(item) !== selectionKey(selection)) : [...current, selection])}><img src={product?.variants?.find((variant) => variant.name === selection.variantName)?.image || product?.image || quickProduct.image} alt="" /><span>{product?.name || quickProduct.name}{selection.variantName ? ` · ${selection.variantName}` : ""}<small>{stock > 0 ? `${stock} available · ₹${(selection.price || 0).toLocaleString("en-IN")}` : "Out of stock"}</small></span></button>; })}</div><button className="button button-dark full-width" disabled={selectedBundleSelections.length !== activeQuickOffer.bundleQuantity} onClick={() => addPromotionToCart(activeQuickOffer)}>Add Bundle to Cart</button></div> : <div className="promotion-selection-panel"><strong>Select Your {activeQuickOffer?.freeQuantity || 1} Free Variant{(activeQuickOffer?.freeQuantity || 1) > 1 ? "s" : ""}</strong><small>{selectedFreeSelections.length} of {activeQuickOffer?.freeQuantity || 1} selected · paid item: {selectedVariant?.name || quickProduct.name}</small><div className="promotion-choice-grid">{quickFreeChoices.filter((selection) => activeQuickOffer ? isSelectionEligible(activeQuickOffer, selection, "free") : true).map((selection, index) => { const active = selectedFreeSelections.some((item) => selectionKey(item) === selectionKey(selection)); const stock = selection.stock || 0; return <button key={`${selectionKey(selection)}-${index}`} disabled={stock <= 0 || (!active && selectedFreeSelections.length >= (activeQuickOffer?.freeQuantity || 1))} className={active ? "active" : ""} onClick={() => setSelectedFreeSelections((current) => current.length >= (activeQuickOffer?.freeQuantity || 1) ? current.filter((item, itemIndex) => itemIndex !== current.findLastIndex((item) => selectionKey(item) === selectionKey(selection))) : [...current, selection])}><img src={quickProduct.variants?.find((variant) => variant.name === selection.variantName)?.image || quickProduct.image} alt="" /><span>{selection.variantName || (selection.size ? `Size ${selection.size}` : quickProduct.name)}<small>{stock > 0 ? `${stock} available` : "Out of stock"} · FREE</small></span></button>; })}</div><button className="button button-dark full-width" disabled={selectedFreeSelections.length !== (activeQuickOffer?.freeQuantity || 1) || selectedVariantStock <= 0} onClick={() => activeQuickOffer && addPromotionToCart(activeQuickOffer)}>Add {offerTypeLabel(activeQuickOffer || quickOffers[0])} to Cart</button></div>} </div>}{<div className="quick-actions"><button className="button button-dark full-width" type="button" disabled={selectedVariantStock <= 0} onClick={() => { addToCart(quickProduct, getProductVariantType(quickProduct) === "normal" ? selectedVariant : null, getProductVariantType(quickProduct) === "size" ? selectedSize : null); }}>{selectedVariantStock > 0 ? "Buy now" : "Sold out"} <span>↗</span></button></div>}<p>Designed to become part of your everyday ritual. Hand-finished in small batches with a soft, lasting glow.</p></div></div></div>}
-      {zoomedImage && <div className="drawer-backdrop image-zoom-backdrop" onClick={() => setZoomedImage(null)}><section className="image-zoom-modal" role="dialog" aria-modal="true" aria-label={`Zoomed view of ${zoomedImage.alt}`} onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setZoomedImage(null)} aria-label="Close image zoom">×</button><img src={zoomedImage.src} alt={zoomedImage.alt} style={imageAdjustmentStyle(zoomedImage.adjustments)} /></section></div>}
+      {quickProduct && <div className="drawer-backdrop" onClick={closeQuickProduct}><div className="quick-modal" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close quick view" onClick={closeQuickProduct}>×</button><div className="quick-image" onClick={() => openZoomedImage({ src: quickProductImageOverride || selectedVariant?.image || quickProduct.image, alt: selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name, adjustments: quickProductImageOverride ? undefined : selectedVariant?.adjustments || quickProduct.imageAdjustments })} title="Click to zoom"><img src={quickProductImageOverride || selectedVariant?.image || quickProduct.image} alt={selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name} style={imageAdjustmentStyle(quickProductImageOverride ? undefined : selectedVariant?.adjustments || quickProduct.imageAdjustments)} /></div><div className="quick-copy"><p className="eyebrow">{quickProduct.category}</p><h2>{quickProduct.name}</h2><div className="price-row"><span>{hasValidSellingPrice(quickProduct.price) ? formatINR(getCustomerPrice(quickProduct)) : "Price unavailable"}</span>{hasValidSellingPrice(quickProduct.price) && <del>{formatINR(getComparePrice(quickProduct))}</del>}</div>{getProductVariantType(quickProduct) === "normal" && quickProduct.variants?.length ? <div className="variant-picker"><span>Choose colour / series / model</span><div>{quickProduct.variants.map((variant, index) => { const variantStock = getVariantStock(quickProduct, variant); return <button key={`${quickProduct.id}-${variant.name || index}`} disabled={variantStock <= 0} className={`${selectedVariant?.name === variant.name && selectedVariant?.image === variant.image ? "active" : ""} ${variantStock <= 0 ? "sold-out" : ""}`} onClick={() => { setQuickProductImageOverride(null); setSelectedVariant(variant); }}><img src={variant.image || quickProduct.image} alt="" style={imageAdjustmentStyle(variant.adjustments)} /><span>{variant.name || `Option ${index + 1}`} · {variantStock > 0 ? `${variantStock} available` : "Sold out"}</span></button>; })}</div></div> : null}{getProductVariantType(quickProduct) === "size" && getProductSizes(quickProduct).length ? <div className="size-picker"><span>Choose size</span><div>{getProductSizes(quickProduct).map((size) => { const sizeVariant = getSizeVariant(quickProduct, size); const stock = getSelectionStock(quickProduct, selectedVariant, size); return <button type="button" key={size} disabled={stock <= 0} className={`${selectedSize === size ? "active" : ""} ${stock <= 0 ? "sold-out" : ""}`} onClick={() => { setQuickProductImageOverride(null); setSelectedSize(size); }}>{sizeVariant?.image ? <img src={sizeVariant.image} alt="" /> : null}Size {size} · {stock > 0 ? `${stock} available` : "Sold out"}</button>; })}</div></div> : null}{quickOffers.length > 0 && <div className="storefront-promotion-picker"><span className="promotion-picker-label">Special offer available</span><div className="storefront-promotion-tabs">{quickOffers.map((offer) => <button key={offer.id} className={activeQuickOffer?.id === offer.id ? "active" : ""} onClick={() => { setSelectedPromotion(offer); setSelectedFreeSelections([]); setSelectedBundleSelections([]); }}>{offerTypeLabel(offer)}</button>)}</div>{activeQuickOffer?.type === "bundle" ? <div className="promotion-selection-panel"><strong>Select Any {activeQuickOffer.bundleQuantity} Items for ₹{activeQuickOffer.fixedBundlePrice.toLocaleString("en-IN")}</strong><small>{selectedBundleSelections.length} of {activeQuickOffer.bundleQuantity} selected · regular prices are allocated proportionally</small><div className="promotion-choice-grid">{quickBundleChoices.filter((selection) => isSelectionEligible(activeQuickOffer, selection, "paid")).map((selection, index) => { const product = products.find((item) => item.id === selection.productId); const active = selectedBundleSelections.some((item) => selectionKey(item) === selectionKey(selection)); const stock = selection.stock || 0; return <button key={`${selectionKey(selection)}-${index}`} disabled={stock <= 0 || (!active && selectedBundleSelections.length >= activeQuickOffer.bundleQuantity)} className={active ? "active" : ""} onClick={() => setSelectedBundleSelections((current) => active ? current.filter((item) => selectionKey(item) !== selectionKey(selection)) : [...current, selection])}><img src={product?.variants?.find((variant) => variant.name === selection.variantName)?.image || product?.image || quickProduct.image} alt="" /><span>{product?.name || quickProduct.name}{selection.variantName ? ` · ${selection.variantName}` : ""}<small>{stock > 0 ? `${stock} available · ₹${(selection.price || 0).toLocaleString("en-IN")}` : "Out of stock"}</small></span></button>; })}</div><button className="button button-dark full-width" disabled={selectedBundleSelections.length !== activeQuickOffer.bundleQuantity} onClick={() => addPromotionToCart(activeQuickOffer)}>Add Bundle to Cart</button></div> : <div className="promotion-selection-panel"><strong>Select Your {activeQuickOffer?.freeQuantity || 1} Free Variant{(activeQuickOffer?.freeQuantity || 1) > 1 ? "s" : ""}</strong><small>{selectedFreeSelections.length} of {activeQuickOffer?.freeQuantity || 1} selected · paid item: {selectedVariant?.name || quickProduct.name}</small><div className="promotion-choice-grid">{quickFreeChoices.filter((selection) => activeQuickOffer ? isSelectionEligible(activeQuickOffer, selection, "free") : true).map((selection, index) => { const active = selectedFreeSelections.some((item) => selectionKey(item) === selectionKey(selection)); const stock = selection.stock || 0; return <button key={`${selectionKey(selection)}-${index}`} disabled={stock <= 0 || (!active && selectedFreeSelections.length >= (activeQuickOffer?.freeQuantity || 1))} className={active ? "active" : ""} onClick={() => setSelectedFreeSelections((current) => current.length >= (activeQuickOffer?.freeQuantity || 1) ? current.filter((item, itemIndex) => itemIndex !== current.findLastIndex((item) => selectionKey(item) === selectionKey(selection))) : [...current, selection])}><img src={quickProduct.variants?.find((variant) => variant.name === selection.variantName)?.image || quickProduct.image} alt="" /><span>{selection.variantName || (selection.size ? `Size ${selection.size}` : quickProduct.name)}<small>{stock > 0 ? `${stock} available` : "Out of stock"} · FREE</small></span></button>; })}</div><button className="button button-dark full-width" disabled={selectedFreeSelections.length !== (activeQuickOffer?.freeQuantity || 1) || selectedVariantStock <= 0} onClick={() => activeQuickOffer && addPromotionToCart(activeQuickOffer)}>Add {offerTypeLabel(activeQuickOffer || quickOffers[0])} to Cart</button></div>} </div>}{<div className="quick-actions"><button className="button button-dark full-width" type="button" disabled={selectedVariantStock <= 0 || !hasValidSellingPrice(quickProduct.price)} onClick={() => { addToCart(quickProduct, getProductVariantType(quickProduct) === "normal" ? selectedVariant : null, getProductVariantType(quickProduct) === "size" ? selectedSize : null); }}>{!hasValidSellingPrice(quickProduct.price) ? "Unavailable" : selectedVariantStock > 0 ? "Buy now" : "Sold out"} <span>↗</span></button></div>}<p>Designed to become part of your everyday ritual. Hand-finished in small batches with a soft, lasting glow.</p></div></div></div>}
+      {zoomedImage && <div className="drawer-backdrop image-zoom-backdrop" onClick={closeZoomedImage}><section className="image-zoom-modal" role="dialog" aria-modal="true" aria-label={`Zoomed view of ${zoomedImage.alt}`} onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={closeZoomedImage} aria-label="Close image zoom">×</button><img src={zoomedImage.src} alt={zoomedImage.alt} style={imageAdjustmentStyle(zoomedImage.adjustments)} /></section></div>}
 
       {toast && <div className="toast">{toast}<span>✦</span></div>}
     </main>
   );
 }
-
-
-
 

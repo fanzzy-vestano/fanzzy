@@ -33,7 +33,7 @@ const installInventoryApi = (t, { variants = {}, sizeStock = {}, variantTypes = 
     }
 
     if (method === "GET" && url.includes("/products?select=sku,stock")) {
-      return jsonResponse(products);
+      return jsonResponse(products.map((product) => ({ price: 100, ...product })));
     }
 
     if (method === "POST" && url.includes("/store_settings?on_conflict=key")) {
@@ -51,6 +51,34 @@ const installInventoryApi = (t, { variants = {}, sizeStock = {}, variantTypes = 
 
   return writes;
 };
+
+test("unpriced catalogue products are rejected before any base or variant inventory write", async (t) => {
+  const writes = installInventoryApi(t, {
+    products: [{ sku: "VALID", stock: 10, price: 100 }, { sku: "ZERO", stock: 10, price: 0 }],
+    variants: { VALID: [{ name: "Red", stock: 3 }] },
+  });
+  const result = await adjustOrderInventory({ items: [
+    { name: "Valid", productId: "VALID", variantName: "Red", quantity: 1, price: "₹100" },
+    { name: "Zero", productId: "ZERO", quantity: 1, price: "₹0" },
+  ] }, config, "decrement", true);
+  assert.equal(result.complete, false);
+  assert.match(result.reason, /unavailable for purchase/);
+  assert.deepEqual(writes, []);
+});
+
+test("legitimate free promotion lines still reserve their priced product's stock", async (t) => {
+  const writes = installInventoryApi(t, { products: [{ sku: "GIFT", stock: 10, price: 100 }] });
+  const result = await adjustOrderInventory({ items: [{ name: "Gift", productId: "GIFT", quantity: 1, price: "₹0" }] }, config, "decrement", true);
+  assert.equal(result.complete, true);
+  assert.equal(writes[0].body.stock, 9);
+});
+
+test("releasing historical stock still works when the catalogue product is unpriced", async (t) => {
+  const writes = installInventoryApi(t, { products: [{ sku: "ZERO", stock: 10, price: 0 }] });
+  const result = await adjustOrderInventory({ items: [{ name: "Zero", productId: "ZERO", quantity: 1, price: "₹0" }] }, config, "release");
+  assert.equal(result.complete, true);
+  assert.equal(writes[0].body.stock, 11);
+});
 
 test("normal variant reservation rejects a quantity above its available stock", async (t) => {
   const writes = installInventoryApi(t, {
@@ -130,6 +158,31 @@ test("a failed line prevents partial variant deductions from the same order", as
     ],
   }, config, "decrement", true);
 
+  assert.equal(result.complete, false);
+  assert.deepEqual(writes, []);
+});
+
+test("a base-stock shortage cannot deduct an earlier valid variant or size line", async (t) => {
+  const writes = installInventoryApi(t, {
+    variants: { "VARIANT": [{ name: "Gold", stock: 5 }], "SIZE": [{ size: "4", stock: 5 }] },
+    sizeStock: { SIZE: { "4": 5 } },
+    products: [{ sku: "VARIANT", stock: 5 }, { sku: "SIZE", stock: 5 }, { sku: "BASE", stock: 1 }],
+  });
+  const result = await adjustOrderInventory({ items: [
+    { name: "Variant", productId: "VARIANT", variantName: "Gold", quantity: 1, price: "₹100" },
+    { name: "Size", productId: "SIZE", size: "4", quantity: 1, price: "₹100" },
+    { name: "Base", productId: "BASE", quantity: 2, price: "₹100" },
+  ] }, config, "decrement", true);
+  assert.equal(result.complete, false);
+  assert.deepEqual(writes, []);
+});
+
+test("a later base-stock shortage cannot deduct an earlier base-stock line", async (t) => {
+  const writes = installInventoryApi(t, { products: [{ sku: "FIRST", stock: 5 }, { sku: "LAST", stock: 1 }] });
+  const result = await adjustOrderInventory({ items: [
+    { name: "First", productId: "FIRST", quantity: 1, price: "₹100" },
+    { name: "Last", productId: "LAST", quantity: 2, price: "₹100" },
+  ] }, config, "decrement", true);
   assert.equal(result.complete, false);
   assert.deepEqual(writes, []);
 });

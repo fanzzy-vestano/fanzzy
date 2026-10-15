@@ -1,0 +1,1 @@
+function e(e){return typeof e!=`number`&&typeof e!=`string`||typeof e==`string`&&!e.trim()?!1:Number.isFinite(Number(e))&&Number(e)>0}export{e as t};

@@ -1,3 +1,4 @@
+import { hasUnavailablePurchasePrice } from "./catalog/purchase-eligibility.js";
 import { createDelhiveryPickupRequest, delhiveryPickupSchedule, getDelhiveryAdminOptions, manifestDelhiveryShipment, trackDelhiveryShipment } from "./delhivery";
 
 type StoredOrder = {
@@ -356,12 +357,17 @@ async function adjustInventory(order: StoredOrder, mode: InventoryMode = "decrem
 
   // Checkout may store a normalized product id while Admin keys inventory by
   // the original SKU. Resolve each order line to that canonical SKU first.
-  let productRows: Array<{ sku?: string; stock?: number }> = [];
+  let productRows: Array<{ sku?: string; stock?: number; price?: number }> = [];
   try {
-    const productResponse = await fetch(`${supabaseUrl}/rest/v1/products?select=sku,stock`, { headers });
-    if (productResponse.ok) productRows = await productResponse.json() as Array<{ sku?: string; stock?: number }>;
+    const productResponse = await fetch(`${supabaseUrl}/rest/v1/products?select=sku,stock,price`, { headers });
+    if (productResponse.ok) productRows = await productResponse.json() as Array<{ sku?: string; stock?: number; price?: number }>;
   } catch {
     productRows = [];
+  }
+  // Validate the catalogue price before any stock/settings writes. Free offer
+  // lines remain valid when their underlying catalogue product has a price.
+  if (mode === "decrement" && requireAvailable && hasUnavailablePurchasePrice(order.items, productRows)) {
+    return { complete: false, reason: "One or more products are currently unavailable for purchase." };
   }
   const resolveProductSku = (rawSku: string) =>
     productRows.find((product) => normalizeSku(product.sku) === normalizeSku(rawSku))?.sku?.trim()
@@ -469,6 +475,17 @@ async function adjustInventory(order: StoredOrder, mode: InventoryMode = "decrem
     return { complete: false, reason: mode === "decrement" && requireAvailable ? "One or more products do not have enough stock." : undefined };
   }
 
+  // Validate every base-stock line before writing any earlier base, size or
+  // variant line. A known shortage must not leave a partially deducted order.
+  for (const [sku, quantity] of baseQuantities) {
+    const available = Number(productRows.find((product) => normalizeSku(product.sku) === normalizeSku(sku))?.stock);
+    if (!Number.isFinite(available)) return { complete: false };
+    if (mode === "decrement" && requireAvailable && available < quantity) {
+      return { complete: false, reason: "One or more products do not have enough stock." };
+    }
+  }
+
+
   for (const [sku, quantity] of baseQuantities) {
     let expectedStock = Number(productRows.find((product) => normalizeSku(product.sku) === normalizeSku(sku))?.stock);
     if (!Number.isFinite(expectedStock)) return { complete: false };
@@ -491,7 +508,7 @@ async function adjustInventory(order: StoredOrder, mode: InventoryMode = "decrem
       }
       const retryResponse = await fetch(`${supabaseUrl}/rest/v1/products?sku=eq.${encodeURIComponent(sku)}&select=sku,stock`, { headers });
       if (!retryResponse.ok) return { complete: false };
-      const retryRows = await retryResponse.json() as Array<{ sku?: string; stock?: number }>;
+      const retryRows = await retryResponse.json() as Array<{ sku?: string; stock?: number; price?: number }>;
       expectedStock = Number(retryRows[0]?.stock);
       if (!Number.isFinite(expectedStock)) return { complete: false };
       if (mode === "decrement" && requireAvailable && expectedStock < quantity) {

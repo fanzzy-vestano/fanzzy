@@ -1,3 +1,4 @@
+import { hasUnavailablePurchasePrice } from "./catalog/purchase-eligibility.js";
 export type InventoryOrder = {
   items?: Array<{ name: string; quantity: number; price: string; productId?: string; variantName?: string; size?: string }>;
 };
@@ -71,12 +72,17 @@ export async function adjustOrderInventory(
 
   // Checkout may store a normalized product id while Admin keys inventory by
   // the original SKU. Resolve each order line to that canonical SKU first.
-  let productRows: Array<{ sku?: string; stock?: number }> = [];
+  let productRows: Array<{ sku?: string; stock?: number; price?: number }> = [];
   try {
-    const productResponse = await fetch(`${config.supabaseUrl}/rest/v1/products?select=sku,stock`, { headers });
-    if (productResponse.ok) productRows = await productResponse.json() as Array<{ sku?: string; stock?: number }>;
+    const productResponse = await fetch(`${config.supabaseUrl}/rest/v1/products?select=sku,stock,price`, { headers });
+    if (productResponse.ok) productRows = await productResponse.json() as Array<{ sku?: string; stock?: number; price?: number }>;
   } catch {
     productRows = [];
+  }
+  // Validate the catalogue price before any stock/settings writes. Free offer
+  // lines remain valid when their underlying catalogue product has a price.
+  if (mode === "decrement" && requireAvailable && hasUnavailablePurchasePrice(order.items, productRows)) {
+    return { complete: false, reason: "One or more products are currently unavailable for purchase." };
   }
   const resolveProductSku = (rawSku: string) =>
     productRows.find((product) => normalizeSku(product.sku) === normalizeSku(rawSku))?.sku?.trim()
@@ -177,6 +183,17 @@ export async function adjustOrderInventory(
   if (unresolvedProductIds.size > 0) {
     return { complete: false, reason: mode === "decrement" && requireAvailable ? "One or more products do not have enough stock." : undefined };
   }
+
+  // Validate every base-stock line before writing any earlier base, size or
+  // variant line. A known shortage must not leave a partially deducted order.
+  for (const [sku, quantity] of baseQuantities) {
+    const available = Number(productRows.find((product) => normalizeSku(product.sku) === normalizeSku(sku))?.stock);
+    if (!Number.isFinite(available)) return { complete: false };
+    if (mode === "decrement" && requireAvailable && available < quantity) {
+      return { complete: false, reason: "One or more products do not have enough stock." };
+    }
+  }
+
 
   if (sizeStockChanged) await writeJsonSetting(config, "product_size_stock", sizeStock);
   if (variantsChanged) await writeJsonSetting(config, "product_variants", variants);
