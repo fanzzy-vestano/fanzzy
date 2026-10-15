@@ -28,3 +28,8 @@ test("storefront navbar anchors use the same-page navigation helper", () => {
   const helperEnd = pageSource.indexOf("const overlayReturnScrollStorageKey", helperStart);
   assert.doesNotMatch(pageSource.slice(helperStart, helperEnd), /window\.history\.(pushState|replaceState)|window\.location\.hash/);
 });
+
+test("homepage Shop all link stays on the product listing", () => {
+  assert.match(pageSource, /<a className="text-link" href="#shop" onClick=\{\(event\) => scrollToPageAnchor\(event, "shop"\)\}>Shop all/);
+  assert.match(pageSource, /Retry loading pieces/);
+});

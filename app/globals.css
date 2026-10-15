@@ -125,6 +125,9 @@ img { display: block; width: 100%; }
   z-index: 4;
 }
 
+.contact-link { align-items: center; display: flex !important; gap: 8px; }
+.contact-icon { fill: none; flex: 0 0 14px; height: 14px; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.5; width: 14px; }
+
 .mobile-nav-panel nav {
   display: grid;
   gap: 0;
