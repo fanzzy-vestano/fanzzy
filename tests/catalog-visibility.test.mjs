@@ -110,3 +110,10 @@ test("query scopes and relation fallback preserve ownership filters before mappi
     delete globalThis.__visibilityTestFilter;
   }
 });
+
+test("public storefront catalog uses a narrow projection while admin scopes keep full rows", async () => {
+  const source = await readFile(new URL("../lib/supabase/catalog.ts", import.meta.url), "utf8");
+  assert.match(source, /const publicProductSelect = "sku,name,created_at,category,stock,price,status,image,hover_image,compare_at,tag,tone,vendor_id,vendor_status,public_vendor_visible,vendors\(business_name,slug\)"/);
+  assert.match(source, /scope === "public" \? publicProductSelect : "\*,vendors\(business_name,slug\)"/);
+  assert.match(source, /scope === "public" \? publicProductSelect\.replace\(.*vendors\(business_name,slug\)/);
+});

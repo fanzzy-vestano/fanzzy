@@ -148,6 +148,10 @@ const asCategory = (row: Record<string, unknown>): CatalogCategory => ({
 
 export async function fetchCatalogProducts(scope: CatalogScope = "all") {
   if (!supabase) return { data: null, error: new Error("Supabase is not configured") };
+  // The public storefront does not need admin-only cost, barcode, or inventory
+  // bookkeeping columns. Keeping this projection narrow avoids transferring
+  // the entire products row for every storefront load.
+  const publicProductSelect = "sku,name,created_at,category,stock,price,status,image,hover_image,compare_at,tag,tone,vendor_id,vendor_status,public_vendor_visible,vendors(business_name,slug)";
   const read = (select: string) => {
     let query = supabase!.from("products").select(select);
     if (scope !== "all") query = query.neq("status", "Draft");
@@ -155,13 +159,13 @@ export async function fetchCatalogProducts(scope: CatalogScope = "all") {
     if (typeof scope === "object") query = query.eq("vendor_id", scope.vendorId).eq("vendor_status", "Approved").eq("public_vendor_visible", true);
     return query.order("created_at", { ascending: true });
   };
-  const result = await read("*,vendors(business_name,slug)");
+  const result = await read(scope === "public" ? publicProductSelect : "*,vendors(business_name,slug)");
   if (!result.error) {
     return { data: result.data ? filterCatalogProducts(result.data.map((row) => asProduct(row as unknown as Record<string, unknown>)), scope) : null, error: null };
   }
   // Vendor relations may not exist yet in an older production schema. The
   // catalog itself must remain available while vendor metadata is optional.
-  const fallback = await read("*");
+  const fallback = await read(scope === "public" ? publicProductSelect.replace(",vendors(business_name,slug)", "") : "*");
   return { data: fallback.data ? filterCatalogProducts(fallback.data.map((row) => asProduct(row as unknown as Record<string, unknown>)), scope) : null, error: fallback.error };
 }
 

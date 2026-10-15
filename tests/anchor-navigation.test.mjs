@@ -54,3 +54,23 @@ test("catalog refreshes coalesce concurrent realtime and storage updates", () =>
   assert.match(catalogEffect, /finally\(\(\) => \{\s*syncPromise = null;/s);
   assert.doesNotMatch(catalogEffect, /subscribeToStoreSetting\([^\n]+syncProducts/);
 });
+
+test("catalog loading has a bounded request timeout and retry fallback", () => {
+  assert.match(pageSource, /const catalogRequestTimeoutMs = 8000;/);
+  assert.match(pageSource, /withTimeout\(fetchCatalogProducts\("public"\), catalogRequestTimeoutMs\)/);
+  assert.match(pageSource, /Retry loading pieces/);
+});
+
+test("storefront hydrates cached products before the remote refresh", () => {
+  assert.match(pageSource, /const readCachedStorefrontProducts = \(\): Product\[\] =>/);
+  assert.match(pageSource, /const cachedProducts = readCachedStorefrontProducts\(\);/);
+  assert.match(pageSource, /if \(cachedProducts\.length\) \{[\s\S]*?setProducts\(cachedProducts\);[\s\S]*?setCatalogLoading\(false\);/);
+  assert.match(pageSource, /const \[catalogProducts, setProducts\] = useState<Product\[\]>\(defaultProducts\);/);
+});
+
+test("hero slides hydrate from cache and persist refreshed remote settings", () => {
+  assert.match(pageSource, /const readCachedHeroSlides = \(\): string\[\] =>/);
+  assert.match(pageSource, /const cachedSlides = readCachedHeroSlides\(\);/);
+  assert.match(pageSource, /if \(cachedSlides\.length\) setHeroSlides\(cachedSlides\);/);
+  assert.match(pageSource, /localStorage\.setItem\("fanzzy-hero-slides", JSON\.stringify\(allowedSlides\)\)/);
+});

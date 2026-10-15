@@ -201,6 +201,7 @@ const readOverlayProduct = (): Product | null => {
   }
 };
 const defaultProducts: Product[] = [];
+const catalogRequestTimeoutMs = 8000;
 const withTimeout = <T,>(promise: Promise<T>, milliseconds: number) => new Promise<T>((resolve, reject) => {
   const timer = window.setTimeout(() => reject(new Error("Catalog request timed out")), milliseconds);
   promise.then((value) => { window.clearTimeout(timer); resolve(value); }, (error) => { window.clearTimeout(timer); reject(error); });
@@ -521,6 +522,18 @@ const restoreStorefrontScrollPosition = (scrollY: number) => {
 const blockedHeroImage = "photo-1599643478518-a784e5dc4c8f";
 const initialHeroSlides: string[] = [];
 const defaultHeroSlideDuration = 5.2;
+const readCachedHeroSlides = (): string[] => {
+  if (typeof window === "undefined") return [];
+  try {
+    const stored = window.localStorage.getItem("fanzzy-hero-slides");
+    const parsed = stored ? JSON.parse(stored) : [];
+    return Array.isArray(parsed)
+      ? parsed.filter((value): value is string => typeof value === "string" && value.trim().length > 0 && !value.includes(blockedHeroImage)).slice(0, 4)
+      : [];
+  } catch {
+    return [];
+  }
+};
 const defaultDeliveryCharge: DeliveryCharge = { enabled: false, amount: 99, freeAboveEnabled: false, freeAbove: 999 };
 const defaultPaymentSettings: PaymentSettings = { online: true, cod: true, provider: "Razorpay", codCharge: 0 };
 const defaultPickupHubs: PickupHub[] = [];
@@ -731,6 +744,22 @@ function normalizeStoredProduct(value: unknown, index: number): Product | null {
     vendorSlug: typeof raw.vendorSlug === "string" ? raw.vendorSlug : undefined,
   };
 }
+
+const readCachedStorefrontProducts = (): Product[] => {
+  if (typeof window === "undefined") return [];
+  try {
+    const stored = window.localStorage.getItem(storefrontProductCacheKey);
+    if (!stored) return [];
+    const parsed: unknown = JSON.parse(stored);
+    if (!Array.isArray(parsed)) return [];
+    return filterCatalogProducts(parsed, "general")
+      .filter((product) => !isDemoProduct(product as { name?: string; sku?: string }))
+      .map(normalizeStoredProduct)
+      .filter((product): product is Product => product !== null);
+  } catch {
+    return [];
+  }
+};
 
 const isProductOutOfStock = (product: Product) => getProductVariantType(product) === "normal" && product.variants?.length
   ? product.variants.every((variant) => getVariantStock(product, variant) <= 0)
@@ -1078,8 +1107,8 @@ export default function Home() {
       const settingsKeys = ["productVariants", "productVariantType", "productSizes", "productSizeStock", "productImageAdjustments", "productBillNames", "productSupplierNames"] as const;
       const emptySettings = Object.fromEntries(settingsKeys.map((key) => [key, { value: null, error: new Error("Catalog settings unavailable") }])) as Awaited<ReturnType<typeof fetchStoreSettings<typeof settingsKeys>>>;
       const [remote, settings] = await Promise.all([
-        withTimeout(fetchCatalogProducts("public"), 15000),
-        withTimeout(fetchStoreSettings(settingsKeys), 15000).catch(() => emptySettings),
+        withTimeout(fetchCatalogProducts("public"), catalogRequestTimeoutMs),
+        withTimeout(fetchStoreSettings(settingsKeys), catalogRequestTimeoutMs).catch(() => emptySettings),
       ]);
       const {
         productVariants: variantsRemote,
@@ -1280,6 +1309,11 @@ export default function Home() {
       });
       return syncPromise;
     };
+    const cachedProducts = readCachedStorefrontProducts();
+    if (cachedProducts.length) {
+      setProducts(cachedProducts);
+      setCatalogLoading(false);
+    }
     void runSyncProducts();
     const onProductsStorage = (event: StorageEvent) => {
       if (!event.key || ["fanzzy-products", localProductVariantsKey, "fanzzy-product-variant-type", "fanzzy-product-sizes", "fanzzy-product-size-stock", "fanzzy-product-image-adjustments", "fanzzy-product-bill-names", "fanzzy-product-supplier-names"].includes(event.key)) runSyncProducts();
@@ -2000,6 +2034,8 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    const cachedSlides = readCachedHeroSlides();
+    if (cachedSlides.length) setHeroSlides(cachedSlides);
     const syncHeroSlides = async () => {
       const remoteSlides = await fetchStoreSetting("heroSlides");
       const storedSlides = remoteSlides.value || window.localStorage.getItem("fanzzy-hero-slides");
@@ -2008,6 +2044,7 @@ export default function Home() {
           const parsed = JSON.parse(storedSlides);
           const allowedSlides = Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string" && value.trim().length > 0 && !value.includes(blockedHeroImage)).slice(0, 4) : [];
           if (allowedSlides.length) {
+            window.localStorage.setItem("fanzzy-hero-slides", JSON.stringify(allowedSlides));
             setHeroSlides(allowedSlides);
             return;
           }
@@ -2017,7 +2054,10 @@ export default function Home() {
       }
       const legacy = await fetchStoreSetting("heroImage");
       const storedLegacy = legacy.value || window.localStorage.getItem("fanzzy-hero-image");
-      if (storedLegacy && !storedLegacy.includes(blockedHeroImage)) setHeroSlides([storedLegacy]);
+      if (storedLegacy && !storedLegacy.includes(blockedHeroImage)) {
+        window.localStorage.setItem("fanzzy-hero-slides", JSON.stringify([storedLegacy]));
+        setHeroSlides([storedLegacy]);
+      }
     };
     const runSyncHeroSlides = () => { void syncHeroSlides().catch(() => undefined); };
     runSyncHeroSlides();
