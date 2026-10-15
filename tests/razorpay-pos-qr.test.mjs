@@ -13,6 +13,9 @@ test("admin POS creates an order and opens Checkout.js with UPI enabled", () => 
   assert.match(adminPage, /method: \{ upi: true \}/);
   assert.match(adminPage, /order_id: current\.orderId/);
   assert.doesNotMatch(adminPage, /adminRazorpayApiUrl\("pos-qr"\)/);
+  assert.match(adminPage, /requestController\.signal/);
+  assert.match(adminPage, /timed out/);
+  assert.match(adminPage, /Tap Pay with UPI to open UPI and QR options/);
 });
 
 test("POS verification requires captured UPI payment and exact amount", () => {

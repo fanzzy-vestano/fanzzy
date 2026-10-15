@@ -8799,13 +8799,17 @@ function PosWorkspace({
       const idleTimer = window.setTimeout(() => setPosQr({ status: "idle" }), 0);
       return () => window.clearTimeout(idleTimer);
     }
+    let requestController: AbortController | null = null;
     const timer = window.setTimeout(async () => {
       const loadingState: PosQrState = { status: "loading" };
       posQrRef.current = loadingState; setPosQr(loadingState);
       try {
         const token = globalThis.crypto?.randomUUID?.().replace(/-/g, "").slice(-6).toUpperCase() || String(Date.now()).slice(-6);
         const fanzzyOrderId = `#FZ-POS-${token}`; posOrderIdRef.current = fanzzyOrderId;
-        const response = await fetch(adminRazorpayApiUrl("order"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ amount: Math.round(total * 100), receipt: `POS-${token}`, fanzzyOrderId }) });
+        requestController = new AbortController();
+        const timeout = window.setTimeout(() => requestController?.abort(), 15000);
+        const response = await fetch(adminRazorpayApiUrl("order"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ amount: Math.round(total * 100), receipt: `POS-${token}`, fanzzyOrderId }), signal: requestController.signal });
+        window.clearTimeout(timeout);
         const payload = await response.json() as { id?: string; keyId?: string; amount?: number; error?: string };
         if (!response.ok || !payload.id || !payload.keyId) throw new Error(payload.error || "Razorpay order creation failed.");
         if (posQrRequestRef.current !== requestNumber) return;
@@ -8813,11 +8817,14 @@ function PosWorkspace({
         posQrRef.current = readyState; setPosQr(readyState);
       } catch (paymentError) {
         if (posQrRequestRef.current !== requestNumber) return;
-        const errorState: PosQrState = { status: "error", message: paymentError instanceof Error ? paymentError.message : "Could not create the Razorpay payment order." };
+        const message = paymentError instanceof DOMException && paymentError.name === "AbortError"
+          ? "Razorpay order creation timed out. Check the payment service and retry."
+          : paymentError instanceof Error ? paymentError.message : "Could not create the Razorpay payment order.";
+        const errorState: PosQrState = { status: "error", message };
         posQrRef.current = errorState; setPosQr(errorState);
       }
     }, 250);
-    return () => window.clearTimeout(timer);
+    return () => { window.clearTimeout(timer); requestController?.abort(); };
   }, [paymentMethod, posQrRefresh, qrPaymentFingerprint, total]);
 
   const startUpiCheckout = async () => {
@@ -9028,8 +9035,8 @@ function PosWorkspace({
             {posQr.status === "error" && <><span className="pos-upi-qr-error">!</span><div><strong>UPI unavailable</strong><small>{posQr.message}</small><button type="button" onClick={() => setPosQrRefresh((current) => current + 1)}>Retry</button></div></>}
             {posQr.status === "cancelled" && <><span className="pos-upi-qr-error">!</span><div><strong>Payment cancelled</strong><small>{posQr.message}</small><button type="button" onClick={() => void startUpiCheckout()}>Retry UPI payment</button></div></>}
             {(posQr.status === "ready" || posQr.status === "opening" || posQr.status === "pending" || posQr.status === "paid") && <>
-              <span className={posQr.status === "paid" ? "pos-upi-qr-success" : "pos-upi-qr-loader"} />
-              <div><small>RAZORPAY CHECKOUT</small><strong>{posQr.status === "paid" ? "Payment received" : posQr.status === "ready" ? `Pay ${formatAdminCurrency(total)} with UPI` : posQr.status === "opening" ? "Opening secure payment…" : "Complete payment in Razorpay…"}</strong><span>{posQr.status === "paid" ? `Confirmed · ${posQr.paymentId}` : "UPI, QR and supported payment methods are available."}</span></div>
+              {posQr.status !== "ready" && <span className={posQr.status === "paid" ? "pos-upi-qr-success" : "pos-upi-qr-loader"} />}
+              <div><small>RAZORPAY CHECKOUT</small><strong>{posQr.status === "paid" ? "Payment received" : posQr.status === "ready" ? `Ready · Pay ${formatAdminCurrency(total)} with UPI` : posQr.status === "opening" ? "Opening secure payment…" : "Complete payment in Razorpay…"}</strong><span>{posQr.status === "paid" ? `Confirmed · ${posQr.paymentId}` : posQr.status === "ready" ? "Tap Pay with UPI to open UPI and QR options." : "UPI, QR and supported payment methods are available."}</span></div>
               <b className={posQr.status === "paid" ? "is-paid" : ""}>{posQr.status === "paid" ? "✓" : "•••"}</b>
             </>}
           </section>}
