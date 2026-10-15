@@ -525,7 +525,7 @@ type OrderItem = { name: string; productName?: string; quantity: number; price: 
 type DelhiveryScan = { status: string; date?: string; location?: string; instructions?: string };
 type PosPaymentMethod = "Cash" | "UPI" | "Card";
 type PosQrState = {
-  status: "idle" | "loading" | "ready" | "paid" | "error";
+  status: "idle" | "loading" | "ready" | "paid" | "error" | "expired";
   id?: string;
   imageUrl?: string;
   paymentUrl?: string;
@@ -534,6 +534,13 @@ type PosQrState = {
   closeBy?: number;
   paymentId?: string;
   message?: string;
+};
+
+const formatQrCountdown = (seconds: number) => {
+  const safeSeconds = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(safeSeconds / 60);
+  const remainder = safeSeconds % 60;
+  return `${minutes}:${String(remainder).padStart(2, "0")}`;
 };
 type OrderRecord = {
   id: string;
@@ -8521,6 +8528,7 @@ function PosWorkspace({
   const [checkoutBusy, setCheckoutBusy] = useState(false);
   const [lastSale, setLastSale] = useState<OrderRecord | null>(null);
   const [posQr, setPosQr] = useState<PosQrState>({ status: "idle" });
+  const [posQrNow, setPosQrNow] = useState(() => Math.floor(Date.now() / 1000));
   const [posQrRefresh, setPosQrRefresh] = useState(0);
   const posQrRef = useRef<PosQrState>({ status: "idle" });
   const posQrRequestRef = useRef(0);
@@ -8815,12 +8823,25 @@ function PosWorkspace({
     let checking = false;
     const checkPayment = async () => {
       if (checking) return;
+      if (posQr.closeBy && Math.floor(Date.now() / 1000) >= posQr.closeBy) {
+        const expiredState: PosQrState = { ...posQr, status: "expired", message: "This Razorpay QR expired. Generate a new QR to continue." };
+        posQrRef.current = expiredState;
+        setPosQr(expiredState);
+        return;
+      }
       checking = true;
       try {
         const response = await fetch(`${adminRazorpayApiUrl("pos-qr")}?id=${encodeURIComponent(posQr.id!)}`, { cache: "no-store" });
         const payload = await response.json() as { paid?: boolean; paymentId?: string; amount?: number; status?: string; error?: string };
         if (!response.ok) throw new Error(payload.error || "Could not check the UPI payment.");
-        if (!active || !payload.paid || !payload.paymentId) return;
+        if (!active) return;
+        if (payload.status === "expired" || payload.status === "closed" || payload.status === "cancelled") {
+          const expiredState: PosQrState = { ...posQr, status: "expired", message: "This Razorpay QR is no longer active. Generate a new QR to continue." };
+          posQrRef.current = expiredState;
+          setPosQr(expiredState);
+          return;
+        }
+        if (!payload.paid || !payload.paymentId) return;
         if (Number(payload.amount) !== Number(posQr.amount)) {
           const mismatchState: PosQrState = { ...posQr, status: "error", message: "Razorpay reported a payment with a different amount. Do not complete this sale." };
           posQrRef.current = mismatchState;
@@ -8845,6 +8866,14 @@ function PosWorkspace({
       window.clearInterval(interval);
     };
   }, [onNotify, posQr]);
+
+  useEffect(() => {
+    if (posQr.status !== "ready" || !posQr.closeBy) return;
+    const updateClock = () => setPosQrNow(Math.floor(Date.now() / 1000));
+    updateClock();
+    const interval = window.setInterval(updateClock, 1000);
+    return () => window.clearInterval(interval);
+  }, [posQr.status, posQr.closeBy]);
 
   useEffect(() => () => {
     const currentQr = posQrRef.current;
@@ -9039,11 +9068,12 @@ function PosWorkspace({
           {paymentMethod === "UPI" && cartLines.length > 0 && <section className={`pos-upi-qr pos-upi-qr-${posQr.status}`} aria-live="polite">
             {posQr.status === "loading" && <><span className="pos-upi-qr-loader" /><div><strong>Creating Razorpay QR…</strong><small>The QR will include the exact bill amount.</small></div></>}
             {posQr.status === "error" && <><span className="pos-upi-qr-error">!</span><div><strong>QR unavailable</strong><small>{posQr.message}</small><button type="button" onClick={() => setPosQrRefresh((current) => current + 1)}>Retry</button></div></>}
+            {posQr.status === "expired" && <><span className="pos-upi-qr-error">!</span><div><strong>QR expired</strong><small>{posQr.message}</small><button type="button" onClick={() => setPosQrRefresh((current) => current + 1)}>Generate a new QR</button></div></>}
             {(posQr.status === "ready" || posQr.status === "paid") && (posQr.imageUrl || posQr.paymentUrl) && <>
               {posQr.imageUrl
                 ? <img src={posQr.imageUrl} alt={`Razorpay UPI QR for ${formatAdminCurrency(total)}`} />
                 : <span className="pos-upi-qr-code" role="img" aria-label={`Razorpay payment QR for ${formatAdminCurrency(total)}`}><QRCode value={posQr.paymentUrl!} size={104} /></span>}
-              <div><small>{posQr.mode === "payment_link" ? "RAZORPAY PAYMENT QR" : "RAZORPAY UPI"}</small><strong>{posQr.status === "paid" ? "Payment received" : `Scan to pay ${formatAdminCurrency(total)}`}</strong><span>{posQr.status === "paid" ? `Confirmed · ${posQr.paymentId}` : posQr.mode === "payment_link" ? "Scan and complete payment on Razorpay…" : "Waiting for payment confirmation…"}</span></div>
+              <div><small>{posQr.mode === "payment_link" ? "RAZORPAY PAYMENT QR" : "RAZORPAY UPI"}</small><strong>{posQr.status === "paid" ? "Payment received" : `Scan to pay ${formatAdminCurrency(total)}`}</strong><span>{posQr.status === "paid" ? `Confirmed · ${posQr.paymentId}` : posQr.mode === "payment_link" ? "Scan and complete payment on Razorpay…" : "Waiting for payment confirmation…"}</span>{posQr.status === "ready" && posQr.closeBy && <small>Expires in {formatQrCountdown(posQr.closeBy - posQrNow)}</small>}</div>
               <b className={posQr.status === "paid" ? "is-paid" : ""}>{posQr.status === "paid" ? "✓" : "•••"}</b>
             </>}
           </section>}

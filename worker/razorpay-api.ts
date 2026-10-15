@@ -252,8 +252,8 @@ const getPosQrStatus = async (request: Request, env: WorkerEnv) => {
       const result = await response.json() as { status?: string; amount?: number; amount_paid?: number; payments?: RazorpayPaymentLinkPayment[] | null; error?: { description?: string } };
       if (!response.ok) return json(request, { error: result.error?.description || "Could not check the Razorpay payment" }, 502);
       const payments = Array.isArray(result.payments) ? result.payments : [];
-      const paid = payments.find((payment) => payment.status === "captured");
-      const fullyPaid = result.status === "paid" && Boolean(paid) && Number(result.amount_paid) >= Number(result.amount);
+      const paid = payments.find((payment) => payment.status === "captured" && (!payment.method || payment.method === "upi") && Number(payment.amount) === Number(result.amount));
+      const fullyPaid = result.status === "paid" && Boolean(paid) && Number(result.amount_paid) === Number(result.amount);
       return json(request, { paid: fullyPaid, paymentId: fullyPaid ? paid?.payment_id : undefined, amount: fullyPaid ? paid?.amount || result.amount_paid : undefined, status: fullyPaid ? "captured" : result.status || "waiting" });
     }
 
