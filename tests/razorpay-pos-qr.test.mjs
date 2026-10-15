@@ -15,12 +15,19 @@ test("POS QR creation remains fixed-amount and single-use in both server paths",
   }
 });
 
-test("POS QR fallback accepts only an exact captured UPI payment", () => {
+test("POS QR status accepts only an exact captured UPI payment", () => {
   for (const source of [apiRoute, workerApi]) {
     assert.match(source, /payment\.status === ["']captured["']/);
     assert.match(source, /payment\.method === ["']upi["']/);
-    assert.match(source, /Number\(payment\.amount\) === Number\(result\.amount\)/);
-    assert.match(source, /Number\(result\.amount_paid\) === Number\(result\.amount\)/);
+    assert.match(source, /payment_amount:\s*amount/);
+  }
+  assert.match(adminPage, /Number\(payload\.amount\) !== Number\(posQr\.amount\)/);
+});
+
+test("POS QR never falls back to a hosted Payment Link", () => {
+  for (const source of [apiRoute, workerApi]) {
+    assert.doesNotMatch(source, /v1\/payment_links/);
+    assert.doesNotMatch(source, /payment_link/);
   }
 });
 

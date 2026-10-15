@@ -169,16 +169,9 @@ type RazorpayQrPayment = {
   captured?: boolean;
 };
 
-type RazorpayPaymentLinkPayment = {
-  payment_id?: string;
-  amount?: number;
-  status?: string;
-  method?: string;
-};
-
 const posQrId = (request: Request) => {
   const id = new URL(request.url).searchParams.get("id")?.trim() || "";
-  return /^(?:qr|plink)_[A-Za-z0-9]+$/.test(id) ? id : "";
+  return /^qr_[A-Za-z0-9]+$/.test(id) ? id : "";
 };
 
 const createPosQr = async (request: Request, env: WorkerEnv) => {
@@ -216,26 +209,7 @@ const createPosQr = async (request: Request, env: WorkerEnv) => {
       return json(request, { id: result.id, imageUrl: result.image_url, amount: result.payment_amount || amount, status: result.status || "active", closeBy: result.close_by || closeBy, mode: "native_qr" });
     }
 
-    const fallbackResponse = await fetch("https://api.razorpay.com/v1/payment_links", {
-      method: "POST",
-      headers: { Authorization: razorpayAuth(env), "Content-Type": "application/json" },
-      body: JSON.stringify({
-        amount,
-        currency: "INR",
-        accept_partial: false,
-        reference_id: reference,
-        description: `Fanzzy counter sale ${reference}`,
-        expire_by: closeBy,
-        notify: { sms: false, email: false },
-        reminder_enable: false,
-        notes: { fanzzy_pos_reference: reference, fanzzy_payment_source: "pos_qr_fallback" },
-      }),
-    });
-    const fallback = await fallbackResponse.json() as { id?: string; short_url?: string; amount?: number; status?: string; expire_by?: number; error?: { description?: string } };
-    if (!fallbackResponse.ok || !fallback.id || !fallback.short_url) {
-      return json(request, { error: fallback.error?.description || result.error?.description || "Razorpay could not create a payment QR" }, 502);
-    }
-    return json(request, { id: fallback.id, paymentUrl: fallback.short_url, amount: fallback.amount || amount, status: fallback.status || "created", closeBy: fallback.expire_by || closeBy, mode: "payment_link" });
+    return json(request, { error: result.error?.description || "Razorpay native UPI QR is unavailable for this account. Enable Razorpay QR Codes before accepting POS UPI payments." }, 502);
   } catch {
     return json(request, { error: "Razorpay UPI QR is temporarily unavailable" }, 502);
   }
@@ -245,18 +219,6 @@ const getPosQrStatus = async (request: Request, env: WorkerEnv) => {
   const id = posQrId(request);
   if (!id) return json(request, { error: "A valid Razorpay payment QR id is required" }, 400);
   try {
-    if (id.startsWith("plink_")) {
-      const response = await fetch(`https://api.razorpay.com/v1/payment_links/${encodeURIComponent(id)}`, {
-        headers: { Authorization: razorpayAuth(env) },
-      });
-      const result = await response.json() as { status?: string; amount?: number; amount_paid?: number; payments?: RazorpayPaymentLinkPayment[] | null; error?: { description?: string } };
-      if (!response.ok) return json(request, { error: result.error?.description || "Could not check the Razorpay payment" }, 502);
-      const payments = Array.isArray(result.payments) ? result.payments : [];
-      const paid = payments.find((payment) => payment.status === "captured" && (!payment.method || payment.method === "upi") && Number(payment.amount) === Number(result.amount));
-      const fullyPaid = result.status === "paid" && Boolean(paid) && Number(result.amount_paid) === Number(result.amount);
-      return json(request, { paid: fullyPaid, paymentId: fullyPaid ? paid?.payment_id : undefined, amount: fullyPaid ? paid?.amount || result.amount_paid : undefined, status: fullyPaid ? "captured" : result.status || "waiting" });
-    }
-
     const response = await fetch(`https://api.razorpay.com/v1/payments/qr_codes/${encodeURIComponent(id)}/payments?count=10`, {
       headers: { Authorization: razorpayAuth(env) },
     });
@@ -275,16 +237,14 @@ const closePosQr = async (request: Request, env: WorkerEnv) => {
   const id = posQrId(request);
   if (!id) return json(request, { error: "A valid Razorpay payment QR id is required" }, 400);
   try {
-    const closeUrl = id.startsWith("plink_")
-      ? `https://api.razorpay.com/v1/payment_links/${encodeURIComponent(id)}/cancel`
-      : `https://api.razorpay.com/v1/payments/qr_codes/${encodeURIComponent(id)}/close`;
+    const closeUrl = `https://api.razorpay.com/v1/payments/qr_codes/${encodeURIComponent(id)}/close`;
     const response = await fetch(closeUrl, {
       method: "POST",
       headers: { Authorization: razorpayAuth(env) },
     });
     const result = await response.json() as { status?: string; error?: { description?: string } };
     if (!response.ok) return json(request, { error: result.error?.description || "Could not close the payment QR" }, 502);
-    return json(request, { closed: true, status: result.status || (id.startsWith("plink_") ? "cancelled" : "closed") });
+    return json(request, { closed: true, status: result.status || "closed" });
   } catch {
     return json(request, { error: "Could not close the Razorpay payment QR" }, 502);
   }
