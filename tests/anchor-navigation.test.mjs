@@ -11,3 +11,20 @@ test("storefront has one stable top anchor and explicit About/logo navigation", 
   assert.match(pageSource, /href=\"#footer\" onClick=\{\(event\) => scrollToPageAnchor\(event, \"footer\"\)\}/);
   assert.match(pageSource, /window\.addEventListener\(\"popstate\", onHistoryNavigation\)/);
 });
+
+test("storefront navbar anchors use the same-page navigation helper", () => {
+  for (const anchor of ["shop", "categories", "story"]) {
+    assert.match(
+      pageSource,
+      new RegExp(`href=\\"#${anchor}\\" onClick=\\{\\(event\\) => scrollToPageAnchor\\(event, \\\"${anchor}\\\"\\)\\}`),
+    );
+  }
+  assert.match(pageSource, /closeMobileNav\(\); scrollToPageAnchor\(event, \"shop\"\)/);
+  assert.match(pageSource, /closeMobileNav\(\); scrollToPageAnchor\(event, \"categories\"\)/);
+  assert.match(pageSource, /closeMobileNav\(\); scrollToPageAnchor\(event, \"story\"\)/);
+  assert.match(pageSource, /const closeMobileNav = useCallback/);
+  assert.match(pageSource, /mobileNavOpen \? closeMobileNav\(\) : setMobileNavOpen\(true\)/);
+  const helperStart = pageSource.indexOf("const scrollToPageAnchor =");
+  const helperEnd = pageSource.indexOf("const overlayReturnScrollStorageKey", helperStart);
+  assert.doesNotMatch(pageSource.slice(helperStart, helperEnd), /window\.history\.(pushState|replaceState)|window\.location\.hash/);
+});

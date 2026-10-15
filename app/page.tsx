@@ -455,14 +455,11 @@ const scrollToPageAnchor = (event: { preventDefault: () => void }, id: string) =
   const target = document.getElementById(id);
   if (!target) return;
 
-  // Hash links are handled explicitly so the browser's smooth-anchor
-  // animation cannot race the app's manual scroll restoration. pushState
-  // preserves normal Back/Forward history without triggering a second native
-  // anchor scroll.
-  const url = new URL(window.location.href);
-  url.hash = id;
-  const writeHistory = window.location.hash === `#${id}` ? window.history.replaceState.bind(window.history) : window.history.pushState.bind(window.history);
-  writeHistory({ ...window.history.state, fanzzyAnchor: id }, "", url.href);
+  // Keep this interaction entirely in the mounted storefront. In this
+  // runtime both history mutations and hash changes are observed by the
+  // router, which starts an RSC/document request for an otherwise same-page
+  // anchor. The link still exposes its hash href for non-JavaScript clients;
+  // the handled click only moves the existing page instance.
   const root = document.documentElement;
   const previousScrollBehavior = root.style.scrollBehavior;
   root.style.scrollBehavior = "auto";
@@ -749,8 +746,8 @@ const ProductCard = memo(function ProductCard({ product, wished, promotions, car
     <article className={`product-card${isLuxury ? " luxury-product-card" : ""}`}>
       <div className="product-media" style={{ backgroundColor: product.tone }}>
         <div className={`product-image-surface ${touchImageRevealed ? "is-touch-revealed" : ""}`} onPointerDown={handleImageSurfacePointerDown} onPointerUp={handleImageSurfacePointerEnd} onPointerCancel={handleImageSurfacePointerEnd} onClick={handleImageSurfaceClick}>
-          <img className={`product-image product-image-zoom primary-image ${isOutOfStock ? "stock-out-image" : ""}`} loading="lazy" decoding="async" src={product.image} alt={product.name} style={imageAdjustmentStyle(product.imageAdjustments)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onImageZoom(); }} role="button" tabIndex={0} title="Click to zoom" />
-          <img className={`product-image product-image-zoom hover-image ${isOutOfStock ? "stock-out-image" : ""}`} loading="lazy" decoding="async" fetchPriority="low" src={product.hoverImage} alt="" aria-hidden="true" />
+          {product.image ? <img className={`product-image product-image-zoom primary-image ${isOutOfStock ? "stock-out-image" : ""}`} loading="lazy" decoding="async" src={product.image} alt={product.name} style={imageAdjustmentStyle(product.imageAdjustments)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onImageZoom(); }} role="button" tabIndex={0} title="Click to zoom" /> : <div className="product-image product-image-placeholder" aria-hidden="true" />}
+          {product.hoverImage ? <img className={`product-image product-image-zoom hover-image ${isOutOfStock ? "stock-out-image" : ""}`} loading="lazy" decoding="async" fetchPriority="low" src={product.hoverImage} alt="" aria-hidden="true" /> : null}
         </div>
         {!isPriceUnavailable && discountPercent > 0 && <span className="product-discount-badge">{discountPercent}% off</span>}
         {showProductTag && <span className="product-tag with-discount">{product.tag}</span>}
@@ -2220,6 +2217,20 @@ export default function Home() {
     zoomedImage,
   ]);
   const activeOverlayKey = activeOverlayLayers.join("|");
+  const closeMobileNav = useCallback(() => {
+    if (!mobileNavOpen) return;
+    // A navbar link is a direct page action, so consume the mobile-nav
+    // history entry before scrolling. This keeps the URL and router on the
+    // same mounted storefront instead of briefly navigating through the
+    // overlay route.
+    overlayControlClose.current = true;
+    window.history.replaceState(
+      { ...window.history.state, fanzzyPage: overlayPageState.current },
+      "",
+      overlayHistoryUrl([]),
+    );
+    setMobileNavOpen(false);
+  }, [mobileNavOpen]);
   const quickViewOpen = Boolean(quickProduct);
   const openZoomedImage = useCallback((image: { src: string; alt: string; adjustments?: ImageAdjustments }) => {
     if (!zoomedImage) {
@@ -3308,7 +3319,7 @@ export default function Home() {
 
       <header className="site-header">
         <a href="#top" className="wordmark" aria-label="fanZZy home" onClick={(event) => scrollToPageAnchor(event, "top")}><img {...storefrontImageProps("/fanzzy-mark.png", "110px")} decoding="async" alt="fanZZy" className="brand-logo" /><span className="navbar-brand-name">fanZZy</span></a>
-        <nav className="desktop-nav" aria-label="Main navigation"><a href="#shop">Shop</a><a href="#categories">Collections</a><a href="#story">The journal</a><a href={`${siteBasePath}/track-order`}>Track order</a><a href="#footer" onClick={(event) => scrollToPageAnchor(event, "footer")}>About</a></nav>
+        <nav className="desktop-nav" aria-label="Main navigation"><a href="#shop" onClick={(event) => scrollToPageAnchor(event, "shop")}>Shop</a><a href="#categories" onClick={(event) => scrollToPageAnchor(event, "categories")}>Collections</a><a href="#story" onClick={(event) => scrollToPageAnchor(event, "story")}>The journal</a><a href={`${siteBasePath}/track-order`}>Track order</a><a href="#footer" onClick={(event) => scrollToPageAnchor(event, "footer")}>About</a></nav>
         <div className="header-actions">
           <label className="navbar-search"><span aria-hidden="true">⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search jewellery" onFocus={openSearch} aria-label="Search jewellery" />{search && <button className="navbar-search-clear" type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => setSearch("")} aria-label="Clear search">×</button>}</label>
           <button className="header-action-with-icon saved-header-action" onClick={() => setSavedOpen(true)} aria-label="View saved pieces"><svg className="header-action-icon" viewBox="0 0 16 16" aria-hidden="true" fill="none"><path d="M8 13.25S2.75 10.15 2.75 6.55A2.55 2.55 0 0 1 8 5.8a2.55 2.55 0 0 1 5.25.75C13.25 10.15 8 13.25 8 13.25Z" /></svg><span className="action-label">Saved</span>{wishlist.length > 0 && <b>{wishlist.length}</b>}</button>
@@ -3316,16 +3327,16 @@ export default function Home() {
           <button className="header-action-with-icon" onClick={openCart} aria-label={cartCount > 0 ? `Open shopping cart, ${cartCount} item${cartCount === 1 ? "" : "s"}` : "Open shopping cart"}><svg className="header-action-icon cart-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none"><path d="M3 4h2l2.2 11h10.9l3-8H6" /><circle cx="9" cy="19" r="1.5" /><circle cx="18" cy="19" r="1.5" /></svg><span className="action-label">Cart</span>{cartCount > 0 && <span className="bag-count">({cartCount})</span>}</button>
           <button className="profile-button" onClick={() => setProfileOpen(true)} aria-label="View account profile"><span className="profile-logo" data-signed-in={authUser ? "true" : "false"} aria-hidden="true"><span /></span><span className="action-label">Profile</span></button>
         </div>
-        <button className="mobile-menu" onClick={() => setMobileNavOpen((current) => !current)} aria-label={mobileNavOpen ? "Close menu" : "Open menu"} aria-expanded={mobileNavOpen}>{mobileNavOpen ? "×" : "☰"}</button>
+        <button className="mobile-menu" onClick={() => mobileNavOpen ? closeMobileNav() : setMobileNavOpen(true)} aria-label={mobileNavOpen ? "Close menu" : "Open menu"} aria-expanded={mobileNavOpen}>{mobileNavOpen ? "×" : "☰"}</button>
       </header>
 
       {mobileNavOpen && <div className="mobile-nav-panel" role="dialog" aria-label="Mobile navigation">
         <nav aria-label="Mobile navigation links">
-          <a href="#shop" onClick={() => setMobileNavOpen(false)}>Shop <span>↗</span></a>
-          <a href="#categories" onClick={() => setMobileNavOpen(false)}>Collections <span>↗</span></a>
-          <a href="#story" onClick={() => setMobileNavOpen(false)}>The journal <span>↗</span></a>
-          <a href={`${siteBasePath}/track-order`} onClick={() => setMobileNavOpen(false)}>Track order <span>↗</span></a>
-          <a href="#footer" onClick={(event) => { setMobileNavOpen(false); scrollToPageAnchor(event, "footer"); }}>About <span>↗</span></a>
+          <a href="#shop" onClick={(event) => { closeMobileNav(); scrollToPageAnchor(event, "shop"); }}>Shop <span>↗</span></a>
+          <a href="#categories" onClick={(event) => { closeMobileNav(); scrollToPageAnchor(event, "categories"); }}>Collections <span>↗</span></a>
+          <a href="#story" onClick={(event) => { closeMobileNav(); scrollToPageAnchor(event, "story"); }}>The journal <span>↗</span></a>
+          <a href={`${siteBasePath}/track-order`} onClick={() => closeMobileNav()}>Track order <span>↗</span></a>
+          <a href="#footer" onClick={(event) => { closeMobileNav(); scrollToPageAnchor(event, "footer"); }}>About <span>↗</span></a>
         </nav>
         <div className="mobile-nav-actions">
           <button onClick={() => { setMobileNavOpen(false); openSearch(); }}>Search the collection <span>⌕</span></button>
