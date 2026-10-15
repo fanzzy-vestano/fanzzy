@@ -43,3 +43,14 @@ test("storefront scroll restoration is cancellable and does not force a fake foo
   assert.match(helper, /attempts < 180/);
   assert.doesNotMatch(helper, /style\.minHeight/);
 });
+
+test("catalog refreshes coalesce concurrent realtime and storage updates", () => {
+  const effectStart = pageSource.indexOf("let syncPromise: Promise<void> | null = null;");
+  const effectEnd = pageSource.indexOf("const onProductsStorage", effectStart);
+  const catalogEffect = pageSource.slice(effectStart, effectEnd);
+  assert.match(catalogEffect, /let syncQueued = false;/);
+  assert.match(catalogEffect, /if \(syncPromise\) \{\s*syncQueued = true;/s);
+  assert.match(catalogEffect, /do \{[\s\S]*?await syncProducts\(\);[\s\S]*?while \(active && syncQueued\);/);
+  assert.match(catalogEffect, /finally\(\(\) => \{\s*syncPromise = null;/s);
+  assert.doesNotMatch(catalogEffect, /subscribeToStoreSetting\([^\n]+syncProducts/);
+});

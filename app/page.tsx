@@ -1069,6 +1069,8 @@ export default function Home() {
 
   useEffect(() => {
     let active = true;
+    let syncPromise: Promise<void> | null = null;
+    let syncQueued = false;
     const syncProducts = async () => {
       // Load the shared catalog and its product settings together. Previously
       // these requests ran one by one, leaving an old cached list on screen
@@ -1259,21 +1261,33 @@ export default function Home() {
       setCatalogLoading(false);
     };
     const runSyncProducts = () => {
-      void syncProducts().catch(() => {
+      if (syncPromise) {
+        syncQueued = true;
+        return syncPromise;
+      }
+      syncPromise = (async () => {
+        do {
+          syncQueued = false;
+          await syncProducts();
+        } while (active && syncQueued);
+      })().catch(() => {
         if (!active) return;
         setProducts(defaultProducts);
         setCatalogError("We couldn't load the collection. Please try again.");
         setCatalogLoading(false);
+      }).finally(() => {
+        syncPromise = null;
       });
+      return syncPromise;
     };
-    runSyncProducts();
+    void runSyncProducts();
     const onProductsStorage = (event: StorageEvent) => {
       if (!event.key || ["fanzzy-products", localProductVariantsKey, "fanzzy-product-variant-type", "fanzzy-product-sizes", "fanzzy-product-size-stock", "fanzzy-product-image-adjustments", "fanzzy-product-bill-names", "fanzzy-product-supplier-names"].includes(event.key)) runSyncProducts();
     };
-    const onProductsUpdated = () => { runSyncProducts(); };
+    const onProductsUpdated = () => { void runSyncProducts(); };
     const unsubscribeFromCatalogProducts = subscribeToCatalogProducts(runSyncProducts);
     const unsubscribeFromProductSettings = (['productVariants', 'productVariantType', 'productSizes', 'productSizeStock', 'productBillNames', 'productSupplierNames'] as const)
-      .map((key) => subscribeToStoreSetting(key, () => { void syncProducts().catch(() => undefined); }));
+      .map((key) => subscribeToStoreSetting(key, () => { void runSyncProducts(); }));
     window.addEventListener("storage", onProductsStorage);
     window.addEventListener("fanzzy-products-updated", onProductsUpdated);
     return () => {
