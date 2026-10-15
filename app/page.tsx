@@ -471,33 +471,50 @@ const scrollToPageAnchor = (event: { preventDefault: () => void }, id: string) =
   root.style.scrollBehavior = previousScrollBehavior;
 };
 const overlayReturnScrollStorageKey = "fanzzy-overlay-return-scroll-y";
+let storefrontScrollRestoreToken = 0;
+let cancelStorefrontScrollRestore: (() => void) | null = null;
 const restoreStorefrontScrollPosition = (scrollY: number) => {
+  const targetScrollY = Number(scrollY);
+  if (!Number.isFinite(targetScrollY) || targetScrollY < 0) return;
+  cancelStorefrontScrollRestore?.();
+  const token = ++storefrontScrollRestoreToken;
   let attempts = 0;
   let stableFrames = 0;
-  const root = document.documentElement;
-  const body = document.body;
-  const previousRootMinHeight = root.style.minHeight;
-  const previousBodyMinHeight = body.style.minHeight;
-  const requiredMinHeight = `${Math.max(0, scrollY) + window.innerHeight}px`;
-  root.style.minHeight = requiredMinHeight;
-  body.style.minHeight = requiredMinHeight;
+  let cancelled = false;
+  const cleanup = () => {
+    window.removeEventListener("wheel", cancel, true);
+    window.removeEventListener("touchstart", cancel, true);
+    window.removeEventListener("pointerdown", cancel, true);
+    window.removeEventListener("keydown", cancel, true);
+    if (cancelStorefrontScrollRestore === cancel) cancelStorefrontScrollRestore = null;
+  };
+  const cancel = () => {
+    cancelled = true;
+    cleanup();
+  };
+  cancelStorefrontScrollRestore = cancel;
+  window.addEventListener("wheel", cancel, true);
+  window.addEventListener("touchstart", cancel, true);
+  window.addEventListener("pointerdown", cancel, true);
+  window.addEventListener("keydown", cancel, true);
   const restore = () => {
+    if (cancelled || token !== storefrontScrollRestoreToken) return cleanup();
     attempts += 1;
-    const pageHasReachedPosition = document.documentElement.scrollHeight >= scrollY + window.innerHeight;
-    if (!pageHasReachedPosition && attempts < 600) {
-      window.scrollTo({ left: 0, top: scrollY, behavior: "instant" });
+    const maxScrollY = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    const pageHasReachedPosition = maxScrollY >= targetScrollY;
+    if (!pageHasReachedPosition && attempts < 180) {
       window.requestAnimationFrame(restore);
       return;
     }
-    window.scrollTo({ left: 0, top: scrollY, behavior: "instant" });
-    if (Math.abs(window.scrollY - scrollY) > 1) stableFrames = 0;
+    const nextScrollY = Math.min(targetScrollY, maxScrollY);
+    window.scrollTo({ left: 0, top: nextScrollY, behavior: "instant" });
+    if (Math.abs(window.scrollY - nextScrollY) > 1) stableFrames = 0;
     else stableFrames += 1;
-    if (stableFrames < 30 && attempts < 600) {
+    if (stableFrames < 3 && attempts < 180) {
       window.requestAnimationFrame(restore);
       return;
     }
-    root.style.minHeight = previousRootMinHeight;
-    body.style.minHeight = previousBodyMinHeight;
+    cleanup();
   };
   window.requestAnimationFrame(restore);
 };
@@ -2271,7 +2288,11 @@ export default function Home() {
     if (new URLSearchParams(window.location.search).get("fanzzy-overlay") || new URLSearchParams(window.location.search).get("fanzzy-product")) return;
     const storedScrollY = Number(window.sessionStorage.getItem(overlayReturnScrollStorageKey));
     window.sessionStorage.removeItem(overlayReturnScrollStorageKey);
-    if (!Number.isFinite(storedScrollY) || storedScrollY <= 0) return;
+    const savedPageScrollY = Number((window.history.state?.fanzzyPage as Partial<StorefrontPageHistoryState> | undefined)?.scrollY);
+    // A return position is only valid when it belongs to the current
+    // storefront history entry. Old session values can otherwise send a
+    // fresh page straight to a stale (often footer) position.
+    if (!Number.isFinite(storedScrollY) || storedScrollY <= 0 || !Number.isFinite(savedPageScrollY) || Math.abs(savedPageScrollY - storedScrollY) > 2) return;
     restoreStorefrontScrollPosition(storedScrollY);
   }, []);
 

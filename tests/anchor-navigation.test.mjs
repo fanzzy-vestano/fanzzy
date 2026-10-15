@@ -33,3 +33,13 @@ test("homepage Shop all link stays on the product listing", () => {
   assert.match(pageSource, /<a className="text-link" href="#shop" onClick=\{\(event\) => scrollToPageAnchor\(event, "shop"\)\}>Shop all/);
   assert.match(pageSource, /Retry loading pieces/);
 });
+
+test("storefront scroll restoration is cancellable and does not force a fake footer height", () => {
+  const helperStart = pageSource.indexOf("const restoreStorefrontScrollPosition =");
+  const helperEnd = pageSource.indexOf("const blockedHeroImage", helperStart);
+  const helper = pageSource.slice(helperStart, helperEnd);
+  assert.match(helper, /cancelStorefrontScrollRestore\?\.\(\)/);
+  assert.match(helper, /addEventListener\("wheel", cancel, true\)/);
+  assert.match(helper, /attempts < 180/);
+  assert.doesNotMatch(helper, /style\.minHeight/);
+});
