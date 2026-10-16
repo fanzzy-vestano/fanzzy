@@ -16,7 +16,7 @@ async function accessToken() {
   const key = JSON.stringify(current);
   if (tokenCache?.key === key && tokenCache.expiresAt > Date.now()) return tokenCache.token;
   const response = await fetch(`${current.authUrl}/realms/${encodeURIComponent(current.realm)}/protocol/openid-connect/token`, {
-    method: "POST", redirect: "error", signal: AbortSignal.timeout(15000),
+    method: "POST", redirect: "manual", signal: AbortSignal.timeout(15000),
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ grant_type: "client_credentials", client_id: current.clientId, client_secret: current.secret }),
   });
@@ -38,7 +38,7 @@ export async function fetchDelhiveryPickupLocations(): Promise<DelhiveryPickupLo
   const seenCursors = new Set<string>();
   for (let page = 1; page <= 100; page++) {
     const response = await fetch(current.mcpUrl, {
-      method: "POST", redirect: "error", signal: AbortSignal.timeout(15000),
+      method: "POST", redirect: "manual", signal: AbortSignal.timeout(15000),
       headers: { Authorization: `Bearer ${await accessToken()}`, "Content-Type": "application/json", Accept: "application/json, text/event-stream", "X-HQ-Client-Id": current.clientCms },
       body: JSON.stringify({ jsonrpc: "2.0", id: page, method: "tools/call", params: {
         name: "list-pickup-locations", arguments: {

@@ -70,6 +70,7 @@ const facilities = [
   { facility_name: "Blocked", status: "ACTIVE", blocked: true },
 ];
 const respondLocations = (rows = facilities, format = "sse") => async (url, init) => {
+  assert.equal(init.redirect, "manual", "Cloudflare supports manual redirects; redirected credentials must never be forwarded");
   if (url.includes("/token")) {
     assert.equal(init.body.get("grant_type"), "client_credentials");
     return Response.json({ access_token: "private-access-token", expires_in: 300 });
