@@ -1,3 +1,4 @@
+import { isPosOrder, orderNeedsDelivery } from "./order-fulfillment";
 import { hasUnavailablePurchasePrice } from "./catalog/purchase-eligibility.js";
 import { selectedPickupSchedule } from "./delhivery-pickup-date";
 import { hasDelhiveryShipmentShipped, isDelhiveryPickupRetryBlocked } from "./delhivery-status";
@@ -215,7 +216,7 @@ const delhiveryAutomationStartDate = "2026-09-05";
 const requiresAdminShipmentWeight = () => /^(1|true|yes|on)$/i.test(String(process.env.DELHIVERY_REQUIRE_ADMIN_WEIGHT || ""));
 
 const isDeliveryOrderReadyForPickup = (order: StoredOrder) =>
-  order.fulfillmentMethod !== "pickup"
+  orderNeedsDelivery(order)
   && Boolean(order.delhiveryAwb)
   && order.delhiveryShipmentStatus === "created"
   && order.status !== "Delivered"
@@ -293,7 +294,7 @@ async function ensureDelhiveryPickupRequest(orders: StoredOrder[], order: Stored
 }
 
 async function ensureDelhiveryShipment(orders: StoredOrder[], order: StoredOrder, force = false) {
-  if (order.fulfillmentMethod === "pickup") return;
+  if (!orderNeedsDelivery(order)) return;
   if (order.status === "Delivered" || order.status === "Cancelled") return;
   const orderDate = String(order.createdAt || order.date || "").slice(0, 10);
   if (orderDate && orderDate < delhiveryAutomationStartDate) return;
@@ -642,7 +643,7 @@ async function finalizeRazorpayPaymentInternal(payment: RazorpayPayment, receipt
   }
   await writeOrders(orders);
   await syncVendorOrderForPaidOrder(order).catch(() => undefined);
-  if (order.fulfillmentMethod !== "pickup") await ensureDelhiveryShipment(orders, order);
+  if (orderNeedsDelivery(order)) await ensureDelhiveryShipment(orders, order);
   return order;
 }
 
@@ -667,7 +668,7 @@ export async function confirmCashOnDeliveryOrder(orderId: string, identity?: { i
     if (order.paymentMethod !== "cod") throw new Error("This order was not created with COD selected.");
     if (order.paymentStatus === "cod_pending") {
       await syncVendorOrderForPaidOrder(order).catch(() => undefined);
-      if (order.fulfillmentMethod !== "pickup") await ensureDelhiveryShipment(orders, order);
+      if (orderNeedsDelivery(order)) await ensureDelhiveryShipment(orders, order);
       return order;
     }
     if (order.paymentStatus !== "pending") throw new Error("This order has already been confirmed or cannot use COD.");
@@ -684,7 +685,7 @@ export async function confirmCashOnDeliveryOrder(orderId: string, identity?: { i
     order.paymentStatus = "cod_pending";
     await writeOrders(orders);
     await syncVendorOrderForPaidOrder(order).catch(() => undefined);
-    if (order.fulfillmentMethod !== "pickup") await ensureDelhiveryShipment(orders, order);
+    if (orderNeedsDelivery(order)) await ensureDelhiveryShipment(orders, order);
     return order;
   });
 }
@@ -694,6 +695,7 @@ export async function createAdminDelhiveryShipment(orderId: string, weightGrams:
     const orders = await readOrders();
     const order = orders.find((candidate) => candidate.id === orderId);
     if (!order) throw new Error("Order could not be found for Delhivery shipment creation.");
+    if (isPosOrder(order)) throw new Error("POS orders do not use Delhivery shipping.");
     if (order.fulfillmentMethod === "pickup") throw new Error("Hub-pickup orders do not use Delhivery shipping.");
     if (!order.paymentStatus || !["paid", "cod_pending", "cod_collected"].includes(order.paymentStatus)) throw new Error("Payment or COD confirmation is required before creating the shipment.");
     if (order.status === "Delivered" || order.status === "Cancelled") throw new Error(`A ${order.status.toLowerCase()} order cannot create a new shipment.`);

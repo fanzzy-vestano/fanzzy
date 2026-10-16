@@ -350,3 +350,29 @@ test("pickup retry leaves scheduled, covered and pending requests unchanged", as
     assert.equal(sandbox.saved().delhiveryPickupRequestTime, "11:00:00");
   }
 });
+
+test("POS orders never need delivery, including legacy online-paid records marked as delivery", () => {
+  const shipping = loadShipping();
+  const { orderNeedsDelivery } = shipping.load(resolve(root, "lib/order-fulfillment.ts"));
+  for (const id of ["#FZ-POS-C8A456", "FZ-POS-C8A456", " #fz-pos-c8a456 "]) {
+    for (const fulfillmentMethod of [undefined, "delivery", "pickup"]) {
+      assert.equal(orderNeedsDelivery({ ...order, id, fulfillmentMethod }), false);
+    }
+  }
+  assert.equal(orderNeedsDelivery({ ...order, id: "#FZ-E635DF" }), true);
+  assert.equal(orderNeedsDelivery({ ...order, id: "#FZ-E635DF", fulfillmentMethod: "delivery" }), true);
+  assert.equal(orderNeedsDelivery({ ...order, id: "#FZ-E635DF", fulfillmentMethod: "pickup" }), false);
+  assert.equal(shipping.requests.length, 0);
+});
+
+test("POS shipment creation and pickup retry reject legacy delivery records before carrier calls", async () => {
+  for (const paymentMethod of ["online", "cod"]) {
+    const id = "#FZ-POS-C8A456";
+    const sandbox = pickupRetrySandbox({ id, paymentMethod, fulfillmentMethod: "delivery" });
+    const payment = sandbox.shipping.load(resolve(root, "lib/razorpay-payment-sync.ts"));
+    await assert.rejects(payment.createAdminDelhiveryShipment(id, 650, "VESTANO RETAIL B2C", "15:45", sandbox.date), /POS orders do not use Delhivery/);
+    await assert.rejects(payment.retryAdminDelhiveryPickup(id, sandbox.date, "15:45"), /active Delhivery shipment is required/);
+    assert.equal(sandbox.pickups.length, 0);
+    assert.equal(sandbox.shipping.requests.filter(([, init]) => init?.method === "POST").length, 0);
+  }
+});

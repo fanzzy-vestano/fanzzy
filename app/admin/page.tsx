@@ -4,6 +4,7 @@
 import { Component, memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ErrorInfo } from "react";
 import { Eye, Pencil, Printer, Trash2 } from "lucide-react";
 import DelhiveryPickupSelect from "./DelhiveryPickupSelect";
+import { orderNeedsDelivery } from "../../lib/order-fulfillment";
 import { pickupDateRange, selectedPickupSchedule } from "../../lib/delhivery-pickup-date";
 import { isDelhiveryPickupRetryBlocked } from "../../lib/delhivery-status";
 import { createProductCategoryResolver, mergeCatalogCategories } from "../../lib/catalog-categories";
@@ -1658,7 +1659,7 @@ function AdminDashboard() {
   }, []);
 
   const dashboardDelhiveryOrderKey = useMemo(
-    () => dashboardOrders.filter((order) => order.delhiveryAwb && order.status !== "Delivered" && order.status !== "Cancelled").map((order) => `${order.id}::${order.delhiveryAwb}`).sort().join("|"),
+    () => dashboardOrders.filter((order) => orderNeedsDelivery(order) && order.delhiveryAwb && order.status !== "Delivered" && order.status !== "Cancelled").map((order) => `${order.id}::${order.delhiveryAwb}`).sort().join("|"),
     [dashboardOrders],
   );
 
@@ -6748,7 +6749,7 @@ function OrdersWorkspace({
   }, []);
 
   useEffect(() => {
-    if (!selectedOrder?.delhiveryAwb || selectedOrder.fulfillmentMethod === "pickup") return;
+    if (!selectedOrder?.delhiveryAwb || !orderNeedsDelivery(selectedOrder)) return;
     let active = true;
     const orderWaybills = [{ id: selectedOrder.id, waybill: selectedOrder.delhiveryAwb }];
     const refreshTracking = async () => {
@@ -6913,7 +6914,7 @@ function OrdersWorkspace({
     }
   };
   const createDelhiveryShipment = async () => {
-    if (!selectedOrder || shipmentCreating) return;
+    if (!selectedOrder || !orderNeedsDelivery(selectedOrder) || shipmentCreating) return;
     const weightGrams = Math.round(Number(shipmentWeight));
     if (!Number.isFinite(weightGrams) || weightGrams < 500 || weightGrams > 30_000) {
       setShipmentWeightError("Enter a packed parcel weight between 500 and 30,000 grams.");
@@ -6955,7 +6956,7 @@ function OrdersWorkspace({
     }
   };
   const retryDelhiveryPickup = async () => {
-    if (!selectedOrder?.delhiveryAwb || pickupRetrying) return;
+    if (!selectedOrder?.delhiveryAwb || !orderNeedsDelivery(selectedOrder) || pickupRetrying) return;
     try { selectedPickupSchedule(shipmentPickupDate, shipmentPickupTime); } catch (error) {
       setShipmentWeightError(error instanceof Error ? error.message : "Select a valid pickup date and time.");
       return;
@@ -7149,8 +7150,8 @@ function OrdersWorkspace({
               <small className="order-list-products">{Array.isArray(order.items) ? order.items.map((rawItem, itemIndex) => { const item = normalizeOrderItemForDisplay(rawItem, itemIndex); return getOrderedItemDisplayName(item, getOrderedProduct(item)); }).join(", ") || "No saved item details" : "No saved item details"}</small>
                <small className="order-list-products">Payment: {orderPaymentLabel(order)}{order.paymentMethod === "cod" ? " · Pay on delivery" : order.paymentStatus === "paid" ? " · Paid" : " · Pending"} · Inventory: {order.inventoryAdjusted === true ? "Updated" : "Pending"}</small>
                <small className="order-list-products">Fulfilment: {orderFulfillmentLabel(order)}</small>
-              {order.fulfillmentMethod !== "pickup" && <small className="order-list-products">Delhivery: {order.delhiveryLiveStatus || (order.delhiveryAwb ? "Shipment created" : "Awaiting shipment")}</small>}
-              {order.fulfillmentMethod !== "pickup" && order.delhiveryAwb && <small className="order-list-products">Pickup: {order.delhiveryPickupRequestStatus === "created" ? `Scheduled${order.delhiveryPickupRequestId ? ` · ${order.delhiveryPickupRequestId}` : ""}` : order.delhiveryPickupRequestStatus === "covered" ? "Covered by an existing pickup" : order.delhiveryPickupRequestStatus === "pending" ? "Request in progress" : order.delhiveryPickupRequestStatus === "failed" ? "Pickup request failed" : "Waiting to schedule"}</small>}
+              {orderNeedsDelivery(order) && <small className="order-list-products">Delhivery: {order.delhiveryLiveStatus || (order.delhiveryAwb ? "Shipment created" : "Awaiting shipment")}</small>}
+              {orderNeedsDelivery(order) && order.delhiveryAwb && <small className="order-list-products">Pickup: {order.delhiveryPickupRequestStatus === "created" ? `Scheduled${order.delhiveryPickupRequestId ? ` · ${order.delhiveryPickupRequestId}` : ""}` : order.delhiveryPickupRequestStatus === "covered" ? "Covered by an existing pickup" : order.delhiveryPickupRequestStatus === "pending" ? "Request in progress" : order.delhiveryPickupRequestStatus === "failed" ? "Pickup request failed" : "Waiting to schedule"}</small>}
             </span>
             <i className={`status-pill ${safeOrderStatus(order.status).toLowerCase()}`}>
               {safeOrderStatus(order.status)}
@@ -7203,7 +7204,7 @@ function OrdersWorkspace({
                   <span>{selectedOrder.razorpayPaymentId || selectedOrder.razorpayOrderId}</span>
                 </div>}
               </section>
-              {selectedOrder.fulfillmentMethod !== "pickup" && <section className="admin-customer-details admin-delhivery-details">
+              {orderNeedsDelivery(selectedOrder) && <section className="admin-customer-details admin-delhivery-details">
                 <p className="eyebrow">DELHIVERY SHIPMENT</p>
                 {!selectedOrder.delhiveryAwb && delhiveryConfigError && <p className="admin-delhivery-weight-error" role="alert">{delhiveryConfigError}</p>}
                 {selectedOrder.delhiveryAwb ? <>
@@ -7245,7 +7246,7 @@ function OrdersWorkspace({
                   </div>
                 </>}
               </section>}
-              {selectedOrder.fulfillmentMethod !== "pickup" && selectedOrder.delhiveryAwb && (() => {
+              {orderNeedsDelivery(selectedOrder) && selectedOrder.delhiveryAwb && (() => {
                 const liveStatus = selectedOrder.delhiveryLiveStatus || (selectedOrder.delhiveryShipmentStatus === "created" ? "Ready to ship" : "Order received");
                 const currentStage = delhiveryTimelineStageIndex(liveStatus);
                 const scans = selectedOrder.delhiveryScans || [];
