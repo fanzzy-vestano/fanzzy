@@ -8996,9 +8996,11 @@ function PosWorkspace({
       await Promise.all([saveProductVariants(nextProducts), saveProductSizeStock(nextProducts)]);
 
       const now = new Date();
-      const token = globalThis.crypto?.randomUUID?.().replace(/-/g, "").slice(-6).toUpperCase() || String(Date.now()).slice(-6);
+      const token = paymentMethod === "UPI" && posOrderIdRef.current
+        ? posOrderIdRef.current.replace(/^#FZ-POS-/i, "")
+        : globalThis.crypto?.randomUUID?.().replace(/-/g, "").slice(-6).toUpperCase() || String(Date.now()).slice(-6);
       const order: OrderRecord = {
-        id: `#FZ-POS-${token}`,
+        id: paymentMethod === "UPI" && posOrderIdRef.current ? posOrderIdRef.current : `#FZ-POS-${token}`,
         invoiceNumber: `POS-${token}`,
         date: now.toISOString().slice(0, 10),
         createdAt: now.toISOString(),
