@@ -1,5 +1,5 @@
 import { hasUnavailablePurchasePrice } from "./catalog/purchase-eligibility.js";
-import { createDelhiveryPickupRequest, delhiveryPickupSchedule, getDelhiveryAdminOptions, manifestDelhiveryShipment, trackDelhiveryShipment } from "./delhivery";
+import { createDelhiveryPickupRequest, delhiveryPickupSchedule, getDelhiveryAdminOptions, loadDelhiveryAdminOptions, manifestDelhiveryShipment, trackDelhiveryShipment } from "./delhivery";
 
 type StoredOrder = {
   id: string;
@@ -687,7 +687,7 @@ export async function createAdminDelhiveryShipment(orderId: string, weightGrams:
     if (order.delhiveryAwb) return order;
     const normalizedWeight = Math.round(Number(weightGrams));
     if (!Number.isFinite(normalizedWeight) || normalizedWeight < 500 || normalizedWeight > 30_000) throw new Error("Packed parcel weight must be between 500 and 30,000 grams.");
-    const options = getDelhiveryAdminOptions();
+    const options = await loadDelhiveryAdminOptions();
     if (!options.pickupLocations.includes(pickupLocation)) throw new Error("Select the configured Delhivery pickup location.");
     if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(pickupTime)) throw new Error("Enter a valid Delhivery pickup time.");
 

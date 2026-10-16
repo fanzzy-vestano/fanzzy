@@ -44,6 +44,12 @@ type WorkerEnv = {
   VENDOR_DATA_ENCRYPTION_KEY?: string;
   CUSTOMER_AUTH_SECRET?: string;
   DELHIVERY_API_TOKEN?: string;
+  D1_CLIENT_ID?: string;
+  D1_CLIENT_SECRET?: string;
+  D1_AUTH_URL?: string;
+  D1_REALM?: string;
+  D1_CLIENT_CMS?: string;
+  D1_MCP_URL?: string;
   DELHIVERY_CLIENT_NAME?: string;
   DELHIVERY_PICKUP_NAME?: string;
   DELHIVERY_PICKUP_LOCATION?: string;

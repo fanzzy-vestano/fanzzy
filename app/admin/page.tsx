@@ -3,6 +3,7 @@
 
 import { Component, memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ErrorInfo } from "react";
 import { Eye, Pencil, Printer, Trash2 } from "lucide-react";
+import DelhiveryPickupSelect from "./DelhiveryPickupSelect";
 import { createProductCategoryResolver, mergeCatalogCategories } from "../../lib/catalog-categories";
 import { countAdminCategoryProducts } from "../../lib/catalog/category-counts";
 import {
@@ -6579,6 +6580,10 @@ function OrdersWorkspace({
   const [shipmentWeightError, setShipmentWeightError] = useState("");
   const [shipmentCreating, setShipmentCreating] = useState(false);
   const [delhiveryPickupLocations, setDelhiveryPickupLocations] = useState<string[]>([]);
+  const [delhiveryConfigError, setDelhiveryConfigError] = useState("");
+  const [delhiveryLocationLabels, setDelhiveryLocationLabels] = useState<Record<string, string>>({});
+  const [delhiveryLocationsLoading, setDelhiveryLocationsLoading] = useState(true);
+  const [delhiveryConfigRevision, setDelhiveryConfigRevision] = useState(0);
   const [shipmentPickupLocation, setShipmentPickupLocation] = useState("");
   const [shipmentPickupTime, setShipmentPickupTime] = useState("");
   const catalogSyncInFlight = useRef(false);
@@ -6647,21 +6652,25 @@ function OrdersWorkspace({
 
   useEffect(() => {
     let active = true;
+    setDelhiveryLocationsLoading(true);
     void adminApiFetch("/admin/delhivery/config", { cache: "no-store" })
       .then(async (response) => {
-        const result = await response.json() as { pickupLocations?: string[]; defaultPickupTime?: string; error?: string };
+        const result = await response.json() as { pickupLocations?: string[]; pickupLocationDetails?: Array<{ name: string; address: string; city: string; state: string; pincode: string }>; defaultPickupTime?: string; configurationError?: string; error?: string };
         if (!response.ok) throw new Error(result.error || "Could not load Delhivery pickup settings");
         if (!active) return;
         const locations = Array.isArray(result.pickupLocations) ? result.pickupLocations.filter(Boolean) : [];
         setDelhiveryPickupLocations(locations);
-        setShipmentPickupLocation((current) => current || locations[0] || "");
+        setDelhiveryLocationLabels(Object.fromEntries((result.pickupLocationDetails || []).map(location => [location.name, [location.name, [location.address, location.city, location.state, location.pincode].filter(Boolean).join(", ")].filter(Boolean).join(" — ")])));
+        setDelhiveryConfigError(result.configurationError || (locations.length ? "" : "No Delhivery pickup warehouse is configured. Add the registered warehouse in the server shipping settings."));
+        setShipmentPickupLocation((current) => locations.includes(current) ? current : locations[0] || "");
         setShipmentPickupTime((current) => current || result.defaultPickupTime || "11:00");
       })
       .catch((error) => {
-        if (active) setShipmentWeightError(error instanceof Error ? error.message : "Could not load Delhivery pickup settings");
-      });
+        if (active) setDelhiveryConfigError(error instanceof Error ? error.message : "Could not load Delhivery pickup settings");
+      })
+      .finally(() => { if (active) setDelhiveryLocationsLoading(false); });
     return () => { active = false; };
-  }, []);
+  }, [delhiveryConfigRevision]);
 
   useEffect(() => {
     let syncInFlight = false;
@@ -7154,6 +7163,7 @@ function OrdersWorkspace({
               </section>
               {selectedOrder.fulfillmentMethod !== "pickup" && <section className="admin-customer-details admin-delhivery-details">
                 <p className="eyebrow">DELHIVERY SHIPMENT</p>
+                {!selectedOrder.delhiveryAwb && delhiveryConfigError && <p className="admin-delhivery-weight-error" role="alert">{delhiveryConfigError}</p>}
                 {selectedOrder.delhiveryAwb ? <>
                   <dl>
                     <div><dt>AWB</dt><dd>{selectedOrder.delhiveryAwb}</dd></div>
@@ -7170,14 +7180,11 @@ function OrdersWorkspace({
                   <div className="admin-delhivery-weight-form">
                     <label htmlFor="delhivery-packed-weight">Packed parcel weight <span>grams · allowed range 500–30,000</span></label>
                     <input id="delhivery-packed-weight" type="number" min="500" max="30000" step="1" inputMode="numeric" value={shipmentWeight} onChange={(event) => { setShipmentWeight(event.target.value); if (shipmentWeightError) setShipmentWeightError(""); }} placeholder="e.g. 650" aria-describedby="delhivery-weight-range delhivery-weight-error" aria-invalid={Boolean(shipmentWeightError)} disabled={shipmentCreating || selectedOrder.delhiveryShipmentStatus === "pending"} />
-                    <label htmlFor="delhivery-pickup-location">Delhivery pickup location <span>Existing registered warehouse</span></label>
-                    <select id="delhivery-pickup-location" value={shipmentPickupLocation} onChange={(event) => { setShipmentPickupLocation(event.target.value); if (shipmentWeightError) setShipmentWeightError(""); }} disabled={shipmentCreating || selectedOrder.delhiveryShipmentStatus === "pending" || !delhiveryPickupLocations.length}>
-                      {!delhiveryPickupLocations.length && <option value="">No configured pickup location</option>}
-                      {delhiveryPickupLocations.map((location) => <option key={location} value={location}>{location}</option>)}
-                    </select>
+                    <label htmlFor="delhivery-pickup-location">Delhivery pickup location <span>Existing registered warehouse</span><button type="button" onClick={() => setDelhiveryConfigRevision(value => value + 1)} disabled={delhiveryLocationsLoading || shipmentCreating}>Refresh locations</button></label>
+                    <DelhiveryPickupSelect value={shipmentPickupLocation} locations={delhiveryPickupLocations} labels={delhiveryLocationLabels} loading={delhiveryLocationsLoading} onChange={(value) => { setShipmentPickupLocation(value); if (shipmentWeightError) setShipmentWeightError(""); }} disabled={shipmentCreating || selectedOrder.delhiveryShipmentStatus === "pending"} />
                     <label htmlFor="delhivery-pickup-time">Pickup time <span>India time</span></label>
                     <input id="delhivery-pickup-time" type="time" step="60" value={shipmentPickupTime} onChange={(event) => { setShipmentPickupTime(event.target.value); if (shipmentWeightError) setShipmentWeightError(""); }} disabled={shipmentCreating || selectedOrder.delhiveryShipmentStatus === "pending"} />
-                    <button className="module-primary admin-delhivery-create-button" type="button" onClick={() => void createDelhiveryShipment()} disabled={shipmentCreating || selectedOrder.delhiveryShipmentStatus === "pending" || !delhiveryPickupLocations.length}>{shipmentCreating || selectedOrder.delhiveryShipmentStatus === "pending" ? "Creating shipment…" : "Create Delhivery shipment"}</button>
+                    <button className="module-primary admin-delhivery-create-button" type="button" onClick={() => void createDelhiveryShipment()} disabled={shipmentCreating || delhiveryLocationsLoading || selectedOrder.delhiveryShipmentStatus === "pending" || !delhiveryPickupLocations.length || Boolean(delhiveryConfigError)}>{shipmentCreating || selectedOrder.delhiveryShipmentStatus === "pending" ? "Creating shipment…" : "Create Delhivery shipment"}</button>
                     <small id="delhivery-weight-range" className="admin-delhivery-weight-range">Use the total packed weight, including the product and packaging.</small>
                     <p id="delhivery-weight-error" className="admin-delhivery-weight-error" role="alert">{shipmentWeightError}</p>
                   </div>

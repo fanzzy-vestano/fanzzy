@@ -1,3 +1,5 @@
+import { fetchDelhiveryPickupLocations, hasDelhiveryLocationIntegration } from "./delhivery-locations";
+
 type DelhiveryAddress = {
   name: string;
   address: string;
@@ -55,7 +57,7 @@ const pincodeEndpoint = "https://track.delhivery.com/c/api/pin-codes/json/";
 const config = () => ({
   token: String(process.env.DELHIVERY_API_TOKEN || "").trim(),
   client: String(process.env.DELHIVERY_CLIENT_NAME || "").trim(),
-  pickupLocation: String(process.env.DELHIVERY_PICKUP_LOCATION || "").trim(),
+  pickupLocation: String(process.env.DELHIVERY_PICKUP_LOCATION || "").trim() || String(process.env.DELHIVERY_PICKUP_NAME || "").trim(),
   sellerName: String(process.env.DELHIVERY_SELLER_NAME || "").trim(),
   sellerAddress: String(process.env.DELHIVERY_SELLER_ADDRESS || "").trim(),
   sellerGstTin: String(process.env.DELHIVERY_SELLER_GST_TIN || "").trim(),
@@ -68,14 +70,24 @@ const config = () => ({
   defaultHeightCm: Number(process.env.DELHIVERY_DEFAULT_HEIGHT_CM || 5),
 });
 
-export const isDelhiveryConfigured = () => {
+const missingDelhiverySettings = () => {
   const current = config();
-  return Boolean(current.token && current.client && current.pickupLocation && current.sellerName && current.sellerAddress && current.sellerGstTin);
+  return [
+    [current.token, "API token"],
+    [current.client, "client name"],
+    [current.pickupLocation || hasDelhiveryLocationIntegration(), "pickup warehouse"],
+    [current.sellerName, "seller name"],
+    [current.sellerAddress, "seller address"],
+    [current.sellerGstTin, "seller GST number"],
+    [/^[1-9]\d{5}$/.test(current.originPin), "valid origin pincode"],
+  ].filter(([value]) => !value).map(([, label]) => String(label));
 };
+
+export const isDelhiveryConfigured = () => missingDelhiverySettings().length === 0;
 
 export const isDelhiveryPickupConfigured = () => {
   const current = config();
-  return Boolean(current.token && current.pickupLocation);
+  return Boolean(current.token && (current.pickupLocation || hasDelhiveryLocationIntegration()));
 };
 
 const safeJson = async (response: Response) => {
@@ -200,17 +212,28 @@ const validPickupTime = (value: string) => {
 
 export const getDelhiveryAdminOptions = () => {
   const current = config();
+  const missing = missingDelhiverySettings();
   return {
     pickupLocations: current.pickupLocation ? [current.pickupLocation] : [],
     defaultPickupTime: validPickupTime(current.pickupTime).slice(0, 5),
+    configurationError: missing.length ? `Delhivery setup is incomplete. Missing: ${missing.join(", ")}.` : "",
   };
 };
 
-const configuredPickupLocation = (requested?: string) => {
+export const loadDelhiveryAdminOptions = async () => {
+  const options = getDelhiveryAdminOptions();
+  if (!hasDelhiveryLocationIntegration()) return { ...options, pickupLocationDetails: [] };
+  const details = await fetchDelhiveryPickupLocations();
+  return { ...options, pickupLocations: details.map(location => location.name), pickupLocationDetails: details,
+    configurationError: options.configurationError || (details.length ? "" : "No active pickup locations were returned by Delhivery One.") };
+};
+
+const configuredPickupLocation = async (requested?: string) => {
   const current = config();
   const pickupLocation = String(requested || current.pickupLocation).trim();
   if (!pickupLocation) throw delhiveryError("The Delhivery pickup location is not configured on the server.");
-  if (pickupLocation !== current.pickupLocation) throw delhiveryError("The selected Delhivery pickup location is not configured on the server.");
+  const locations = hasDelhiveryLocationIntegration() ? (await loadDelhiveryAdminOptions()).pickupLocations : getDelhiveryAdminOptions().pickupLocations;
+  if (!locations.includes(pickupLocation)) throw delhiveryError("The selected Delhivery pickup location is not configured on the server or is no longer active.");
   return pickupLocation;
 };
 
@@ -286,7 +309,7 @@ export const delhiveryPickupSchedule = (pickupTime?: string) => pickupScheduleCa
 export async function createDelhiveryPickupRequest(expectedPackageCount: number, pickupLocation?: string, pickupTime?: string): Promise<DelhiveryPickupRequestResult> {
   const current = config();
   if (!isDelhiveryPickupConfigured()) throw delhiveryError("Delhivery pickup automation is not fully configured on the server.");
-  const selectedPickupLocation = configuredPickupLocation(pickupLocation);
+  const selectedPickupLocation = await configuredPickupLocation(pickupLocation);
   const count = Math.max(1, Math.floor(Number(expectedPackageCount) || 0));
   let lastError: Error | undefined;
   for (const schedule of pickupScheduleCandidates(pickupTime)) {
@@ -322,10 +345,10 @@ export async function createDelhiveryPickupRequest(expectedPackageCount: number,
 
 export async function manifestDelhiveryShipment(order: DelhiveryOrder): Promise<DelhiveryShipmentResult> {
   const current = config();
-  if (!isDelhiveryConfigured()) throw delhiveryError("Delhivery is not fully configured on the server.");
+  if (!isDelhiveryConfigured()) throw delhiveryError(getDelhiveryAdminOptions().configurationError);
   if (!current.originPin || !/^\d{6}$/.test(current.originPin)) throw delhiveryError("The Delhivery origin pincode is not configured.");
   const consignee = parseAddress(order);
-  const pickupLocation = configuredPickupLocation(order.delhiveryPickupLocation);
+  const pickupLocation = await configuredPickupLocation(order.delhiveryPickupLocation);
   await getPincodeServiceability(consignee.pincode, current.token, order.paymentMethod);
 
   const items = (order.items || []).filter((item) => Math.max(0, Number(item.quantity) || 0) > 0);
