@@ -2,6 +2,7 @@ import { filterCatalogProducts, type CatalogScope } from "../catalog/catalog-vis
 import { supabase } from "./client";
 import { countProductsByCategoryKey, mergeCatalogCategories } from "../catalog-categories";
 import { prepareStoreImage } from "../store-image-upload";
+import { cacheOrderHistoryDeletions, filterOrderHistory, mergeOrderHistoryForSave, type OrderHistoryDeletion } from "../order-history";
 
 export type CatalogStatus = "Published" | "Draft" | "Low stock";
 export type ProductVariantType = "normal" | "size";
@@ -362,19 +363,85 @@ export async function saveStoreSetting(key: keyof typeof settingKeys, value: str
   return error;
 }
 
-export async function fetchStoreOrders<T>() {
-  const remote = await fetchStoreSetting("orders");
-  if (remote.error || !remote.value) return { data: null as T[] | null, error: remote.error };
+const orderDeletionPrefix = "deleted-order:";
+
+async function readStoreOrderHistory() {
+  if (!supabase) throw new Error("Supabase is not configured");
+  const pageSize = 500;
+  const rows: Array<{ key: string; value: string }> = [];
+  // Each deletion is its own row, so concurrent deletions cannot overwrite
+  // one another. Page through them rather than relying on the API row limit.
+  for (let offset = 0; ; offset += pageSize) {
+    const result = await supabase.from("store_settings").select("key,value")
+      .or(`key.eq.orders,key.like.${orderDeletionPrefix}%`)
+      .order("key", { ascending: true })
+      .range(offset, offset + pageSize - 1);
+    if (result.error) throw new Error(result.error.message || "Could not read saved orders");
+    const page = (result.data || []) as Array<{ key: string; value: string }>;
+    rows.push(...page);
+    if (page.length < pageSize) break;
+  }
+  const parsed: unknown = JSON.parse(rows.find((row) => row.key === "orders")?.value || "[]");
+  if (!Array.isArray(parsed)) throw new Error("The saved order record is invalid");
+  const deletions: OrderHistoryDeletion[] = [];
+  for (const row of rows) {
+    if (!row.key.startsWith(orderDeletionPrefix)) continue;
+    const deletion = JSON.parse(row.value) as Partial<OrderHistoryDeletion> | null;
+    if (!deletion?.order || typeof deletion.order !== "object" || Array.isArray(deletion.order)
+      || typeof deletion.order.id !== "string" || !deletion.order.id.trim()
+      || typeof deletion.deletedAt !== "string" || !deletion.deletedAt) {
+      throw new Error("A saved order deletion record is invalid");
+    }
+    deletions.push(deletion as OrderHistoryDeletion);
+  }
+  return { orders: parsed, deletions: cacheOrderHistoryDeletions(deletions) };
+}
+
+export async function fetchStoreOrders<T>(options: { includeDeleted?: boolean } = {}) {
   try {
-    const parsed: unknown = JSON.parse(remote.value);
-    return { data: Array.isArray(parsed) ? parsed as T[] : null, error: null };
+    const history = await readStoreOrderHistory();
+    const orders = options.includeDeleted
+      ? mergeOrderHistoryForSave([], history.orders, history.deletions)
+      : filterOrderHistory(history.orders, history.deletions);
+    return { data: orders as T[], error: null };
   } catch (error) {
     return { data: null as T[] | null, error: asError(error) };
   }
 }
 
-export async function saveStoreOrders(orders: unknown[]) {
-  return saveStoreSetting("orders", JSON.stringify(orders));
+export async function saveStoreOrders(orders: unknown[]): Promise<Error | null> {
+  try {
+    const history = await readStoreOrderHistory();
+    const next = mergeOrderHistoryForSave(orders, history.orders, history.deletions);
+    const error = await saveStoreSetting("orders", JSON.stringify(next));
+    return error ? new Error(error.message) : null;
+  } catch (error) {
+    // Never replace the shared array without first retaining deleted records.
+    return asError(error);
+  }
+}
+
+export async function deleteStoreOrderFromHistory(order: { id: string }): Promise<Error | null> {
+  try {
+    if (!supabase) return new Error("Supabase is not configured");
+    if (!order?.id?.trim()) return new Error("Choose an order to delete");
+    const history = await readStoreOrderHistory();
+    const canonical = history.orders.find((value): value is Record<string, unknown> & { id: string } =>
+      Boolean(value && typeof value === "object" && (value as Record<string, unknown>).id === order.id));
+    const snapshot = canonical || { ...order };
+    if (!filterOrderHistory([snapshot], history.deletions).length) return null;
+    const deletion: OrderHistoryDeletion = { order: snapshot, deletedAt: new Date().toISOString() };
+    const result = await supabase.from("store_settings").upsert({
+      key: `${orderDeletionPrefix}${encodeURIComponent(order.id)}`,
+      value: JSON.stringify(deletion),
+      updated_at: deletion.deletedAt,
+    }, { onConflict: "key" });
+    if (result.error) return new Error(result.error.message);
+    cacheOrderHistoryDeletions([...history.deletions, deletion]);
+    return null;
+  } catch (error) {
+    return asError(error);
+  }
 }
 
 let storeSettingSubscriptionSequence = 0;

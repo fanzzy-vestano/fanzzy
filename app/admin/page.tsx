@@ -5,6 +5,8 @@ import { Component, memo, useCallback, useEffect, useMemo, useRef, useState, typ
 import { Eye, Pencil, Printer, Trash2 } from "lucide-react";
 import DelhiveryPickupSelect from "./DelhiveryPickupSelect";
 import PosCashPaymentDialog from "./PosCashPaymentDialog";
+import OrderDeleteDialog from "./OrderDeleteDialog";
+import { filterVisibleOrders } from "../../lib/order-history";
 import { calculateCashPayment, formatPosCurrency } from "../../lib/pos-cash-payment";
 import { orderNeedsDelivery } from "../../lib/order-fulfillment";
 import { pickupDateRange, selectedPickupSchedule } from "../../lib/delhivery-pickup-date";
@@ -15,6 +17,7 @@ import {
   fetchCatalogCategories,
   fetchCatalogProducts,
   fetchStoreOrders,
+  deleteStoreOrderFromHistory,
   fetchStoreSetting,
   fetchStoreSettings,
   decrementCatalogStock,
@@ -1646,7 +1649,7 @@ function AdminDashboard() {
       } catch {
         window.localStorage.removeItem("fanzzy-orders");
       }
-      setDashboardOrders(Array.from(merged.values()).filter((order) => order?.date && order?.total && !isDemoOrder(order) && hasConfirmedPayment(order)));
+      setDashboardOrders(filterVisibleOrders(Array.from(merged.values())).filter((order) => order?.date && order?.total && !isDemoOrder(order) && hasConfirmedPayment(order)));
     };
     void syncDashboardOrders();
     const dashboardOrderTimer = window.setInterval(() => { void syncDashboardOrders(); }, 60_000);
@@ -2427,7 +2430,7 @@ function PurchaseEntryWorkspace({ onNotify }: { onNotify: (message: string) => v
       fetchStoreSetting("suppliers"),
       fetchStoreSetting("productSupplierNames"),
       fetchStoreSetting("productInitialQuantitiesV5"),
-      fetchStoreOrders<OrderRecord>(),
+      fetchStoreOrders<OrderRecord>({ includeDeleted: true }),
       fetchCatalogProducts(),
       fetchStoreSetting("productVariants"),
       fetchStoreSetting("productSizeStock"),
@@ -3471,7 +3474,7 @@ function ReportsWorkspace({
       } catch {
         window.localStorage.removeItem("fanzzy-orders");
       }
-      if (active) setOrders(Array.from(merged.values()).filter((order) => order?.date && order?.total && hasConfirmedPayment(order)));
+      if (active) setOrders(filterVisibleOrders(Array.from(merged.values())).filter((order) => order?.date && order?.total && hasConfirmedPayment(order)));
     };
     const syncProducts = async () => {
       const [remote, pricingRemote, variantsRemote, variantTypeRemote, sizesRemote, sizeStockRemote] = await Promise.all([
@@ -5004,7 +5007,7 @@ function CustomersWorkspace({
         const normalized = normalizeOrderRecordForDisplay(order);
         if (normalized?.id && !orders.has(normalized.id)) orders.set(normalized.id, normalized);
       });
-      const derivedCustomers = customersFromOrders(Array.from(orders.values()));
+      const derivedCustomers = customersFromOrders(filterVisibleOrders(Array.from(orders.values())));
       const mergedCustomers = [...savedCustomers];
       derivedCustomers.forEach((customer) => {
         const matchIndex = mergedCustomers.findIndex((saved) => customerIdentity(saved) === customerIdentity(customer));
@@ -5401,7 +5404,7 @@ function AgentsWorkspace({
     } catch {
       // Ignore malformed local order cache.
     }
-    setOrders(Array.from(orderMap.values()).filter((order) => !isDemoOrder(order) && hasConfirmedPayment(order)));
+    setOrders(filterVisibleOrders(Array.from(orderMap.values())).filter((order) => !isDemoOrder(order) && hasConfirmedPayment(order)));
   };
 
   useEffect(() => {
@@ -6577,6 +6580,10 @@ function OrdersWorkspace({
   const [fromDate, setFromDate] = useState(() => `${reportDateKey(new Date()).slice(0, 8)}01`);
   const [toDate, setToDate] = useState(() => reportDateKey(new Date()));
   const [selectedOrder, setSelectedOrder] = useState<OrderRecord | null>(null);
+  const [orderToDelete, setOrderToDelete] = useState<OrderRecord | null>(null);
+  const [orderDeleting, setOrderDeleting] = useState(false);
+  const [orderDeleteError, setOrderDeleteError] = useState("");
+  const orderDeletingRef = useRef(false);
   const [printingBillId, setPrintingBillId] = useState<string | null>(null);
   const [enlargedOrderImage, setEnlargedOrderImage] = useState<{ src: string; alt: string } | null>(null);
   const [phone, setPhone] = useState("");
@@ -6706,7 +6713,7 @@ function OrdersWorkspace({
       }
       // Show locally cached orders only while the first live request is loading.
       // Do not replace an already rendered list on every polling cycle.
-      if (localOrders.length) setOrders((current) => current.length ? current : localOrders);
+      if (localOrders.length) setOrders((current) => filterVisibleOrders(current.length ? current : localOrders));
       const remote = await fetchStoreOrders<OrderRecord>();
       if (remote.error) {
         setOrdersSyncError("Live order storage is unavailable. Records may be incomplete.");
@@ -6721,7 +6728,7 @@ function OrdersWorkspace({
         if (normalized && !isDemoOrder(normalized) && hasConfirmedPayment(normalized)) merged.set(normalized.id, normalized);
       });
       localOrders.forEach((order) => { if (!merged.has(order.id)) merged.set(order.id, order); });
-      const nextOrders = Array.from(merged.values());
+      const nextOrders = filterVisibleOrders(Array.from(merged.values()));
       setOrders((current) => orderListsEqual(current, nextOrders) ? current : nextOrders);
       if (!remote.error) setLastOrdersSync((current) => current && Date.now() - current.getTime() < 30_000 ? current : new Date());
       } catch {
@@ -6794,8 +6801,9 @@ function OrdersWorkspace({
   }, [orders, selectedOrder?.id]);
 
   const persistOrders = async (next: OrderRecord[]) => {
-    setOrders(next);
-    window.localStorage.setItem("fanzzy-orders", JSON.stringify(next));
+    const visible = filterVisibleOrders(next);
+    setOrders(visible);
+    window.localStorage.setItem("fanzzy-orders", JSON.stringify(visible));
     // Retain pending payments while an admin updates an order.
     const remote = await fetchStoreOrders<OrderRecord>();
     const allOrders = new Map<string, OrderRecord>();
@@ -6823,7 +6831,7 @@ function OrdersWorkspace({
       to = toDate || latestDate;
     }
     if (from > to) [from, to] = [to, from];
-    return orders
+    return filterVisibleOrders(orders)
       .filter((order) => {
         const orderDate = String(order.date || "").slice(0, 10);
         const matchesDate = orderDate >= from && orderDate <= to;
@@ -6997,6 +7005,27 @@ function OrdersWorkspace({
       onNotify("Printing failed: allow popups and try again");
     } finally {
       setPrintingBillId(null);
+    }
+  };
+  const deleteOrder = async () => {
+    if (!orderToDelete || orderDeletingRef.current) return;
+    const deletingId = orderToDelete.id;
+    orderDeletingRef.current = true;
+    setOrderDeleting(true);
+    setOrderDeleteError("");
+    try {
+      const deleteError = await deleteStoreOrderFromHistory(orderToDelete);
+      if (deleteError) throw deleteError;
+      setOrders((current) => filterVisibleOrders(current));
+      setSelectedOrder((current) => current?.id === deletingId ? null : current);
+      setOrderToDelete(null);
+      window.dispatchEvent(new Event("fanzzy-orders-updated"));
+      onNotify(`${deletingId} deleted from order history`);
+    } catch (deleteError) {
+      setOrderDeleteError(deleteError instanceof Error ? deleteError.message : "Could not delete this order. Please try again.");
+    } finally {
+      orderDeletingRef.current = false;
+      setOrderDeleting(false);
     }
   };
   const saveOrder = () => {
@@ -7303,6 +7332,9 @@ function OrdersWorkspace({
                 <button className="whatsapp-action" onClick={sendWhatsApp}>
                   Send WhatsApp ↗
                 </button>
+                <button className="order-delete-button" type="button" disabled={shipmentCreating || pickupRetrying} onClick={() => { setOrderDeleteError(""); setOrderToDelete(selectedOrder); }}>
+                  Delete order
+                </button>
                 <button
                   className="module-secondary"
                   onClick={() => setSelectedOrder(null)}
@@ -7314,6 +7346,7 @@ function OrdersWorkspace({
           </div>
         </div>
       )}
+      {orderToDelete && <OrderDeleteDialog order={orderToDelete} busy={orderDeleting} error={orderDeleteError} onCancel={() => { if (!orderDeletingRef.current) { setOrderToDelete(null); setOrderDeleteError(""); } }} onConfirm={() => { void deleteOrder(); }} />}
       {enlargedOrderImage && <div className="product-modal-backdrop admin-order-image-lightbox" onClick={() => setEnlargedOrderImage(null)}><div className="admin-order-image-lightbox-card" onClick={(event) => event.stopPropagation()}><button className="product-modal-close" type="button" aria-label="Close enlarged product image" onClick={() => setEnlargedOrderImage(null)}>×</button><img src={enlargedOrderImage.src} alt={enlargedOrderImage.alt} /></div></div>}
     </section>
   );
@@ -8910,8 +8943,8 @@ function PosWorkspace({
         const result = await response.json() as { verified?: boolean; error?: string };
         if (!response.ok) throw new Error(result.error || "Order confirmation failed. Do not pay again.");
         return result;
-      }, fetchStoreOrders<OrderRecord>);
-      window.localStorage.setItem("fanzzy-orders", JSON.stringify(confirmed.orders));
+      }, () => fetchStoreOrders<OrderRecord>({ includeDeleted: true }));
+      window.localStorage.setItem("fanzzy-orders", JSON.stringify(filterVisibleOrders(confirmed.orders)));
       window.dispatchEvent(new Event("fanzzy-orders-updated"));
       window.dispatchEvent(new Event("fanzzy-products-updated"));
       setLastSale(confirmed.order);
@@ -8957,8 +8990,8 @@ function PosWorkspace({
           variantName: selection.variantName, variantImage: selection.variantName ? selection.image : undefined, size: selection.size,
         })),
       };
-      const pendingOrders = await savePendingPosOrder(pendingOrder, fetchStoreOrders<OrderRecord>, saveStoreOrders);
-      window.localStorage.setItem("fanzzy-orders", JSON.stringify(pendingOrders));
+      const pendingOrders = await savePendingPosOrder(pendingOrder, () => fetchStoreOrders<OrderRecord>({ includeDeleted: true }), saveStoreOrders);
+      window.localStorage.setItem("fanzzy-orders", JSON.stringify(filterVisibleOrders(pendingOrders)));
       const Razorpay = await loadAdminRazorpayCheckout();
       const checkout = new Razorpay({
         key: current.keyId, amount: current.amount || Math.round(total * 100), currency: "INR", name: "Fanzzy", description: `Fanzzy POS sale ${posOrderIdRef.current}`, order_id: current.orderId,
@@ -9124,7 +9157,7 @@ function PosWorkspace({
       remoteOrders.data?.forEach((candidate) => { if (candidate?.id) mergedOrders.set(candidate.id, candidate); });
       localOrders.forEach((candidate) => { if (candidate?.id && !mergedOrders.has(candidate.id)) mergedOrders.set(candidate.id, candidate); });
       mergedOrders.set(order.id, order);
-      const nextOrders = [order, ...Array.from(mergedOrders.values()).filter((candidate) => candidate.id !== order.id)];
+      const nextOrders = filterVisibleOrders([order, ...Array.from(mergedOrders.values()).filter((candidate) => candidate.id !== order.id)]);
       window.localStorage.setItem("fanzzy-orders", JSON.stringify(nextOrders));
       const orderSaveError = await saveStoreOrders(nextOrders);
       window.dispatchEvent(new Event("fanzzy-orders-updated"));

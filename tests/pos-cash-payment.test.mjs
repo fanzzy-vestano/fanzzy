@@ -79,7 +79,7 @@ function saleHarness({ cashDialogOpen = true, stockGate } = {}) {
     products: [product],
     checkoutBusyRef: { current: false },
     paymentMethod: "Cash", total: 55, discount: 0, cashDialogOpen,
-    calculateCashPayment, formatPosCurrency,
+    calculateCashPayment, formatPosCurrency, filterVisibleOrders: (orders) => orders,
     upiPaymentConfirmed: false, posQr: { status: "idle" }, posQrRef: { current: { status: "idle" } }, posOrderIdRef: { current: "" },
     customerName: "", customerPhone: "", isSupabaseReady: true,
     decrementCatalogStock: async (lines) => { writes.push({ kind: "stock", lines }); if (stockGate) await stockGate; return { error: null }; },

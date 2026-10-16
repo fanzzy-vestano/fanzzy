@@ -89,7 +89,7 @@ function checkoutHarness({ saveError = null } = {}) {
       if (!body.posSale) state.orders[0] = { ...state.orders[0], paymentStatus: "paid", razorpayPaymentId: "pay_test", inventoryAdjusted: true };
       return new Response(JSON.stringify({ verified: true }));
     },
-    adminRazorpayApiUrl: () => "https://payment.test/verify", formatPosCurrency: (n) => `₹${n}`,
+    adminRazorpayApiUrl: () => "https://payment.test/verify", formatPosCurrency: (n) => `₹${n}`, filterVisibleOrders: (orders) => orders,
     setCheckoutBusy: () => {}, setError: (error) => { state.error = error; }, setPosQr: () => {},
     setLastSale: (sale) => { state.lastSale = sale; }, setCart: () => {}, setDiscountValue: () => {},
     setCustomerName: () => {}, setCustomerPhone: () => {}, setLastProduct: () => {}, onNotify: () => {},

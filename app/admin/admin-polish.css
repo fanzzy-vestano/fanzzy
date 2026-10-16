@@ -1829,6 +1829,20 @@
 .pos-cash-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
 .pos-cash-actions button { flex: 1; min-height: 46px; }
 .pos-cash-dialog button:disabled { cursor: not-allowed; opacity: .45; }
+.order-delete-dialog { background: var(--admin-paper); border: 1px solid var(--admin-line); box-shadow: 0 24px 70px rgba(48, 42, 45, .2); box-sizing: border-box; color: var(--admin-ink); margin: auto; max-height: calc(100dvh - 32px); max-width: 460px; overflow-y: auto; padding: 28px; width: calc(100% - 32px); }
+.order-delete-dialog::backdrop { background: rgba(48, 42, 45, .55); }
+.order-delete-dialog h3 { color: var(--wine); font-family: var(--serif); font-size: 30px; font-weight: 500; margin: 8px 0 18px; }
+.order-delete-summary { background: #f6f1eb; display: grid; gap: 7px; padding: 16px; }
+.order-delete-summary strong { color: var(--wine); font-family: var(--mono); font-size: 14px; overflow-wrap: anywhere; }
+.order-delete-summary span { font-size: 13px; overflow-wrap: anywhere; }
+.order-delete-summary b { color: var(--wine); font-family: var(--serif); font-size: 24px; font-weight: 500; }
+.order-delete-dialog > p:not(.eyebrow) { font-size: 13px; line-height: 1.6; }
+.order-delete-effects { color: var(--admin-muted); }
+.order-delete-error { background: #f8e9e7; color: #9c3131; padding: 12px; }
+.order-delete-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 22px; }
+.order-delete-actions button { flex: 1; min-height: 46px; }
+.order-delete-button { background: #9c3131; color: #fff; font-family: var(--mono); font-size: 9px; padding: 13px 16px; text-transform: uppercase; }
+.order-delete-dialog button:disabled { cursor: not-allowed; opacity: .5; }
 @media (max-width: 400px) { .pos-cash-dialog { padding: 24px 18px; } .pos-cash-actions { flex-direction: column-reverse; } }
 .pos-sale-complete { align-items: center; background: #edf5e9; border: 1px solid #d5e5ce; display: grid; gap: 9px; grid-template-columns: auto 1fr auto; margin-top: 10px; padding: 10px; }
 .pos-sale-complete > span { align-items: center; background: #79a66c; border-radius: 50%; color: #fff; display: flex; height: 24px; justify-content: center; width: 24px; }

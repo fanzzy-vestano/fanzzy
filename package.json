@@ -12,7 +12,7 @@
     "build:pages": "node scripts/build-github-pages.mjs",
     "start": "node scripts/run-vinext.mjs start",
     "typecheck": "tsc --noEmit --incremental false",
-    "test:unit": "node --test tests/delhivery-config.test.mjs tests/pricing-preservation.test.mjs tests/catalog-visibility.test.mjs tests/purchase-eligibility.test.mjs tests/admin-pwa.test.mjs tests/barcode-printer.test.mjs tests/catalog-categories.test.mjs tests/inventory-adjustment.test.mjs tests/store-image-upload.test.mjs tests/vendor-marketplace.test.mjs tests/walk-in-returns.test.mjs tests/anchor-navigation.test.mjs tests/razorpay-pos-qr.test.mjs tests/pos-cash-payment.test.mjs tests/pos-checkout.test.mjs",
+    "test:unit": "node --test tests/delhivery-config.test.mjs tests/pricing-preservation.test.mjs tests/catalog-visibility.test.mjs tests/purchase-eligibility.test.mjs tests/admin-pwa.test.mjs tests/barcode-printer.test.mjs tests/catalog-categories.test.mjs tests/inventory-adjustment.test.mjs tests/store-image-upload.test.mjs tests/vendor-marketplace.test.mjs tests/walk-in-returns.test.mjs tests/anchor-navigation.test.mjs tests/razorpay-pos-qr.test.mjs tests/pos-cash-payment.test.mjs tests/pos-checkout.test.mjs tests/order-history.test.mjs",
     "test:rendered": "node --test tests/rendered-html.test.mjs",
     "test": "npm run typecheck && npm run test:unit && npm run build:pages && npm run test:rendered",
     "lint": "eslint . --max-warnings 100",
