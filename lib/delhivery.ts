@@ -1,4 +1,5 @@
 import { fetchDelhiveryPickupLocations, hasDelhiveryLocationIntegration } from "./delhivery-locations";
+import { selectedPickupSchedule } from "./delhivery-pickup-date";
 
 type DelhiveryAddress = {
   name: string;
@@ -304,15 +305,18 @@ const pickupScheduleCandidates = (requestedPickupTime?: string) => {
   return schedules;
 };
 
-export const delhiveryPickupSchedule = (pickupTime?: string) => pickupScheduleCandidates(pickupTime)[0];
+export const delhiveryPickupSchedule = (pickupTime?: string, pickupDate?: string) => pickupDate
+  ? selectedPickupSchedule(pickupDate, pickupTime || config().pickupTime)
+  : pickupScheduleCandidates(pickupTime)[0];
 
-export async function createDelhiveryPickupRequest(expectedPackageCount: number, pickupLocation?: string, pickupTime?: string): Promise<DelhiveryPickupRequestResult> {
+export async function createDelhiveryPickupRequest(expectedPackageCount: number, pickupLocation?: string, pickupTime?: string, pickupDate?: string): Promise<DelhiveryPickupRequestResult> {
   const current = config();
   if (!isDelhiveryPickupConfigured()) throw delhiveryError("Delhivery pickup automation is not fully configured on the server.");
   const selectedPickupLocation = await configuredPickupLocation(pickupLocation);
   const count = Math.max(1, Math.floor(Number(expectedPackageCount) || 0));
   let lastError: Error | undefined;
-  for (const schedule of pickupScheduleCandidates(pickupTime)) {
+  const schedules = pickupDate ? [delhiveryPickupSchedule(pickupTime, pickupDate)] : pickupScheduleCandidates(pickupTime);
+  for (const schedule of schedules) {
     const body = JSON.stringify({
       pickup_time: schedule.pickupTime,
       pickup_date: schedule.pickupDate,
