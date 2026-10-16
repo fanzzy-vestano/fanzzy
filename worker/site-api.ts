@@ -22,6 +22,7 @@ import * as adminVendorPayoutsRoute from "../app/api/admin/vendor-payouts/route"
 import * as adminVendorReportsRoute from "../app/api/admin/vendor-reports/route";
 import * as adminDelhiveryConfigRoute from "../app/api/admin/delhivery/config/route";
 import * as adminDelhiveryCreateRoute from "../app/api/admin/delhivery/create/route";
+import * as adminDelhiveryRetryPickupRoute from "../app/api/admin/delhivery/retry-pickup/route";
 import * as adminReturnsRoute from "../app/api/admin/returns/route";
 import * as confirmCodRoute from "../app/api/orders/confirm-cod/route";
 import * as orderTrackingRoute from "../app/api/orders/track/route";
@@ -187,6 +188,7 @@ const routeRequest = async (request: Request, env: WorkerEnv): Promise<Response>
   if (path === "/admin/vendor-reports") return adminRoute(request, env, adminVendorReportsRoute);
   if (path === "/admin/delhivery/config") return adminRoute(request, env, adminDelhiveryConfigRoute);
   if (path === "/admin/delhivery/create") return adminRoute(request, env, adminDelhiveryCreateRoute);
+  if (path === "/admin/delhivery/retry-pickup") return adminRoute(request, env, adminDelhiveryRetryPickupRoute);
   if (path === "/admin/returns") return adminRoute(request, env, adminReturnsRoute);
   if (segments[0] === "admin" && segments[1] === "vendors" && segments.length === 3) {
     return adminRoute(request, env, adminVendorRoute, { params: Promise.resolve({ id: segments[2] }) });

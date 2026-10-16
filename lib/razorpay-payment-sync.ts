@@ -716,6 +716,29 @@ export async function createAdminDelhiveryShipment(orderId: string, weightGrams:
   });
 }
 
+export async function retryAdminDelhiveryPickup(orderId: string, pickupDate: string, pickupTime: string) {
+  selectedPickupSchedule(pickupDate, pickupTime);
+  return withInventoryMutationLock(async () => {
+    const orders = await readOrders();
+    const order = orders.find((candidate) => candidate.id === orderId);
+    if (!order) throw new Error("Order could not be found for pickup retry.");
+    if (!isDeliveryOrderReadyForPickup(order)) throw new Error("An active Delhivery shipment is required to retry pickup.");
+    if (order.status === "Shipped" || /picked|dispatched|in.?transit|out for delivery|delivered|cancelled/i.test(order.delhiveryLiveStatus || "")) throw new Error("Pickup cannot be retried after the parcel has shipped.");
+    // A repeated click must never replace a successful or in-flight booking.
+    if (["created", "covered"].includes(order.delhiveryPickupRequestStatus || "") || (order.delhiveryPickupRequestStatus === "pending" && !order.delhiveryPickupRequestError)) return order;
+    if (!order.delhiveryPickupLocation) throw new Error("The shipment's pickup warehouse is missing. Check the shipment in Delhivery before retrying.");
+    order.delhiveryRequestedPickupDate = pickupDate;
+    order.delhiveryPickupRequestTime = `${pickupTime}:00`;
+    order.delhiveryPickupRequestStatus = "failed";
+    delete order.delhiveryPickupRequestId;
+    delete order.delhiveryPickupExpectedPackageCount;
+    delete order.delhiveryPickupRequestError;
+    // Only the pickup operation is retried. Never call shipment creation here.
+    await ensureDelhiveryPickupRequest(orders, order);
+    return order;
+  });
+}
+
 export async function refreshDelhiveryOrderTracking(orderId: string, waybill: string) {
   return withInventoryMutationLock(async () => {
     const orders = await readOrders();

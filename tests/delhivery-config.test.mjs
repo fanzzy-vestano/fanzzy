@@ -25,7 +25,7 @@ function loadShipping(overrides = {}, handleFetch) {
       module: cjsModule, exports: cjsModule.exports, process: { env },
       require: (id) => id.startsWith(".") ? load(resolve(dirname(file), extname(id) ? id : `${id}.ts`)) : nativeRequire(id),
       fetch: async (...args) => { requests.push(args); if (handleFetch) return handleFetch(...args); throw new Error("Network forbidden in local shipping tests"); },
-      crypto: globalThis.crypto, URL, URLSearchParams, Response, Buffer, AbortSignal, console,
+      crypto: globalThis.crypto, URL, URLSearchParams, Response, Buffer, AbortSignal, Error, console,
     }, { filename: file });
     return cjsModule.exports;
   }
@@ -252,4 +252,85 @@ test("a rejected explicitly selected slot is reported without falling back to an
   const date = shipping.load(resolve(root, "lib/delhivery-pickup-date.ts")).pickupDateRange().max;
   await assert.rejects(shipping.createDelhiveryPickupRequest(1, "VESTANO", "14:30:00", date), /Selected slot unavailable/);
   assert.equal(attempts, 1);
+});
+
+function pickupRetrySandbox(overrides = {}, failFirst = false) {
+  let saved = [{ ...order, id: "#FZ-RETRY-TEST", status: "Processing", paymentStatus: "paid", fulfillmentMethod: "delivery", delhiveryAwb: "EXISTING-AWB", delhiveryShipmentStatus: "created", delhiveryPickupLocation: "VESTANO RETAIL B2C", delhiveryPickupRequestStatus: "failed", delhiveryPickupRequestError: "Old slot unavailable", ...overrides }];
+  const pickups = [];
+  const shipping = loadShipping({ ...configured, ...integration, ADMIN_AUTH_SECRET: "local-auth", NEXT_PUBLIC_SUPABASE_URL: "https://db.example.test", SUPABASE_SERVICE_ROLE_KEY: "local-only" }, async (url, init = {}) => {
+    if (url.includes("/store_settings")) {
+      if (init.method === "POST") { saved = JSON.parse(JSON.parse(init.body)[0].value); return new Response(null, { status: 204 }); }
+      return Response.json([{ value: JSON.stringify(saved) }]);
+    }
+    if (url.includes("/fm/request/new/")) {
+      pickups.push(JSON.parse(init.body));
+      return failFirst && pickups.length === 1 ? Response.json({ error: "Selected slot unavailable" }, { status: 400 }) : Response.json({ pickup_id: "RETRY-PICKUP", status: "Scheduled" });
+    }
+    if (url.includes("/cmu/create")) assert.fail("Pickup retry must NEVER create a shipment");
+    return respondLocations()(url, init);
+  });
+  const dates = shipping.load(resolve(root, "lib/delhivery-pickup-date.ts"));
+  const auth = shipping.load(resolve(root, "lib/admin-auth.ts"));
+  const route = shipping.load(resolve(root, "app/api/admin/delhivery/retry-pickup/route.ts"));
+  const date = dates.pickupDateRange().max;
+  const post = (body = {}, authenticated = true) => route.POST(new Request("http://localhost/admin/delhivery/retry-pickup", { method: "POST", headers: { cookie: authenticated ? auth.createAdminSessionCookie().split(";")[0] : "", "Content-Type": "application/json" }, body: JSON.stringify({ orderId: "#FZ-RETRY-TEST", pickupDate: date, pickupTime: "15:45", ...body }) }));
+  return { shipping, post, pickups, date, saved: () => saved[0] };
+}
+
+test("pickup-only retry preserves AWB, weight and warehouse, persists new slot, and deduplicates concurrent clicks", async () => {
+  const sandbox = pickupRetrySandbox();
+  const responses = await Promise.all([sandbox.post({ weightGrams: 9999, pickupLocation: "VESTANO", delhiveryAwb: "REPLACE" }), sandbox.post()]);
+  for (const response of responses) assert.equal(response.status, 200);
+  assert.equal(sandbox.pickups.length, 1);
+  assert.deepEqual(sandbox.pickups[0], { pickup_date: sandbox.date, pickup_time: "15:45:00", pickup_location: "VESTANO RETAIL B2C", expected_package_count: 1 });
+  const saved = sandbox.saved();
+  assert.equal(saved.delhiveryAwb, "EXISTING-AWB");
+  assert.equal(saved.delhiveryWeightGrams, 650);
+  assert.equal(saved.delhiveryPickupLocation, "VESTANO RETAIL B2C");
+  assert.equal(saved.delhiveryShipmentStatus, "created");
+  assert.equal(saved.delhiveryRequestedPickupDate, sandbox.date);
+  assert.equal(saved.delhiveryPickupRequestDate, sandbox.date);
+  assert.equal(saved.delhiveryPickupRequestTime, "15:45:00");
+  assert.equal(saved.delhiveryPickupRequestStatus, "created");
+  assert.equal(saved.delhiveryPickupRequestError, undefined);
+});
+
+test("failed pickup retry remains retryable and next attempt can select another slot", async () => {
+  const sandbox = pickupRetrySandbox({}, true);
+  const first = await sandbox.post();
+  assert.equal(first.status, 200);
+  assert.equal((await first.json()).order.delhiveryPickupRequestStatus, "failed");
+  assert.match(sandbox.saved().delhiveryPickupRequestError, /Selected slot unavailable/);
+  assert.equal(sandbox.pickups.length, 1, "No automatic fallback slots");
+  assert.equal((await sandbox.post({ pickupTime: "16:30" })).status, 200);
+  assert.equal(sandbox.pickups.length, 2);
+  assert.equal(sandbox.pickups[1].pickup_time, "16:30:00");
+  assert.equal(sandbox.saved().delhiveryAwb, "EXISTING-AWB");
+  assert.equal(sandbox.saved().delhiveryPickupRequestStatus, "created");
+});
+
+test("pickup retry rejects unauthenticated and invalid slots before database/carrier access", async () => {
+  const sandbox = pickupRetrySandbox();
+  assert.equal((await sandbox.post({}, false)).status, 401);
+  for (const body of [{ pickupDate: "" }, { pickupDate: "2000-01-01" }, { pickupDate: "2999-01-01" }, { pickupTime: "25:30" }, { orderId: "" }]) assert.equal((await sandbox.post(body)).status, 400);
+  assert.equal(sandbox.shipping.requests.length, 0);
+});
+
+test("pickup retry blocks missing shipments, hub orders, missing warehouses and parcels already shipped", async () => {
+  for (const overrides of [{ delhiveryAwb: undefined }, { fulfillmentMethod: "pickup" }, { status: "Delivered" }, { status: "Cancelled" }, { status: "Shipped" }, { delhiveryLiveStatus: "In Transit" }, { delhiveryPickupLocation: "" }]) {
+    const sandbox = pickupRetrySandbox(overrides);
+    assert.equal((await sandbox.post()).status, 409);
+    assert.equal(sandbox.pickups.length, 0);
+    assert.equal(sandbox.shipping.requests.filter(([, init]) => init?.method === "POST").length, 0);
+  }
+});
+
+test("pickup retry leaves scheduled, covered and pending requests unchanged", async () => {
+  for (const status of ["created", "covered", "pending"]) {
+    const sandbox = pickupRetrySandbox({ delhiveryPickupRequestStatus: status, delhiveryPickupRequestError: undefined, delhiveryRequestedPickupDate: "2026-01-01", delhiveryPickupRequestTime: "11:00:00" });
+    assert.equal((await sandbox.post()).status, 200);
+    assert.equal(sandbox.pickups.length, 0);
+    assert.equal(sandbox.saved().delhiveryRequestedPickupDate, "2026-01-01");
+    assert.equal(sandbox.saved().delhiveryPickupRequestTime, "11:00:00");
+  }
 });
