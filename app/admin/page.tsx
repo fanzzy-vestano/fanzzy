@@ -5,6 +5,7 @@ import { Component, memo, useCallback, useEffect, useMemo, useRef, useState, typ
 import { Eye, Pencil, Printer, Trash2 } from "lucide-react";
 import DelhiveryPickupSelect from "./DelhiveryPickupSelect";
 import { pickupDateRange, selectedPickupSchedule } from "../../lib/delhivery-pickup-date";
+import { isDelhiveryPickupRetryBlocked } from "../../lib/delhivery-status";
 import { createProductCategoryResolver, mergeCatalogCategories } from "../../lib/catalog-categories";
 import { countAdminCategoryProducts } from "../../lib/catalog/category-counts";
 import {
@@ -7215,7 +7216,7 @@ function OrdersWorkspace({
                     {selectedOrder.delhiveryLiveLocation && <div><dt>Location</dt><dd>{selectedOrder.delhiveryLiveLocation}</dd></div>}
                     {selectedOrder.delhiveryLastTrackedAt && <div><dt>Last checked</dt><dd>{formatOrderTime(selectedOrder.delhiveryLastTrackedAt)}</dd></div>}
                   </dl>
-                  {selectedOrder.delhiveryShipmentStatus === "created" && !["Shipped", "Delivered", "Cancelled"].includes(selectedOrder.status) && !/picked|dispatched|in.?transit|out for delivery|delivered|cancelled/i.test(selectedOrder.delhiveryLiveStatus || "") && !["created", "covered", "pending"].includes(selectedOrder.delhiveryPickupRequestStatus || "") && <>
+                  {selectedOrder.delhiveryShipmentStatus === "created" && !["Shipped", "Delivered", "Cancelled"].includes(selectedOrder.status) && !isDelhiveryPickupRetryBlocked(selectedOrder.delhiveryLiveStatus) && !["created", "covered", "pending"].includes(selectedOrder.delhiveryPickupRequestStatus || "") && <>
                     <p className="product-detail-meta">Choose a new pickup date and time. This uses the existing shipment and pickup warehouse.</p>
                     <div className="admin-delhivery-weight-form">
                       <label htmlFor="delhivery-retry-pickup-date">Pickup date <span>India time · today through the next 7 days</span></label>

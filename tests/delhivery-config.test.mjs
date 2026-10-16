@@ -267,6 +267,7 @@ function pickupRetrySandbox(overrides = {}, failFirst = false) {
       return failFirst && pickups.length === 1 ? Response.json({ error: "Selected slot unavailable" }, { status: 400 }) : Response.json({ pickup_id: "RETRY-PICKUP", status: "Scheduled" });
     }
     if (url.includes("/cmu/create")) assert.fail("Pickup retry must NEVER create a shipment");
+    if (url.includes("/api/v1/packages/json/")) return Response.json({ ShipmentData: [{ Shipment: { Status: { Status: overrides.delhiveryLiveStatus || "Not Picked" } } }] });
     return respondLocations()(url, init);
   });
   const dates = shipping.load(resolve(root, "lib/delhivery-pickup-date.ts"));
@@ -317,11 +318,26 @@ test("pickup retry rejects unauthenticated and invalid slots before database/car
 });
 
 test("pickup retry blocks missing shipments, hub orders, missing warehouses and parcels already shipped", async () => {
-  for (const overrides of [{ delhiveryAwb: undefined }, { fulfillmentMethod: "pickup" }, { status: "Delivered" }, { status: "Cancelled" }, { status: "Shipped" }, { delhiveryLiveStatus: "In Transit" }, { delhiveryPickupLocation: "" }]) {
+  for (const overrides of [{ delhiveryAwb: undefined }, { fulfillmentMethod: "pickup" }, { status: "Delivered" }, { status: "Cancelled" }, { status: "Shipped" }, ...["Picked", "Picked Up", "Dispatched", "In Transit", "Out for Delivery", "Shipped", "Delivered", "Cancelled", "Not Picked - Cancelled"].map(delhiveryLiveStatus => ({ delhiveryLiveStatus })), { delhiveryPickupLocation: "" }]) {
     const sandbox = pickupRetrySandbox(overrides);
     assert.equal((await sandbox.post()).status, 409);
     assert.equal(sandbox.pickups.length, 0);
     assert.equal(sandbox.shipping.requests.filter(([, init]) => init?.method === "POST").length, 0);
+  }
+});
+
+test("Not Picked remains eligible after tracking refresh and retries only pickup against the existing AWB", async () => {
+  for (const status of ["Not Picked", "NOT PICKED", "Not-Picked", "Not_Picked", "Not Picked Up", "NotPicked", "Manifested", "Pickup Pending"]) {
+    const sandbox = pickupRetrySandbox({ delhiveryLiveStatus: status });
+    const payment = sandbox.shipping.load(resolve(root, "lib/razorpay-payment-sync.ts"));
+    await payment.refreshDelhiveryOrderTracking("#FZ-RETRY-TEST", "EXISTING-AWB");
+    assert.equal(sandbox.saved().status, "Processing", `${status} must not mark the order shipped`);
+    assert.equal((await sandbox.post()).status, 200, `${status} should permit pickup retry`);
+    assert.equal(sandbox.pickups.length, 1);
+    assert.equal(sandbox.saved().delhiveryAwb, "EXISTING-AWB");
+    assert.equal(sandbox.saved().delhiveryWeightGrams, 650);
+    assert.equal(sandbox.saved().delhiveryPickupLocation, "VESTANO RETAIL B2C");
+    assert.equal(sandbox.saved().delhiveryPickupRequestStatus, "created");
   }
 });
 
