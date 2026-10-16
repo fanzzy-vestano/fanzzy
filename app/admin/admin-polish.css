@@ -1810,6 +1810,26 @@
 .pos-pay-button { align-items: center; background: var(--wine); color: #fff8ef; display: flex; font-family: var(--mono); font-size: 9px; justify-content: space-between; letter-spacing: .05em; margin-top: 13px; padding: 15px 16px; text-transform: uppercase; width: 100%; }
 .pos-pay-button span { color: var(--gold); font-size: 16px; }
 .pos-pay-button:disabled { cursor: not-allowed; opacity: .45; }
+.pos-cash-dialog { background: var(--admin-paper); border: 1px solid var(--admin-line); box-shadow: 0 24px 70px rgba(48, 42, 45, .2); box-sizing: border-box; color: var(--admin-ink); margin: auto; max-height: calc(100dvh - 32px); max-width: 460px; overflow-y: auto; padding: 28px; width: calc(100% - 32px); }
+.pos-cash-dialog::backdrop { background: rgba(48, 42, 45, .52); }
+.pos-cash-dialog h3 { color: var(--wine); font-family: var(--serif); font-size: 32px; font-weight: 500; margin: 5px 0 8px; }
+.pos-cash-dialog #pos-cash-description { color: var(--admin-muted); font-size: 13px; line-height: 1.6; margin: 0 0 20px; }
+.pos-cash-total, .pos-cash-change { align-items: center; display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; padding: 16px; }
+.pos-cash-total { background: #f6f1eb; color: var(--wine); margin-bottom: 20px; }
+.pos-cash-total span, .pos-cash-change span { font-size: 13px; }
+.pos-cash-total strong, .pos-cash-change strong { font-family: var(--serif); font-size: 30px; font-weight: 500; overflow-wrap: anywhere; }
+.pos-cash-field { color: var(--wine); display: grid; font-size: 12px; gap: 9px; }
+.pos-cash-field input { background: #fff; border: 1px solid var(--admin-line); border-radius: 0; box-sizing: border-box; color: var(--wine); font-family: var(--sans); font-size: 22px; min-width: 0; padding: 14px; width: 100%; }
+.pos-cash-field input::placeholder { color: var(--admin-muted); font-size: 14px; }
+.pos-cash-field input:focus-visible { outline: 2px solid var(--wine); outline-offset: 2px; }
+.pos-cash-change { border: 1px solid var(--admin-line); margin-top: 18px; }
+.pos-cash-change.is-ready { background: #edf5e9; border-color: #d5e5ce; color: #365b31; }
+.pos-cash-help { color: var(--admin-muted); font-size: 12px; line-height: 1.5; margin: 10px 0 0; }
+.pos-cash-help.is-error { color: #a33c3c; }
+.pos-cash-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
+.pos-cash-actions button { flex: 1; min-height: 46px; }
+.pos-cash-dialog button:disabled { cursor: not-allowed; opacity: .45; }
+@media (max-width: 400px) { .pos-cash-dialog { padding: 24px 18px; } .pos-cash-actions { flex-direction: column-reverse; } }
 .pos-sale-complete { align-items: center; background: #edf5e9; border: 1px solid #d5e5ce; display: grid; gap: 9px; grid-template-columns: auto 1fr auto; margin-top: 10px; padding: 10px; }
 .pos-sale-complete > span { align-items: center; background: #79a66c; border-radius: 50%; color: #fff; display: flex; height: 24px; justify-content: center; width: 24px; }
 .pos-sale-complete > div { display: grid; gap: 3px; }

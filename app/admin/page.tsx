@@ -4,6 +4,8 @@
 import { Component, memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ErrorInfo } from "react";
 import { Eye, Pencil, Printer, Trash2 } from "lucide-react";
 import DelhiveryPickupSelect from "./DelhiveryPickupSelect";
+import PosCashPaymentDialog from "./PosCashPaymentDialog";
+import { calculateCashPayment, formatPosCurrency } from "../../lib/pos-cash-payment";
 import { orderNeedsDelivery } from "../../lib/order-fulfillment";
 import { pickupDateRange, selectedPickupSchedule } from "../../lib/delhivery-pickup-date";
 import { isDelhiveryPickupRetryBlocked } from "../../lib/delhivery-status";
@@ -8609,6 +8611,9 @@ function PosWorkspace({
   const [discountValue, setDiscountValue] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<PosPaymentMethod>("Cash");
   const [checkoutBusy, setCheckoutBusy] = useState(false);
+  const checkoutBusyRef = useRef(false);
+  const [cashDialogOpen, setCashDialogOpen] = useState(false);
+  const [lastCashChange, setLastCashChange] = useState<number | null>(null);
   const [lastSale, setLastSale] = useState<OrderRecord | null>(null);
   const [posQr, setPosQr] = useState<PosQrState>({ status: "idle" });
   const [posQrRefresh, setPosQrRefresh] = useState(0);
@@ -8670,8 +8675,8 @@ function PosWorkspace({
           createdAt: product.createdAt,
           category: String(product.category || "Uncategorised"),
           stock: Math.max(0, Number(product.stock) || 0),
-          price: typeof product.price === "string" ? product.price : formatAdminCurrency(Number(product.price) || 0),
-          cost: typeof product.cost === "string" ? product.cost : formatAdminCurrency(Number(product.cost) || 0),
+          price: typeof product.price === "string" ? product.price : formatPosCurrency(Number(product.price) || 0),
+          cost: typeof product.cost === "string" ? product.cost : formatPosCurrency(Number(product.cost) || 0),
           status,
           image: String(product.image || adminPlaceholderImage),
           hoverImage: String(product.hoverImage || product.image || adminPlaceholderImage),
@@ -8727,7 +8732,7 @@ function PosWorkspace({
           category: product.category,
           barcode: product.barcode,
           image: variant?.image || product.image,
-          price: variant?.price ? formatAdminCurrency(Number(variant.price)) : product.price,
+          price: variant?.price ? formatPosCurrency(Number(variant.price)) : product.price,
           stock: Math.max(0, Math.floor(Number(stock) || 0)),
           size,
         };
@@ -8743,7 +8748,7 @@ function PosWorkspace({
         category: product.category,
         barcode: product.barcode,
         image: variant.image || product.image,
-        price: variant.price ? formatAdminCurrency(Number(variant.price)) : product.price,
+        price: variant.price ? formatPosCurrency(Number(variant.price)) : product.price,
         stock: Math.max(0, Math.floor(Number(stock) || 0)),
         variantName,
       };
@@ -8754,6 +8759,7 @@ function PosWorkspace({
     return options.length ? options.reduce((sum, option) => sum + option.stock, 0) : product.stock;
   };
   const addSelection = (selection: PosCartSelection, product: AdminProduct) => {
+    if (cashDialogOpen || checkoutBusyRef.current) return;
     if (upiPaymentActive) {
       setError("Switch away from UPI before changing this sale, or complete the confirmed payment.");
       return;
@@ -8787,6 +8793,7 @@ function PosWorkspace({
     window.requestAnimationFrame(() => inputRef.current?.focus());
   };
   const addProduct = (product: AdminProduct) => {
+    if (cashDialogOpen || checkoutBusyRef.current) return;
     const options = variantOptions(product);
     if (options.length) {
       setVariantPickerProduct(product);
@@ -8799,6 +8806,7 @@ function PosWorkspace({
   };
 
   const lookupProduct = (value: string) => {
+    if (cashDialogOpen || checkoutBusyRef.current) return;
     const rawValue = value.trim();
     if (!rawValue) {
       setError("Enter or scan a barcode first.");
@@ -8835,8 +8843,8 @@ function PosWorkspace({
     lookupProductRef.current(inputValue);
   }, [inputValue, loading, products]);
   useEffect(() => {
-    if (request > 0) inputRef.current?.focus();
-  }, [request]);
+    if (request > 0 && !cashDialogOpen && !checkoutBusy) inputRef.current?.focus();
+  }, [request, cashDialogOpen, checkoutBusy]);
 
   const cartLines = useMemo(() => Object.values(cart).flatMap(({ selection, quantity }) => {
     const product = products.find((candidate) => candidate.sku === selection.sku);
@@ -8845,7 +8853,7 @@ function PosWorkspace({
   const cartUnits = cartLines.reduce((total, line) => total + line.quantity, 0);
   const subtotal = cartLines.reduce((total, line) => total + parseMoney(line.selection.price) * line.quantity, 0);
   const discount = Math.min(subtotal, Math.max(0, Number(discountValue) || 0));
-  const total = Math.max(0, subtotal - discount);
+  const total = Math.round((Math.max(0, subtotal - discount) + Number.EPSILON) * 100) / 100;
   const qrPaymentFingerprint = cartLines.map(({ selection, quantity }) => `${selection.key}:${quantity}`).sort().join("|");
   const upiPaymentActive = paymentMethod === "UPI" && (posQr.status === "loading" || posQr.status === "ready" || posQr.status === "opening" || posQr.status === "pending" || posQr.status === "paid");
   const upiPaymentConfirmed = paymentMethod === "UPI" && posQr.status === "paid" && Boolean(posQr.paymentId);
@@ -8911,6 +8919,7 @@ function PosWorkspace({
   };
 
   const updateQuantity = (selection: PosCartSelection, delta: number) => {
+    if (cashDialogOpen || checkoutBusyRef.current) return;
     if (upiPaymentActive) {
       setError("Switch away from UPI before changing quantities, or complete the confirmed payment.");
       return;
@@ -8927,6 +8936,7 @@ function PosWorkspace({
   };
 
   const clearSale = () => {
+    if (cashDialogOpen || checkoutBusyRef.current) return;
     if (upiPaymentConfirmed) {
       setError("This UPI payment is already received. Complete the sale before starting another bill.");
       return;
@@ -8942,6 +8952,7 @@ function PosWorkspace({
   };
 
   const choosePaymentMethod = (method: PosPaymentMethod) => {
+    if (cashDialogOpen || checkoutBusyRef.current) return;
     if (upiPaymentConfirmed && method !== "UPI") {
       setError("This UPI payment is already received. Complete the sale before changing payment method.");
       return;
@@ -8950,8 +8961,20 @@ function PosWorkspace({
     setError("");
   };
 
-  const completeSale = async () => {
-    if (!cartLines.length || checkoutBusy) return;
+  const completeSale = async (cashReceived?: string) => {
+    if (!cartLines.length || checkoutBusyRef.current) return;
+    const cashPayment = paymentMethod === "Cash" ? calculateCashPayment(total, cashReceived ?? "") : null;
+    if (paymentMethod === "Cash") {
+      if (cashReceived === undefined) {
+        setError("");
+        setCashDialogOpen(true);
+        return;
+      }
+      if (!cashDialogOpen || !cashPayment?.canConfirm) {
+        setError("Enter cash received that covers the bill total before confirming payment.");
+        return;
+      }
+    }
     if (paymentMethod === "UPI" && !upiPaymentConfirmed) {
       setError(posQr.status === "error" ? posQr.message || "Could not create the UPI QR code." : "Ask the customer to scan the Razorpay QR and wait for payment confirmation.");
       return;
@@ -8961,6 +8984,7 @@ function PosWorkspace({
       setError(`${unavailable.product.name} does not have enough stock.`);
       return;
     }
+    checkoutBusyRef.current = true;
     setCheckoutBusy(true);
     setError("");
     try {
@@ -9005,7 +9029,7 @@ function PosWorkspace({
         date: now.toISOString().slice(0, 10),
         createdAt: now.toISOString(),
         status: "Delivered",
-        total: formatAdminCurrency(total),
+        total: formatPosCurrency(total),
         customerName: customerName.trim() || "Walk-in customer",
         phone: customerPhone.trim(),
         address: "In-store POS sale",
@@ -9056,12 +9080,16 @@ function PosWorkspace({
       posQrRef.current = { status: "idle" };
       setPosQr({ status: "idle" });
       setLastSale(order);
+      setLastCashChange(cashPayment?.changePaise != null ? cashPayment.changePaise / 100 : null);
+      setCashDialogOpen(false);
+      if (paymentMethod === "Cash") window.requestAnimationFrame(() => inputRef.current?.focus());
       onNotify(orderSaveError ? `${order.id} completed and saved on this device` : `${order.id} sale completed`);
     } catch (saleError) {
       setError(saleError instanceof Error ? saleError.message : "Could not complete this POS sale.");
     } finally {
+      checkoutBusyRef.current = false;
       setCheckoutBusy(false);
-      window.requestAnimationFrame(() => inputRef.current?.focus());
+      if (paymentMethod !== "Cash") window.requestAnimationFrame(() => inputRef.current?.focus());
     }
   };
   const variantPickerOptions = variantPickerProduct ? variantOptions(variantPickerProduct) : [];
@@ -9072,7 +9100,7 @@ function PosWorkspace({
         <div><p className="eyebrow">LIVE POINT OF SALE</p><h2 id="pos-workspace-title">Counter POS</h2><p>Scan a barcode to add products instantly, take payment, and complete an in-store sale.</p></div>
         <span className="pos-live-badge"><i /> Scanner ready</span>
       </div>
-      <div className="pos-layout">
+      <div className="pos-layout" inert={cashDialogOpen || checkoutBusy}>
         <div className="pos-catalog-panel">
           <div className="pos-scan-box">
             <span className="pos-scan-icon">▣</span>
@@ -9091,7 +9119,7 @@ function PosWorkspace({
         <aside className="pos-cart-panel">
           <div className="pos-cart-head"><div><p className="eyebrow">CURRENT SALE</p><h3>{cartUnits ? `${cartUnits} item${cartUnits === 1 ? "" : "s"}` : "New sale"}</h3></div>{cartUnits > 0 && <button type="button" onClick={clearSale} disabled={upiPaymentConfirmed}>Clear</button>}</div>
           <div className="pos-cart-lines">
-            {cartLines.length ? cartLines.map(({ product, selection, quantity }) => <article className="pos-cart-line" key={selection.key}><div className="pos-cart-line-image">{selection.image ? <img src={selection.image} alt="" /> : <span>✦</span>}</div><div><strong>{product.name}</strong><small>{selection.sku}{selection.variantName ? ` · ${selection.variantName}` : selection.size ? ` · Size ${selection.size}` : ""}</small><div className="pos-quantity"><button type="button" onClick={() => updateQuantity(selection, -1)} aria-label={`Decrease ${product.name}`} disabled={upiPaymentActive}>−</button><span>{quantity}</span><button type="button" onClick={() => updateQuantity(selection, 1)} aria-label={`Increase ${product.name}`} disabled={upiPaymentActive}>+</button></div></div><span><b>{formatAdminCurrency(parseMoney(selection.price) * quantity)}</b><button type="button" onClick={() => updateQuantity(selection, -quantity)} disabled={upiPaymentActive}>Remove</button></span></article>) : <div className="pos-empty-cart"><span>▣</span><strong>Ready to scan</strong><small>Scan a barcode or tap a product to begin the sale.</small></div>}
+            {cartLines.length ? cartLines.map(({ product, selection, quantity }) => <article className="pos-cart-line" key={selection.key}><div className="pos-cart-line-image">{selection.image ? <img src={selection.image} alt="" /> : <span>✦</span>}</div><div><strong>{product.name}</strong><small>{selection.sku}{selection.variantName ? ` · ${selection.variantName}` : selection.size ? ` · Size ${selection.size}` : ""}</small><div className="pos-quantity"><button type="button" onClick={() => updateQuantity(selection, -1)} aria-label={`Decrease ${product.name}`} disabled={upiPaymentActive}>−</button><span>{quantity}</span><button type="button" onClick={() => updateQuantity(selection, 1)} aria-label={`Increase ${product.name}`} disabled={upiPaymentActive}>+</button></div></div><span><b>{formatPosCurrency(parseMoney(selection.price) * quantity)}</b><button type="button" onClick={() => updateQuantity(selection, -quantity)} disabled={upiPaymentActive}>Remove</button></span></article>) : <div className="pos-empty-cart"><span>▣</span><strong>Ready to scan</strong><small>Scan a barcode or tap a product to begin the sale.</small></div>}
           </div>
           <div className="pos-customer-fields"><label>Customer name <input value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="Walk-in customer" /></label><label>Mobile number <input value={customerPhone} onChange={(event) => setCustomerPhone(event.target.value.replace(/\D/g, "").slice(0, 10))} inputMode="numeric" placeholder="Optional" /></label></div>
           <div className="pos-payment-section"><span>Payment method</span><div>{(["Cash", "UPI", "Card"] as PosPaymentMethod[]).map((method) => <button type="button" key={method} className={paymentMethod === method ? "active" : ""} onClick={() => choosePaymentMethod(method)}>{method}</button>)}</div></div>
@@ -9101,15 +9129,16 @@ function PosWorkspace({
             {posQr.status === "cancelled" && <><span className="pos-upi-qr-error">!</span><div><strong>Payment cancelled</strong><small>{posQr.message}</small><button type="button" onClick={() => void startUpiCheckout()}>Retry UPI payment</button></div></>}
             {(posQr.status === "ready" || posQr.status === "opening" || posQr.status === "pending" || posQr.status === "paid") && <>
               {posQr.status !== "ready" && <span className={posQr.status === "paid" ? "pos-upi-qr-success" : "pos-upi-qr-loader"} />}
-              <div><small>RAZORPAY CHECKOUT</small><strong>{posQr.status === "paid" ? "Payment received" : posQr.status === "ready" ? `Ready · Pay ${formatAdminCurrency(total)} with UPI` : posQr.status === "opening" ? "Opening secure payment…" : "Complete payment in Razorpay…"}</strong><span>{posQr.status === "paid" ? `Confirmed · ${posQr.paymentId}` : posQr.status === "ready" ? "Tap Pay with UPI to open UPI and QR options." : "UPI, QR and supported payment methods are available."}</span></div>
+              <div><small>RAZORPAY CHECKOUT</small><strong>{posQr.status === "paid" ? "Payment received" : posQr.status === "ready" ? `Ready · Pay ${formatPosCurrency(total)} with UPI` : posQr.status === "opening" ? "Opening secure payment…" : "Complete payment in Razorpay…"}</strong><span>{posQr.status === "paid" ? `Confirmed · ${posQr.paymentId}` : posQr.status === "ready" ? "Tap Pay with UPI to open UPI and QR options." : "UPI, QR and supported payment methods are available."}</span></div>
               <b className={posQr.status === "paid" ? "is-paid" : ""}>{posQr.status === "paid" ? "✓" : "•••"}</b>
             </>}
           </section>}
-          <div className="pos-totals"><label><span>Subtotal</span><strong>{formatAdminCurrency(subtotal)}</strong></label><label><span>Discount</span><span className="pos-discount-input">₹<input value={discountValue} onChange={(event) => setDiscountValue(event.target.value.replace(/[^0-9.]/g, ""))} inputMode="decimal" placeholder="0" disabled={upiPaymentActive} /></span></label><label className="pos-grand-total"><span>Total</span><strong>{formatAdminCurrency(total)}</strong></label><small>Prices are inclusive of applicable GST.</small></div>
-          <button className="pos-pay-button" type="button" disabled={!cartLines.length || checkoutBusy || (paymentMethod === "UPI" && !upiPaymentConfirmed && posQr.status !== "ready" && posQr.status !== "cancelled")} onClick={() => void (paymentMethod === "UPI" && !upiPaymentConfirmed ? startUpiCheckout() : completeSale())}>{checkoutBusy ? "Completing sale…" : paymentMethod === "UPI" ? upiPaymentConfirmed ? `Complete ${formatAdminCurrency(total)} · UPI paid` : posQr.status === "cancelled" ? `Retry UPI payment · ${formatAdminCurrency(total)}` : `Pay with UPI · ${formatAdminCurrency(total)}` : `Pay ${formatAdminCurrency(total)} · ${paymentMethod}`} <span>→</span></button>
-          {lastSale && <div className="pos-sale-complete"><span>✓</span><div><strong>Sale completed</strong><small>{lastSale.id} · {lastSale.total}</small></div><button type="button" onClick={() => void printOrderBill(lastSale)}>Print receipt</button></div>}
+          <div className="pos-totals"><label><span>Subtotal</span><strong>{formatPosCurrency(subtotal)}</strong></label><label><span>Discount</span><span className="pos-discount-input">₹<input value={discountValue} onChange={(event) => setDiscountValue(event.target.value.replace(/[^0-9.]/g, ""))} inputMode="decimal" placeholder="0" disabled={upiPaymentActive} /></span></label><label className="pos-grand-total"><span>Total</span><strong>{formatPosCurrency(total)}</strong></label><small>Prices are inclusive of applicable GST.</small></div>
+          <button className="pos-pay-button" type="button" disabled={!cartLines.length || checkoutBusy || (paymentMethod === "UPI" && !upiPaymentConfirmed && posQr.status !== "ready" && posQr.status !== "cancelled")} onClick={() => void (paymentMethod === "UPI" && !upiPaymentConfirmed ? startUpiCheckout() : completeSale())}>{checkoutBusy ? "Completing sale…" : paymentMethod === "UPI" ? upiPaymentConfirmed ? `Complete ${formatPosCurrency(total)} · UPI paid` : posQr.status === "cancelled" ? `Retry UPI payment · ${formatPosCurrency(total)}` : `Pay with UPI · ${formatPosCurrency(total)}` : `Pay ${formatPosCurrency(total)} · ${paymentMethod}`} <span>→</span></button>
+          {lastSale && <div className="pos-sale-complete"><span>✓</span><div><strong>Sale completed</strong><small>{lastSale.id} · {lastSale.total}</small>{lastCashChange !== null && <small>Balance to return: {formatPosCurrency(lastCashChange)}</small>}</div><button type="button" onClick={() => void printOrderBill(lastSale)}>Print receipt</button></div>}
         </aside>
       </div>
+      {cashDialogOpen && <PosCashPaymentDialog total={total} busy={checkoutBusy} error={error} onClose={() => { if (!checkoutBusyRef.current) { setCashDialogOpen(false); setError(""); } }} onConfirm={(received) => { void completeSale(received); }} />}
       {variantPickerProduct && <div className="product-modal-backdrop" onClick={closeVariantPicker}><div className="product-modal-card pos-variant-modal" role="dialog" aria-modal="true" aria-labelledby="pos-variant-title" onClick={(event) => event.stopPropagation()}><button className="product-modal-close" type="button" onClick={closeVariantPicker} aria-label="Close variant selector">×</button><p className="eyebrow">SELECT VARIANT</p><h3 id="pos-variant-title">{variantPickerProduct.name}</h3><p className="field-help">This barcode belongs to a product with multiple stock options. Choose the exact variant or size before adding it to the POS bill.</p><div className="pos-variant-option-grid">{variantPickerOptions.length ? variantPickerOptions.map((selection) => <article className="pos-variant-option" key={selection.key}><span className="pos-variant-option-image">{selection.image ? <img src={selection.image} alt="" /> : <i>✦</i>}</span><div><strong>{selection.variantName || (selection.size ? `Size ${selection.size}` : variantPickerProduct.name)}</strong><small>{selection.stock > 0 ? `${selection.stock} in stock` : "Out of stock"} · {selection.price}</small></div><button className="module-primary" type="button" disabled={selection.stock <= 0 || upiPaymentActive} onClick={() => addSelection(selection, variantPickerProduct)}>Add</button></article>) : <p className="variant-empty">No variants are configured for this product.</p>}</div></div></div>}
     </section>
   );
