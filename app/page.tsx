@@ -5,6 +5,7 @@
 import { hasValidSellingPrice } from "../lib/catalog/purchase-eligibility.js";
 import { filterCatalogProducts } from "../lib/catalog/catalog-visibility";
 import { filterVisibleOrders } from "../lib/order-history";
+import { removeOptionalBrowserCache, writeOptionalBrowserCache } from "../lib/optional-browser-cache";
 
 import { memo, type FormEvent, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
@@ -853,6 +854,7 @@ export default function Home() {
   const [cartSizes, setCartSizes] = useState<Record<string, string | null>>({});
   const [cartPromotionLines, setCartPromotionLines] = useState<Record<string, PromotionCartLine>>({});
   const cartOwnerId = useRef<string | null>(null);
+  const localInventoryAdjustments = useRef(new Set<string>());
   const [cartReadyOwner, setCartReadyOwner] = useState<string | null>(null);
   const [cartOpen, setCartOpen] = useState(false);
   // The compact cart summary is a post-add confirmation, not a persistent
@@ -1593,26 +1595,6 @@ export default function Home() {
         return;
       }
       try {
-        const localOnlyOrders: CustomerOrder[] = [];
-        const cachedOrders = new Map<string, CustomerOrder>();
-        const addCachedOrders = (value: unknown) => {
-          if (!Array.isArray(value)) return;
-          filterVisibleOrders(value).forEach((order) => {
-            if (order?.id && isCustomerOrder(order as CustomerOrder, authUser) && !cachedOrders.has(order.id)) {
-              const localOrder = order as CustomerOrder;
-              cachedOrders.set(localOrder.id, localOrder);
-              localOnlyOrders.push(localOrder);
-            }
-          });
-        };
-        try {
-          addCachedOrders(JSON.parse(window.localStorage.getItem(`fanzzy-orders:${userId}`) || "[]"));
-          addCachedOrders(JSON.parse(window.localStorage.getItem("fanzzy-orders") || "[]"));
-        } catch {
-          window.localStorage.removeItem(`fanzzy-orders:${userId}`);
-        }
-        if (cachedOrders.size) updateOrdersIfChanged(Array.from(cachedOrders.values()));
-
         // Recover captured payments on the initial load in the background so it
         // cannot delay the customer’s already available order list.
         if (recoverCapturedPayments) {
@@ -1620,29 +1602,9 @@ export default function Home() {
         }
 
         const remote = await fetchStoreOrders<CustomerOrder>();
-        const merged = new Map<string, CustomerOrder>();
-        remote.data?.forEach((order) => {
-          if (order?.id && isCustomerOrder(order, authUser)) {
-            merged.set(order.id, order);
-          }
-        });
-        cachedOrders.forEach((order) => {
-          if (!merged.has(order.id)) merged.set(order.id, order);
-        });
-        // A completed payment can be preserved locally while the shared order
-        // store is offline. As soon as it comes back, add only the missing
-        // customer records to the full remote collection without overwriting
-        // orders from other customers.
-        const visibleLocalOrders = filterVisibleOrders(localOnlyOrders);
-        if (!remote.error && visibleLocalOrders.length) {
-          const allOrders = new Map<string, CustomerOrder>();
-          remote.data?.forEach((order) => { if (order?.id) allOrders.set(order.id, order); });
-          visibleLocalOrders.forEach((order) => allOrders.set(order.id, order));
-          if (allOrders.size > (remote.data?.length || 0)) {
-            void saveStoreOrders(Array.from(allOrders.values())).catch(() => undefined);
-          }
+        if (!remote.error && remote.data) {
+          updateOrdersIfChanged(remote.data.filter((order) => order?.id && isCustomerOrder(order, authUser)));
         }
-        updateOrdersIfChanged(Array.from(merged.values()));
       } finally {
         syncInFlight = false;
       }
@@ -1880,9 +1842,9 @@ export default function Home() {
     setCart(mergedCart);
     setCartVariants({ ...guestVariants, ...userVariants });
     setCartSizes({ ...guestSizes, ...userSizes });
-    window.localStorage.removeItem(cartStorageKey("guest"));
-    window.localStorage.removeItem(cartVariantsStorageKey("guest"));
-    window.localStorage.removeItem("fanzzy-cart-sizes:guest");
+    removeOptionalBrowserCache(cartStorageKey("guest"));
+    removeOptionalBrowserCache(cartVariantsStorageKey("guest"));
+    removeOptionalBrowserCache("fanzzy-cart-sizes:guest");
     cartOwnerId.current = ownerId;
     setCartReadyOwner(ownerId);
   }, [authUser?.id]);
@@ -1890,9 +1852,9 @@ export default function Home() {
   useEffect(() => {
     const ownerId = authUser?.id || "guest";
     if (cartReadyOwner !== ownerId || cartOwnerId.current !== ownerId) return;
-    window.localStorage.setItem(cartStorageKey(ownerId), JSON.stringify(cart));
-    window.localStorage.setItem(cartVariantsStorageKey(ownerId), JSON.stringify(cartVariants));
-    window.localStorage.setItem(`fanzzy-cart-sizes:${ownerId}`, JSON.stringify(cartSizes));
+    writeOptionalBrowserCache(cartStorageKey(ownerId), cart);
+    writeOptionalBrowserCache(cartVariantsStorageKey(ownerId), cartVariants);
+    writeOptionalBrowserCache(`fanzzy-cart-sizes:${ownerId}`, cartSizes);
   }, [authUser?.id, cartReadyOwner, cart, cartVariants, cartSizes]);
 
   useEffect(() => {
@@ -2916,13 +2878,13 @@ export default function Home() {
     });
     if (!changed) return false;
     setProducts(next);
-    window.localStorage.setItem("fanzzy-products", JSON.stringify(next));
+    writeOptionalBrowserCache("fanzzy-products", next);
     persistStorefrontProductCache(next);
     const variantCache = Object.fromEntries(next.filter((product) => product.variants?.length).flatMap((product) => [
       [product.sku, product.variants],
       [product.id, product.variants],
     ]));
-    window.localStorage.setItem(localProductVariantsKey, JSON.stringify(variantCache));
+    writeOptionalBrowserCache(localProductVariantsKey, variantCache);
     window.dispatchEvent(new Event("fanzzy-products-updated"));
     return true;
   };
@@ -2930,6 +2892,8 @@ export default function Home() {
     const adjustmentId = order.razorpayPaymentId || order.id;
     if (!adjustmentId) return;
     const storageKey = `fanzzy-local-inventory-adjustments:${authUser?.id || "guest"}`;
+    const sessionKey = storageKey + ":" + adjustmentId;
+    if (localInventoryAdjustments.current.has(sessionKey)) return;
     let adjustedIds: string[] = [];
     try {
       const parsed = JSON.parse(window.localStorage.getItem(storageKey) || "[]") as unknown;
@@ -2938,7 +2902,8 @@ export default function Home() {
       adjustedIds = [];
     }
     if (adjustedIds.includes(adjustmentId) || !decrementLocalInventory(order.items || [])) return;
-    window.localStorage.setItem(storageKey, JSON.stringify([...adjustedIds, adjustmentId].slice(-250)));
+    localInventoryAdjustments.current.add(sessionKey);
+    writeOptionalBrowserCache(storageKey, [...adjustedIds, adjustmentId].slice(-250));
   };
   const refundRequestForOrder = (orderId: string) => refundRequests.find((request) => request.orderId === orderId && request.userId === authUser?.id);
   const requestRefund = async (order: CustomerOrder) => {
@@ -2983,49 +2948,12 @@ export default function Home() {
       setAuthOpen(true);
       return;
     }
-    let previousOrders: unknown[] = [];
-    try {
-      const stored = window.localStorage.getItem(`fanzzy-orders:${authUser.id}`);
-      const parsed = stored ? JSON.parse(stored) : [];
-      if (Array.isArray(parsed)) previousOrders = parsed;
-    } catch {
-      previousOrders = [];
-    }
     const remote = await fetchStoreOrders<CustomerOrder>();
-    const merged = new Map<string, CustomerOrder>();
-    remote.data?.forEach((order) => { if (order?.id) merged.set(order.id, order); });
-    previousOrders.forEach((order) => {
-      if (order && typeof order === "object" && "id" in order && typeof order.id === "string" && !merged.has(order.id)) {
-        merged.set(order.id, order as CustomerOrder);
-      }
-    });
-    const existingConfirmation = filterVisibleOrders(Array.from(merged.values())).find((order) => newOrder.paymentMethod === "cod"
-      ? order.id === newOrder.id && isPaidOrder(order)
-      : Boolean(order.razorpayPaymentId && order.razorpayPaymentId === newOrder.razorpayPaymentId));
-    if (existingConfirmation) {
-      const userOrders = filterVisibleOrders(Array.from(merged.values())).filter((order) => belongsToCustomer(order, authUser));
-      window.localStorage.setItem(`fanzzy-orders:${authUser.id}`, JSON.stringify(userOrders));
-      window.localStorage.setItem("fanzzy-orders", JSON.stringify(filterVisibleOrders(Array.from(merged.values()))));
-      window.dispatchEvent(new Event("fanzzy-orders-updated"));
-      setOrders(userOrders);
-      setOrderConfirmation(existingConfirmation);
-      if (existingConfirmation.inventoryAdjusted === true) decrementLocalInventoryOnce(existingConfirmation);
-      setCart({});
-      setCartVariants({});
-      setCartPromotionLines({});
-      setCheckoutOpen(false);
-      setFulfillmentMethod("delivery");
-      setSelectedPickupHubId("");
-      setCheckoutForm({ name: "", phone: "", email: "", address: "", pincode: "", landmark: "" });
-      setIsPaying(false);
-      announce(`${existingConfirmation.id} was already confirmed`);
-      return;
-    }
-    const nextOrders = filterVisibleOrders([newOrder, ...Array.from(merged.values()).filter((order) => order.id !== newOrder.id)]);
-    const saveError = await saveStoreOrders(nextOrders);
-    window.localStorage.setItem("fanzzy-orders", JSON.stringify(nextOrders));
+    const canonical = remote.data?.find((order) => order.id === newOrder.id && belongsToCustomer(order, authUser) && isPaidOrder(order));
+    if (remote.error || !canonical) throw new Error("Order confirmation is still awaiting server verification.");
+    newOrder = canonical;
+    const nextOrders = remote.data || [];
     const userOrders = nextOrders.filter((order) => belongsToCustomer(order, authUser) && isPaidOrder(order));
-    window.localStorage.setItem(`fanzzy-orders:${authUser.id}`, JSON.stringify(userOrders));
     window.dispatchEvent(new Event("fanzzy-orders-updated"));
     setOrders(userOrders);
     setOrderConfirmation(newOrder);
@@ -3041,41 +2969,20 @@ export default function Home() {
     setIsPaying(false);
     if (newOrder.inventoryAdjusted === true) decrementLocalInventoryOnce(newOrder);
     window.dispatchEvent(new Event("fanzzy-products-updated"));
-    announce(saveError
-      ? `${newOrder.id} is paid and saved on this device. It will sync when the order service is restored.`
-      : `${newOrder.id} placed successfully`);
+    announce(`${newOrder.id} placed successfully`);
   };
   const persistPendingOrder = async (newOrder: CustomerOrder) => {
     if (!authUser) throw new Error("Sign in before placing an order");
     const remote = await fetchStoreOrders<CustomerOrder>();
-    const merged = new Map<string, CustomerOrder>();
-    remote.data?.forEach((order) => { if (order?.id) merged.set(order.id, order); });
-    try {
-      const stored = window.localStorage.getItem(`fanzzy-orders:${authUser.id}`);
-      const localOrders = stored ? JSON.parse(stored) : [];
-      if (Array.isArray(localOrders)) {
-        localOrders.forEach((order) => {
-          if (order?.id && !merged.has(order.id)) merged.set(order.id, order as CustomerOrder);
-        });
-      }
-    } catch {
-      // A corrupt local cache must not prevent the server-side order record.
+    if (remote.error || !remote.data) {
+      throw new Error("Orders are temporarily unavailable. No payment was started. Please try again shortly.");
     }
-    const nextOrders = filterVisibleOrders([newOrder, ...Array.from(merged.values()).filter((order) => order.id !== newOrder.id)]);
+    const nextOrders = filterVisibleOrders([newOrder, ...remote.data.filter((order) => order.id !== newOrder.id)]);
     const saveError = await saveStoreOrders(nextOrders);
-    // Keep a browser-local copy when Supabase is temporarily unavailable.
-    window.localStorage.setItem("fanzzy-orders", JSON.stringify(nextOrders));
-    window.localStorage.setItem(
-      `fanzzy-orders:${authUser.id}`,
-      JSON.stringify(nextOrders.filter((order) => belongsToCustomer(order, authUser))),
-    );
-    window.dispatchEvent(new Event("fanzzy-orders-updated"));
-    // Do not open Razorpay unless this pre-payment order has reached the
-    // shared store. A browser-only copy cannot be seen by the live admin and
-    // would turn a successful payment into a missing order.
     if (saveError) {
       throw new Error("Orders are temporarily unavailable. No payment was started. Please try again shortly.");
     }
+    window.dispatchEvent(new Event("fanzzy-orders-updated"));
   };
   const submitCheckout = async () => {
     if (isPaying) return;
