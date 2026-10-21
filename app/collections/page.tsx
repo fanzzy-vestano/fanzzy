@@ -1,4 +1,5 @@
 "use client";
+import { browserLocalStorage } from "../../lib/browser-storage";
 
 import { useEffect, useState } from "react";
 import { countAdminCategoryProducts, type CategoryCountProduct } from "../../lib/catalog/category-counts";
@@ -34,7 +35,7 @@ export default function CollectionsPage() {
   useEffect(() => {
     let active = true;
     const syncCollections = async () => {
-      const stored = window.localStorage.getItem("fanzzy-categories");
+      const stored = browserLocalStorage.getItem("fanzzy-categories");
       // Counts should never delay downloading and displaying category images.
       void fetchCatalogProducts("all").then((result) => {
         if (active && result.data) setCatalogProducts(result.data as CategoryCountProduct[]);
@@ -50,7 +51,7 @@ export default function CollectionsPage() {
             section: category.section || "normal",
           }));
         } catch {
-          window.localStorage.removeItem("fanzzy-categories");
+          browserLocalStorage.removeItem("fanzzy-categories");
         }
       }
       const [remote, shared] = await Promise.all([

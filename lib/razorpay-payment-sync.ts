@@ -1,4 +1,5 @@
 import { isPosOrder, orderNeedsDelivery } from "./order-fulfillment";
+import { finalizeAtomicPosPayment } from "./pos-sale-server";
 import { hasUnavailablePurchasePrice } from "./catalog/purchase-eligibility.js";
 import { selectedPickupSchedule } from "./delhivery-pickup-date";
 import { hasDelhiveryShipmentShipped, isDelhiveryPickupRetryBlocked } from "./delhivery-status";
@@ -63,8 +64,11 @@ type StoredVariant = { name?: string; size?: string; stock?: number; [key: strin
 
 export type RazorpayPayment = {
   id: string;
+  status?: string;
+  method?: string;
   order_id?: string;
   amount?: number;
+  currency?: string;
   email?: string;
   contact?: string;
   created_at?: number;
@@ -557,6 +561,9 @@ export async function reconcilePendingOrderInventory() {
   // explicit true is an idempotency marker, so stock is never reduced twice.
   for (const order of orders) {
     if (order.paymentStatus !== "paid" || order.inventoryAdjusted === true) continue;
+    // POS confirmation is handled by the atomic provider-verified RPC. Do not
+    // re-enter the legacy multi-write repair path for an ambiguous older sale.
+    if (isPosOrder(order)) { pending += 1; continue; }
     try {
       if (order.inventoryReserved === true && order.inventoryReleased !== true) {
         order.inventoryAdjusted = true;
@@ -585,7 +592,18 @@ export async function reconcilePendingOrderInventory() {
 
 async function finalizeRazorpayPaymentInternal(payment: RazorpayPayment, receipt?: string) {
   if (!payment.id) throw new Error("Razorpay payment ID is missing");
+  if (payment.status !== "captured" || !Number.isSafeInteger(payment.amount) || Number(payment.amount) <= 0) {
+    throw new Error("Payment is not captured yet. Retry confirmation; do not pay again.");
+  }
   const orders = await readOrders();
+  const matchedPos = orders.find((candidate) => candidate.razorpayPaymentId === payment.id || Boolean(payment.order_id && candidate.razorpayOrderId === payment.order_id));
+  const matchedBill = matchedPos || orders.find((candidate) => candidate.id === payment.notes?.fanzzy_order_id);
+  if (matchedBill && (Math.round(Number(matchedBill.total.replace(/[^0-9.-]/g, "")) * 100) !== payment.amount || (payment.currency && payment.currency !== "INR"))) {
+    throw new Error("Captured payment does not match the saved bill. Do not pay again; contact support.");
+  }
+  if ((matchedPos && isPosOrder(matchedPos)) || /^#?FZ-POS-/i.test(String(payment.notes?.fanzzy_order_id || receipt || ""))) {
+    return (await finalizeAtomicPosPayment<StoredOrder>(payment, { supabaseUrl, serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || "" })).order;
+  }
   let order = orders.find((candidate) => candidate.razorpayPaymentId === payment.id);
   // Older paid orders do not have inventoryAdjusted. Treat only an explicit
   // true value as complete so the next payment sync can repair their missing

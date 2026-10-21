@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
 import ts from "typescript";
+import { loadBrowserStorage } from "./helpers/browser-storage-fixture.mjs";
 
 const source = await readFile(new URL("../app/admin/page.tsx", import.meta.url), "utf8");
 const ast = ts.createSourceFile("admin.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -52,6 +53,7 @@ async function load({ offline = false, cached = fixtures, pricing = settings } =
     saveCatalogProduct: async () => { writes.push("product"); },
     saveStoreSetting: async (key) => { writes.push(key); },
   };
+  dependencies.browserLocalStorage = loadBrowserStorage(dependencies.window).browserLocalStorage;
   await new Function(...Object.keys(dependencies), compiled)(...Object.values(dependencies));
   return { loaded, writes };
 }

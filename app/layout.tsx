@@ -3,6 +3,7 @@ import "./globals.css";
 import "./brand-polish.css";
 import "./pwa-install.css";
 import PwaInstall from "./pwa-install";
+import StorageNotice from "./storage-notice";
 
 const siteBasePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
@@ -42,5 +43,5 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,500;0,600;1,500;1,600&display=swap" />
-  </head><body>{children}<PwaInstall basePath={siteBasePath} /></body></html>;
+  </head><body>{children}<PwaInstall basePath={siteBasePath} /><StorageNotice /></body></html>;
 }

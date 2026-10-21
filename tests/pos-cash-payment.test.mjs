@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import ts from "typescript";
+import { loadBrowserStorage } from "./helpers/browser-storage-fixture.mjs";
 
 const helperSource = await readFile(new URL("../lib/pos-cash-payment.ts", import.meta.url), "utf8");
 const helperExports = {};
@@ -69,7 +70,7 @@ const saleCode = ts.transpileModule(`return (${saleHandler.getText(pageAst)});`,
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
 }).outputText;
 
-function saleHarness({ cashDialogOpen = true, stockGate } = {}) {
+function saleHarness({ cashDialogOpen = true, stockGate, fullStorage = false, orderSaveError = null, windowOverride = null } = {}) {
   const writes = [];
   const state = { dialogOpen: cashDialogOpen, error: "", busy: false, lastSale: null, change: null };
   const product = { sku: "TEST-RING", name: "Test ring", price: "₹55", stock: 10, status: "Published", variants: [] };
@@ -82,15 +83,27 @@ function saleHarness({ cashDialogOpen = true, stockGate } = {}) {
     calculateCashPayment, formatPosCurrency, filterVisibleOrders: (orders) => orders,
     upiPaymentConfirmed: false, posQr: { status: "idle" }, posQrRef: { current: { status: "idle" } }, posOrderIdRef: { current: "" },
     customerName: "", customerPhone: "", isSupabaseReady: true,
+    commitAtomicPosSale: async (order) => {
+      writes.push({ kind: "transaction", order });
+      if (stockGate) await stockGate;
+      if (orderSaveError) throw new Error("Sale could not be saved. Retry the saved sale.");
+      writes.push({ kind: "stock", lines: order.items });
+      writes.push({ kind: "orders", orders: [order] });
+      return { order, orders: [order], products: [{ sku: product.sku, stock: 9, status: "Low stock", variants: [], sizeStock: {} }] };
+    },
+    readPendingPosSale: () => null, setPendingSaleId: () => {},
     decrementCatalogStock: async (lines) => { writes.push({ kind: "stock", lines }); if (stockGate) await stockGate; return { error: null }; },
     hasSellableStock: (stock) => stock > 0,
     setProducts: () => {},
     persistCatalog: (rows) => { writes.push({ kind: "catalog", rows }); },
     saveProductVariants: async () => {}, saveProductSizeStock: async () => {},
     fetchStoreOrders: async () => ({ data: [], error: null }),
-    saveStoreOrders: async (orders) => { writes.push({ kind: "orders", orders }); return null; },
+    saveStoreOrders: async (orders) => { writes.push({ kind: "orders", orders }); return orderSaveError; },
     window: {
-      localStorage: { getItem: () => null, setItem: (key, value) => { writes.push({ kind: "local", key, value }); } },
+      localStorage: { getItem: () => null, setItem: (key, value) => {
+        if (fullStorage) throw new DOMException("Storage full", "QuotaExceededError");
+        writes.push({ kind: "local", key, value });
+      } },
       dispatchEvent: () => {}, requestAnimationFrame: (callback) => callback(),
     },
     inputRef: { current: { focus: () => {} } },
@@ -102,6 +115,8 @@ function saleHarness({ cashDialogOpen = true, stockGate } = {}) {
     setLastCashChange: (value) => { state.change = value; },
     onNotify: () => {},
   };
+  if (windowOverride) dependencies.window = windowOverride;
+  dependencies.browserLocalStorage = loadBrowserStorage(dependencies.window).browserLocalStorage;
   const completeSale = new Function(...Object.keys(dependencies), saleCode)(...Object.values(dependencies));
   return { completeSale, writes, state };
 }
@@ -135,7 +150,8 @@ test("confirmed cash saves the itemized bill once even when confirmation is subm
   const first = sale.completeSale("100");
   const duplicate = sale.completeSale("100");
   assert.equal(sale.state.busy, true);
-  assert.equal(sale.writes.filter((write) => write.kind === "stock").length, 1);
+  assert.equal(sale.writes.filter((write) => write.kind === "transaction").length, 1);
+  assert.equal(sale.writes.filter((write) => write.kind === "stock").length, 0);
   releaseStock();
   await Promise.all([first, duplicate]);
   assert.equal(sale.state.error, "");
@@ -146,5 +162,24 @@ test("confirmed cash saves the itemized bill once even when confirmation is subm
   assert.equal(sale.state.lastSale.items[0].quantity, 1);
   assert.equal(sale.state.change, 45);
   assert.equal(sale.state.dialogOpen, false);
+  assert.equal(sale.state.busy, false);
+});
+
+test("cash sale reaches backend saving and clears the cart with full browser storage", async () => {
+  const sale = saleHarness({ fullStorage: true });
+  await sale.completeSale("100");
+  assert.equal(sale.state.error, "");
+  assert.equal(sale.state.lastSale?.paymentStatus, "cod_collected");
+  assert.equal(sale.writes.filter(write => write.kind === "stock").length, 1);
+  assert.equal(sale.writes.filter(write => write.kind === "orders").length, 1);
+  assert.equal(sale.state.busy, false);
+});
+
+test("cash sale never reports success when backend order saving fails", async () => {
+  const sale = saleHarness({ fullStorage: true, orderSaveError: new Error("offline") });
+  await sale.completeSale("100");
+  assert.equal(sale.state.lastSale, null);
+  assert.equal(sale.writes.filter(write => write.kind === "stock").length, 0);
+  assert.match(sale.state.error, /Sale could not be saved/);
   assert.equal(sale.state.busy, false);
 });

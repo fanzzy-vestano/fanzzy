@@ -72,5 +72,5 @@ test("hero slides hydrate from cache and persist refreshed remote settings", () 
   assert.match(pageSource, /const readCachedHeroSlides = \(\): string\[\] =>/);
   assert.match(pageSource, /const cachedSlides = readCachedHeroSlides\(\);/);
   assert.match(pageSource, /if \(cachedSlides\.length\) setHeroSlides\(cachedSlides\);/);
-  assert.match(pageSource, /localStorage\.setItem\("fanzzy-hero-slides", JSON\.stringify\(allowedSlides\)\)/);
+  assert.match(pageSource, /browserLocalStorage\.setItem\("fanzzy-hero-slides", JSON\.stringify\(allowedSlides\)\)/);
 });

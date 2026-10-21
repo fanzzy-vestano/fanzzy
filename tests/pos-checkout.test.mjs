@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import fs from "node:fs";
 import ts from "typescript";
+import { loadBrowserStorage } from "./helpers/browser-storage-fixture.mjs";
 import { savePendingPosOrder, confirmPosOrder } from "../lib/pos-checkout.ts";
 
 const order = {
@@ -64,7 +65,7 @@ test("an already-paid order cannot be overwritten by a pending checkout", async 
 
 // Exercise the actual React event handlers with a fake provider and storage.
 // No live payment, stock mutation or network request is made by this harness.
-function checkoutHarness({ saveError = null } = {}) {
+function checkoutHarness({ saveError = null, fullStorage = false, windowOverride = null } = {}) {
   const source = fs.readFileSync("app/admin/page.tsx", "utf8");
   const start = source.indexOf("  const confirmUpiSale = ");
   const end = source.indexOf("  const updateQuantity = ", start);
@@ -93,8 +94,13 @@ function checkoutHarness({ saveError = null } = {}) {
     setCheckoutBusy: () => {}, setError: (error) => { state.error = error; }, setPosQr: () => {},
     setLastSale: (sale) => { state.lastSale = sale; }, setCart: () => {}, setDiscountValue: () => {},
     setCustomerName: () => {}, setCustomerPhone: () => {}, setLastProduct: () => {}, onNotify: () => {},
-    window: { localStorage: { setItem: () => {} }, dispatchEvent: (event) => { state.events.push(event.type); } },
+    window: { localStorage: {
+      getItem: () => null,
+      setItem: () => { if (fullStorage) throw new DOMException("Storage full", "QuotaExceededError"); },
+    }, dispatchEvent: (event) => { state.events.push(event.type); } },
   };
+  if (windowOverride) dependencies.window = windowOverride;
+  dependencies.browserLocalStorage = loadBrowserStorage(dependencies.window).browserLocalStorage;
   return { state, start: new Function(...Object.keys(dependencies), code)(...Object.values(dependencies)), refs };
 }
 
@@ -119,4 +125,15 @@ test("actual POS handler never opens payment when saving selected products fails
   await harness.start();
   assert.equal(harness.state.opened, 0);
   assert.match(harness.state.error, /Could not save the selected products/);
+});
+
+test("POS UPI startup and verified sale completion tolerate full browser storage", async () => {
+  const harness = checkoutHarness({ fullStorage: true });
+  await harness.start();
+  assert.equal(harness.state.opened, 1);
+  harness.state.options.handler(payment);
+  for (let i = 0; i < 20 && !harness.state.lastSale; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(harness.state.error, "");
+  assert.equal(harness.state.lastSale?.paymentStatus, "paid");
+  assert.equal(harness.refs.current.status, "idle");
 });

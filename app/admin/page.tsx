@@ -1,4 +1,6 @@
 "use client";
+import { browserLocalStorage, prepareBrowserStorage, flushBrowserStorage, batchBrowserStorage } from "../../lib/browser-storage";
+import { commitAtomicPosSale, readPendingPosSale } from "../../lib/pos-sale-client";
 /* eslint-disable react-hooks/set-state-in-effect, react-hooks/refs */
 
 import { Component, memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ErrorInfo } from "react";
@@ -20,7 +22,6 @@ import {
   deleteStoreOrderFromHistory,
   fetchStoreSetting,
   fetchStoreSettings,
-  decrementCatalogStock,
   inferLegacyCategorySections,
   isSupabaseReady,
   removeCatalogCategory,
@@ -327,7 +328,7 @@ const parseSupplierRecords = (value: string | null | undefined): SupplierRecord[
 };
 const persistSuppliers = (suppliers: SupplierRecord[]) => {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(localSuppliersKey, JSON.stringify(suppliers));
+  browserLocalStorage.setItem(localSuppliersKey, JSON.stringify(suppliers));
   window.dispatchEvent(new Event("fanzzy-suppliers-updated"));
 };
 const parsePurchaseEntries = (value: string | null | undefined): PurchaseEntry[] => {
@@ -361,7 +362,7 @@ const parsePurchaseEntries = (value: string | null | undefined): PurchaseEntry[]
 const persistPurchaseEntries = (entries: PurchaseEntry[]) => {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(localPurchaseEntriesKey, JSON.stringify(entries));
+    browserLocalStorage.setItem(localPurchaseEntriesKey, JSON.stringify(entries));
   } catch {
     // Keep shared storage available when the local cache is full.
   }
@@ -384,14 +385,14 @@ const parseProductInitialQuantities = (value: string | null | undefined): Record
 const persistProductInitialQuantities = (quantities: Record<string, ProductInitialQuantity>) => {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(localProductInitialQuantitiesKey, JSON.stringify(quantities));
+    browserLocalStorage.setItem(localProductInitialQuantitiesKey, JSON.stringify(quantities));
   } catch {
     // Keep the shared setting available when the local cache is full.
   }
 };
 const rememberProductInitialQuantity = async (sku: string, createdAt: string, quantity: number) => {
   const remote = await fetchStoreSetting("productInitialQuantitiesV5");
-  const stored = remote.value || (typeof window !== "undefined" ? window.localStorage.getItem(localProductInitialQuantitiesKey) : null);
+  const stored = remote.value || (typeof window !== "undefined" ? browserLocalStorage.getItem(localProductInitialQuantitiesKey) : null);
   const quantities = parseProductInitialQuantities(stored);
   if (quantities[sku]) return;
   const next = { ...quantities, [sku]: { createdAt, quantity: Math.max(0, Math.floor(quantity)) } };
@@ -915,16 +916,20 @@ const persistCatalog = (catalog: AdminProduct[]) => {
       ]),
   );
   try {
-    window.localStorage.setItem(localProductVariantsKey, JSON.stringify(localVariants));
+    browserLocalStorage.setItem(localProductVariantsKey, JSON.stringify(localVariants));
   } catch {
     // The main catalog persistence below still has its own compact fallback.
   }
+  let catalogPersisted = false;
   try {
-    window.localStorage.setItem(
+    catalogPersisted = browserLocalStorage.setItem(
       "fanzzy-products",
       JSON.stringify(storefrontCatalog),
     );
   } catch {
+    // Serialization errors also fall back to the compact catalog below.
+  }
+  if (!catalogPersisted) {
     // A large data URL must never crash the admin page when local storage is full.
     const compactCatalog = storefrontCatalog.map((product) => ({
       ...product,
@@ -936,13 +941,13 @@ const persistCatalog = (catalog: AdminProduct[]) => {
       })),
     }));
     try {
-      window.localStorage.setItem(
+      browserLocalStorage.setItem(
         "fanzzy-products",
         JSON.stringify(compactCatalog),
       );
     } catch {
       try {
-        window.localStorage.removeItem("fanzzy-products");
+        browserLocalStorage.removeItem("fanzzy-products");
       } catch {
         /* storage is unavailable */
       }
@@ -953,7 +958,7 @@ const persistCatalog = (catalog: AdminProduct[]) => {
 const persistProductDamages = (damages: ProductDamageMap) => {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(localProductDamagesKey, JSON.stringify(damages));
+    browserLocalStorage.setItem(localProductDamagesKey, JSON.stringify(damages));
   } catch {
     // Product images can fill localStorage; damage history remains in React/Supabase.
   }
@@ -1219,7 +1224,7 @@ const persistCategories = (
   if (typeof window === "undefined") return;
   const snapshot = JSON.stringify(mergeCatalogCategories(categories));
   try {
-    window.localStorage.setItem("fanzzy-categories", snapshot);
+    browserLocalStorage.setItem("fanzzy-categories", snapshot);
   } catch {
     // A full device cache must not prevent loading the shared category list.
   }
@@ -1600,7 +1605,7 @@ function AdminDashboard() {
         return;
       }
       try {
-        const stored = window.localStorage.getItem("fanzzy-products");
+        const stored = browserLocalStorage.getItem("fanzzy-products");
         const parsed = stored ? JSON.parse(stored) as Array<Partial<AdminProduct> & { price?: number | string; cost?: number | string }> : [];
         if (!Array.isArray(parsed)) return;
         setDashboardProducts(parsed.filter((product) => product.name && product.sku && !isDemoProduct(product)).map((product) => ({
@@ -1641,13 +1646,13 @@ function AdminDashboard() {
       const merged = new Map<string, OrderRecord>();
       remote.data?.forEach((order) => { if (order?.id && !isDemoOrder(order)) merged.set(order.id, order); });
       try {
-        const stored = window.localStorage.getItem("fanzzy-orders");
+        const stored = browserLocalStorage.getItem("fanzzy-orders");
         const parsed = stored ? JSON.parse(stored) as OrderRecord[] : [];
         if (Array.isArray(parsed)) parsed.forEach((order) => {
           if (order?.id && !isDemoOrder(order) && !merged.has(order.id)) merged.set(order.id, order);
         });
       } catch {
-        window.localStorage.removeItem("fanzzy-orders");
+        browserLocalStorage.removeItem("fanzzy-orders");
       }
       setDashboardOrders(filterVisibleOrders(Array.from(merged.values())).filter((order) => order?.date && order?.total && !isDemoOrder(order) && hasConfirmedPayment(order)));
     };
@@ -1692,8 +1697,8 @@ function AdminDashboard() {
     const syncRoles = () => {
       setAdminRoles(defaultAdminRoles);
       setActiveRoleId("vestano");
-      window.localStorage.setItem("fanzzy-admin-roles", JSON.stringify(defaultAdminRoles));
-      window.localStorage.setItem("fanzzy-active-admin-role", "vestano");
+      browserLocalStorage.setItem("fanzzy-admin-roles", JSON.stringify(defaultAdminRoles));
+      browserLocalStorage.setItem("fanzzy-active-admin-role", "vestano");
     };
     syncRoles();
     window.addEventListener("fanzzy-store-settings-updated", syncRoles);
@@ -2260,10 +2265,10 @@ function AnnouncementPanel({
       const remote = await fetchStoreSetting("announcement");
       if (active && !remote.error && remote.value !== null) {
         setText(remote.value);
-        window.localStorage.setItem("fanzzy-announcement", remote.value);
+        browserLocalStorage.setItem("fanzzy-announcement", remote.value);
         return;
       }
-      const stored = window.localStorage.getItem("fanzzy-announcement");
+      const stored = browserLocalStorage.getItem("fanzzy-announcement");
       if (active && stored !== null) setText(stored);
     };
     void loadAnnouncement();
@@ -2275,7 +2280,7 @@ function AnnouncementPanel({
   const saveAnnouncement = async () => {
     const nextText = text.trim();
     const remoteError = await saveStoreSetting("announcement", nextText);
-    window.localStorage.setItem("fanzzy-announcement", nextText);
+    browserLocalStorage.setItem("fanzzy-announcement", nextText);
     window.dispatchEvent(new Event("fanzzy-announcement-updated"));
     onNotify(
       remoteError
@@ -2319,7 +2324,7 @@ function SuppliersWorkspace({ onNotify }: { onNotify: (message: string) => void 
     let active = true;
     const load = async () => {
       const remote = await fetchStoreSetting("suppliers");
-      const stored = remote.value || window.localStorage.getItem(localSuppliersKey);
+      const stored = remote.value || browserLocalStorage.getItem(localSuppliersKey);
       const parsedSuppliers = parseSupplierRecords(stored);
       const ensured = ensurePreferredSupplier(parsedSuppliers);
       const next = ensured.suppliers;
@@ -2332,7 +2337,7 @@ function SuppliersWorkspace({ onNotify }: { onNotify: (message: string) => void 
       }
     };
     const sync = () => {
-      const next = parseSupplierRecords(window.localStorage.getItem(localSuppliersKey));
+      const next = parseSupplierRecords(browserLocalStorage.getItem(localSuppliersKey));
       setSuppliers(next);
       setDefaultSupplierId(next.find((supplier) => supplier.isDefault)?.id || null);
     };
@@ -2436,9 +2441,9 @@ function PurchaseEntryWorkspace({ onNotify }: { onNotify: (message: string) => v
       fetchStoreSetting("productSizeStock"),
       fetchStoreSetting("productVariantType"),
     ]);
-    const storedEntries = entriesRemote.value || (typeof window !== "undefined" ? window.localStorage.getItem(localPurchaseEntriesKey) : null);
+    const storedEntries = entriesRemote.value || (typeof window !== "undefined" ? browserLocalStorage.getItem(localPurchaseEntriesKey) : null);
     const nextEntries = parsePurchaseEntries(storedEntries);
-    const storedSuppliers = suppliersRemote.value || (typeof window !== "undefined" ? window.localStorage.getItem(localSuppliersKey) : null);
+    const storedSuppliers = suppliersRemote.value || (typeof window !== "undefined" ? browserLocalStorage.getItem(localSuppliersKey) : null);
     const nextSuppliers = ensurePreferredSupplier(parseSupplierRecords(storedSuppliers)).suppliers;
     let supplierNames: Record<string, string> = {};
     try {
@@ -2485,7 +2490,7 @@ function PurchaseEntryWorkspace({ onNotify }: { onNotify: (message: string) => v
     };
     const localCatalogProducts: PurchaseSourceProduct[] = typeof window !== "undefined" ? (() => {
       try {
-        const parsed = JSON.parse(window.localStorage.getItem("fanzzy-products") || "[]") as Array<Partial<PurchaseSourceProduct>>;
+        const parsed = JSON.parse(browserLocalStorage.getItem("fanzzy-products") || "[]") as Array<Partial<PurchaseSourceProduct>>;
         return Array.isArray(parsed)
           ? parsed.filter((product): product is PurchaseSourceProduct => typeof product.sku === "string" && Boolean(product.sku) && typeof product.name === "string" && Boolean(product.name))
           : [];
@@ -2496,9 +2501,9 @@ function PurchaseEntryWorkspace({ onNotify }: { onNotify: (message: string) => v
     const sourceProducts: PurchaseSourceProduct[] = !catalogRemote.error && catalogRemote.data !== null
       ? catalogRemote.data.map((product) => ({ ...product }))
       : localCatalogProducts;
-    const storedInitialQuantities = initialQuantitiesRemote.value || (typeof window !== "undefined" ? window.localStorage.getItem(localProductInitialQuantitiesKey) : null);
+    const storedInitialQuantities = initialQuantitiesRemote.value || (typeof window !== "undefined" ? browserLocalStorage.getItem(localProductInitialQuantitiesKey) : null);
     const initialQuantities = parseProductInitialQuantities(storedInitialQuantities);
-    const localOrders = typeof window !== "undefined" ? (() => { try { return JSON.parse(window.localStorage.getItem("fanzzy-orders") || "[]") as OrderRecord[]; } catch { return []; } })() : [];
+    const localOrders = typeof window !== "undefined" ? (() => { try { return JSON.parse(browserLocalStorage.getItem("fanzzy-orders") || "[]") as OrderRecord[]; } catch { return []; } })() : [];
     const storedOrders = Array.from(new Map([...localOrders, ...(ordersRemote.data || [])].map((order) => [order.id, order])).values());
     const soldOrderItems: Array<{ keys: string[]; quantity: number }> = [];
     const orderItemKeys = (item: OrderItem) => Array.from(new Set([item.productId, item.productName, item.name, item.name?.split(" · ")[0]].filter((key): key is string => Boolean(key)).map(reportNameKey)));
@@ -2763,7 +2768,7 @@ function SupplierBillsWorkspace() {
         });
       } else if (typeof window !== "undefined") {
         try {
-          const parsed = JSON.parse(window.localStorage.getItem("fanzzy-products") || "[]") as Array<Partial<AdminProduct> & { id?: string; cost?: string | number }>;
+          const parsed = JSON.parse(browserLocalStorage.getItem("fanzzy-products") || "[]") as Array<Partial<AdminProduct> & { id?: string; cost?: string | number }>;
           products = parsed.filter((product) => product.sku || product.id).map((product, index) => ({
             name: String(product.name || "Unnamed product"),
             sku: product.sku || product.id || `local-${index}`,
@@ -2785,7 +2790,7 @@ function SupplierBillsWorkspace() {
         ...product,
         supplierName: (product.supplierName || supplierNames[product.sku] || "").trim(),
       }));
-      const storedSuppliers = suppliersRemote.value || (typeof window !== "undefined" ? window.localStorage.getItem(localSuppliersKey) : null);
+      const storedSuppliers = suppliersRemote.value || (typeof window !== "undefined" ? browserLocalStorage.getItem(localSuppliersKey) : null);
       const suppliers = ensurePreferredSupplier(parseSupplierRecords(storedSuppliers)).suppliers;
       const summaryMap = new Map<string, SupplierBillSummary>();
       suppliers.forEach((supplier) => summaryMap.set(supplier.name.toLowerCase(), { name: supplier.name, entries: 0, units: 0, total: 0, products: [] }));
@@ -3466,13 +3471,13 @@ function ReportsWorkspace({
         if (order?.id && !isDemoOrder(order)) merged.set(order.id, order);
       });
       try {
-        const stored = window.localStorage.getItem("fanzzy-orders");
+        const stored = browserLocalStorage.getItem("fanzzy-orders");
         const parsed = stored ? JSON.parse(stored) as OrderRecord[] : [];
         if (Array.isArray(parsed)) parsed.forEach((order) => {
           if (order?.id && !isDemoOrder(order) && !merged.has(order.id)) merged.set(order.id, order);
         });
       } catch {
-        window.localStorage.removeItem("fanzzy-orders");
+        browserLocalStorage.removeItem("fanzzy-orders");
       }
       if (active) setOrders(filterVisibleOrders(Array.from(merged.values())).filter((order) => order?.date && order?.total && hasConfirmedPayment(order)));
     };
@@ -3597,7 +3602,7 @@ function ReportsWorkspace({
   useEffect(() => {
     let active = true;
     const readLocalDamages = () => {
-      const stored = window.localStorage.getItem(localProductDamagesKey);
+      const stored = browserLocalStorage.getItem(localProductDamagesKey);
       if (!stored) return;
       try {
         const parsed = JSON.parse(stored) as ProductDamageMap;
@@ -3608,7 +3613,7 @@ function ReportsWorkspace({
     };
     const loadDamages = async () => {
       const remote = await fetchStoreSetting("productDamages");
-      const stored = remote.value || window.localStorage.getItem(localProductDamagesKey);
+      const stored = remote.value || browserLocalStorage.getItem(localProductDamagesKey);
       if (!stored) return;
       try {
         const parsed = JSON.parse(stored) as ProductDamageMap;
@@ -4040,7 +4045,7 @@ function DamagedProductsWorkspace({ onNotify }: { onNotify: (message: string) =>
         }));
         return;
       }
-      const stored = window.localStorage.getItem("fanzzy-products");
+      const stored = browserLocalStorage.getItem("fanzzy-products");
       if (!stored) return;
       try {
         const parsed = JSON.parse(stored) as Array<Partial<AdminProduct> & { id?: string; price?: string | number; cost?: string | number }>;
@@ -4074,7 +4079,7 @@ function DamagedProductsWorkspace({ onNotify }: { onNotify: (message: string) =>
   useEffect(() => {
     let active = true;
     const readLocalDamages = () => {
-      const stored = window.localStorage.getItem(localProductDamagesKey);
+      const stored = browserLocalStorage.getItem(localProductDamagesKey);
       if (!stored) return;
       try {
         const parsed = JSON.parse(stored) as ProductDamageMap;
@@ -4085,7 +4090,7 @@ function DamagedProductsWorkspace({ onNotify }: { onNotify: (message: string) =>
     };
     const loadDamages = async () => {
       const remote = await fetchStoreSetting("productDamages");
-      const stored = remote.value || window.localStorage.getItem(localProductDamagesKey);
+      const stored = remote.value || browserLocalStorage.getItem(localProductDamagesKey);
       if (!stored) return;
       try {
         const parsed = JSON.parse(stored) as ProductDamageMap;
@@ -4276,61 +4281,85 @@ function SettingsWorkspace({
   const [payments, setPayments] = useState<PaymentSettings>(defaultPaymentSettings);
   const [billDesign, setBillDesign] = useState<BillDesignSettings>(defaultBillDesignSettings);
   const [roles, setRoles] = useState<AdminRole[]>(defaultAdminRoles);
+  const [settingsReady, setSettingsReady] = useState(false);
 
   useEffect(() => {
-    const read = <T,>(key: string, fallback: T): T => {
-      const stored = window.localStorage.getItem(key);
-      if (!stored) return fallback;
-      try {
-        return JSON.parse(stored) as T;
-      } catch {
-        return fallback;
-      }
+    let active = true;
+    const loadSettings = async () => {
+      await prepareBrowserStorage();
+      if (!active) return;
+      const read = <T,>(key: string, fallback: T): T => {
+        const stored = browserLocalStorage.getItem(key);
+        if (!stored) return fallback;
+        try {
+          return JSON.parse(stored) as T;
+        } catch {
+          return fallback;
+        }
+      };
+      setProfile(read("fanzzy-store-profile", profile));
+      setShipping(read("fanzzy-shipping-rules", shipping));
+      setPayments(parsePaymentSettings(read("fanzzy-payment-methods", defaultPaymentSettings)));
+      setBillDesign(read("fanzzy-bill-design", defaultBillDesignSettings));
+      void fetchStoreSetting("billDesign").then((remote) => {
+        if (!remote.error && remote.value) {
+          try {
+            const normalizedDesign = { ...defaultBillDesignSettings, ...(JSON.parse(remote.value) as Partial<BillDesignSettings>) };
+            setBillDesign(normalizedDesign);
+            browserLocalStorage.setItem("fanzzy-bill-design", JSON.stringify(normalizedDesign));
+          } catch {
+            // Keep the local/default design when a remote value is malformed.
+          }
+        }
+      });
+      void fetchStoreSetting("paymentMethods").then((remote) => {
+        if (!remote.error && remote.value) {
+          try {
+            const normalizedPayments = parsePaymentSettings(JSON.parse(remote.value) as unknown);
+            setPayments(normalizedPayments);
+            browserLocalStorage.setItem("fanzzy-payment-methods", JSON.stringify(normalizedPayments));
+          } catch {
+            // Keep the local/default payment settings when the remote value is malformed.
+          }
+        }
+      });
+      setRoles(defaultAdminRoles);
+      browserLocalStorage.setItem("fanzzy-admin-roles", JSON.stringify(defaultAdminRoles));
+      setSettingsReady(true);
     };
-    setProfile(read("fanzzy-store-profile", profile));
-    setShipping(read("fanzzy-shipping-rules", shipping));
-    setPayments(parsePaymentSettings(read("fanzzy-payment-methods", defaultPaymentSettings)));
-    setBillDesign(read("fanzzy-bill-design", defaultBillDesignSettings));
-    void fetchStoreSetting("billDesign").then((remote) => {
-      if (!remote.error && remote.value) {
-        try {
-          const normalizedDesign = { ...defaultBillDesignSettings, ...(JSON.parse(remote.value) as Partial<BillDesignSettings>) };
-          setBillDesign(normalizedDesign);
-          window.localStorage.setItem("fanzzy-bill-design", JSON.stringify(normalizedDesign));
-        } catch {
-          // Keep the local/default design when a remote value is malformed.
-        }
-      }
-    });
-    void fetchStoreSetting("paymentMethods").then((remote) => {
-      if (!remote.error && remote.value) {
-        try {
-          const normalizedPayments = parsePaymentSettings(JSON.parse(remote.value) as unknown);
-          setPayments(normalizedPayments);
-          window.localStorage.setItem("fanzzy-payment-methods", JSON.stringify(normalizedPayments));
-        } catch {
-          // Keep the local/default payment settings when the remote value is malformed.
-        }
-      }
-    });
-    setRoles(defaultAdminRoles);
-    window.localStorage.setItem("fanzzy-admin-roles", JSON.stringify(defaultAdminRoles));
+    void loadSettings();
+    return () => { active = false; };
     // These values are only read on mount; the defaults above provide the first render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const saveSettings = () => {
-    window.localStorage.setItem("fanzzy-store-profile", JSON.stringify(profile));
-    window.localStorage.setItem("fanzzy-shipping-rules", JSON.stringify(shipping));
-    window.localStorage.setItem("fanzzy-payment-methods", JSON.stringify(payments));
-    void saveStoreSetting("paymentMethods", JSON.stringify(payments));
+  const saveSettings = async () => {
+    await prepareBrowserStorage();
+    batchBrowserStorage(() => {
+      browserLocalStorage.setItem("fanzzy-store-profile", JSON.stringify(profile));
+      browserLocalStorage.setItem("fanzzy-shipping-rules", JSON.stringify(shipping));
+    });
+    browserLocalStorage.setItem("fanzzy-payment-methods", JSON.stringify(payments));
     window.dispatchEvent(new Event("fanzzy-payment-methods-updated"));
-    window.localStorage.setItem("fanzzy-bill-design", JSON.stringify(billDesign));
-    void saveStoreSetting("billDesign", JSON.stringify(billDesign));
-    window.localStorage.setItem("fanzzy-admin-roles", JSON.stringify(roles));
+    browserLocalStorage.setItem("fanzzy-bill-design", JSON.stringify(billDesign));
+    browserLocalStorage.setItem("fanzzy-admin-roles", JSON.stringify(roles));
+    let persistent = false;
+    try {
+      const [paymentError, billError, durable] = await Promise.all([
+        saveStoreSetting("paymentMethods", JSON.stringify(payments)),
+        saveStoreSetting("billDesign", JSON.stringify(billDesign)),
+        flushBrowserStorage(),
+      ]);
+      persistent = durable;
+      if (paymentError || billError) { onNotify("Some server settings could not be saved. Check your connection and retry."); return; }
+    } catch { onNotify("Settings could not be confirmed. Check your connection and retry."); return; }
     window.dispatchEvent(new Event("fanzzy-store-settings-updated"));
-    onNotify("Store settings saved");
+    onNotify(persistent
+      ? "Store settings saved"
+      : "Server settings saved. Device-only settings apply for this visit.");
   };
+
+  if (!settingsReady) return <section className="panel module-workspace settings-workspace" aria-busy="true">Loading store settings…</section>;
 
   const statusFor = (section: SettingsSection) => {
     if (section === "Store profile") return profile.storeName ? "Configured" : "Needs details";
@@ -4464,14 +4493,14 @@ function CollectionsWorkspace({
     const loadCollections = async () => {
       const remote = await fetchStoreSetting("collections");
       const stored =
-        remote.value || window.localStorage.getItem("fanzzy-collections");
+        remote.value || browserLocalStorage.getItem("fanzzy-collections");
       if (!stored) return;
       try {
         const parsed = JSON.parse(stored) as CollectionRecord[];
         if (active && Array.isArray(parsed) && parsed.length)
           setRecords(parsed);
       } catch {
-        window.localStorage.removeItem("fanzzy-collections");
+        browserLocalStorage.removeItem("fanzzy-collections");
       }
     };
     void loadCollections();
@@ -4482,7 +4511,7 @@ function CollectionsWorkspace({
 
   const persist = async (next: CollectionRecord[], message: string) => {
     setRecords(next);
-    window.localStorage.setItem("fanzzy-collections", JSON.stringify(next));
+    browserLocalStorage.setItem("fanzzy-collections", JSON.stringify(next));
     window.dispatchEvent(new Event("fanzzy-collections-updated"));
     const remoteError = await saveStoreSetting(
       "collections",
@@ -4979,7 +5008,7 @@ function CustomersWorkspace({
         fetchStoreSetting("customers"),
         fetchStoreOrders<OrderRecord>(),
       ]);
-      const stored = remote.value || window.localStorage.getItem("fanzzy-customers");
+      const stored = remote.value || browserLocalStorage.getItem("fanzzy-customers");
       let savedCustomers: CustomerRecord[] = [];
       if (stored) {
         try {
@@ -4990,12 +5019,12 @@ function CustomersWorkspace({
               .filter((customer): customer is CustomerRecord => Boolean(customer));
           }
         } catch {
-          window.localStorage.removeItem("fanzzy-customers");
+          browserLocalStorage.removeItem("fanzzy-customers");
         }
       }
       const localOrders: OrderRecord[] = (() => {
         try {
-          const parsed = JSON.parse(window.localStorage.getItem("fanzzy-orders") || "[]") as OrderRecord[];
+          const parsed = JSON.parse(browserLocalStorage.getItem("fanzzy-orders") || "[]") as OrderRecord[];
           return Array.isArray(parsed) ? parsed : [];
         } catch {
           return [];
@@ -5033,7 +5062,7 @@ function CustomersWorkspace({
 
   const persist = async (next: CustomerRecord[], message: string) => {
     setCustomers(next);
-    window.localStorage.setItem("fanzzy-customers", JSON.stringify(next));
+    browserLocalStorage.setItem("fanzzy-customers", JSON.stringify(next));
     window.dispatchEvent(new Event("fanzzy-customers-updated"));
     const remoteError = await saveStoreSetting(
       "customers",
@@ -5391,7 +5420,7 @@ function AgentsWorkspace({
       fetchStoreSetting("agents"),
       fetchStoreOrders<OrderRecord>(),
     ]);
-    const storedAgents = agentsRemote.value || window.localStorage.getItem("fanzzy-agents");
+    const storedAgents = agentsRemote.value || browserLocalStorage.getItem("fanzzy-agents");
     const nextAgents = parseAgents(storedAgents);
     setAgents(nextAgents);
     if (storedAgents && !agentsRemote.value && nextAgents.length) await saveStoreSetting("agents", JSON.stringify(nextAgents));
@@ -5399,7 +5428,7 @@ function AgentsWorkspace({
     const orderMap = new Map<string, OrderRecord>();
     ordersRemote.data?.forEach((order) => { if (order?.id) orderMap.set(order.id, order); });
     try {
-      const storedOrders = JSON.parse(window.localStorage.getItem("fanzzy-orders") || "[]") as OrderRecord[];
+      const storedOrders = JSON.parse(browserLocalStorage.getItem("fanzzy-orders") || "[]") as OrderRecord[];
       if (Array.isArray(storedOrders)) storedOrders.forEach((order) => { if (order?.id && !orderMap.has(order.id)) orderMap.set(order.id, order); });
     } catch {
       // Ignore malformed local order cache.
@@ -5421,7 +5450,7 @@ function AgentsWorkspace({
 
   const persist = async (next: CatalogAgent[], message: string) => {
     setAgents(next);
-    window.localStorage.setItem("fanzzy-agents", JSON.stringify(next));
+    browserLocalStorage.setItem("fanzzy-agents", JSON.stringify(next));
     const remoteError = await saveStoreSetting("agents", JSON.stringify(next));
     window.dispatchEvent(new Event("fanzzy-agents-updated"));
     onNotify(remoteError ? `${message} locally; Supabase needs setup` : message);
@@ -5453,7 +5482,7 @@ function AgentsWorkspace({
 
     const marketingRemote = await fetchStoreSetting("marketingRecords");
     const marketingRecords = (() => {
-      try { return JSON.parse(marketingRemote.value || window.localStorage.getItem("fanzzy-marketing-records") || "[]") as MarketingRecord[]; } catch { return []; }
+      try { return JSON.parse(marketingRemote.value || browserLocalStorage.getItem("fanzzy-marketing-records") || "[]") as MarketingRecord[]; } catch { return []; }
     })();
     if (marketingRecords.some((record) => record.kind === "Coupon" && normalizeCode(record.code || "") === couponCode)) return onNotify("That coupon code is already used by Marketing");
 
@@ -5558,7 +5587,7 @@ function MarketingWorkspace({
     const loadRecords = async () => {
       const remote = await fetchStoreSetting("marketingRecords");
       const stored =
-        remote.value || window.localStorage.getItem("fanzzy-marketing-records");
+        remote.value || browserLocalStorage.getItem("fanzzy-marketing-records");
       if (!stored) return;
       try {
         const parsed = JSON.parse(stored) as MarketingRecord[];
@@ -5593,7 +5622,7 @@ function MarketingWorkspace({
             }))
         : [];
       const localOptions: MarketingProductOption[] = [];
-      const stored = window.localStorage.getItem("fanzzy-products");
+      const stored = browserLocalStorage.getItem("fanzzy-products");
       if (stored) {
         try {
           const parsed = JSON.parse(stored) as Array<{ id?: string; sku?: string; name?: string; category?: string }>;
@@ -5620,7 +5649,7 @@ function MarketingWorkspace({
 
   const persist = async (next: MarketingRecord[], message: string) => {
     setRecords(next);
-    window.localStorage.setItem(
+    browserLocalStorage.setItem(
       "fanzzy-marketing-records",
       JSON.stringify(next),
     );
@@ -6080,7 +6109,7 @@ function PromotionOffersWorkspace({ onNotify }: { onNotify: (message: string) =>
     let alive = true;
     const load = async () => {
       const saved = await fetchStoreSetting("promotionalOffers");
-      const raw = saved.value || window.localStorage.getItem(promotionStorageKey);
+      const raw = saved.value || browserLocalStorage.getItem(promotionStorageKey);
       if (raw) {
         try {
           const parsed = JSON.parse(raw) as unknown[];
@@ -6094,7 +6123,7 @@ function PromotionOffersWorkspace({ onNotify }: { onNotify: (message: string) =>
       }
       const [remoteCatalog, localCatalog, barcodeRemote] = await Promise.all([
         fetchCatalogProducts(),
-        Promise.resolve(window.localStorage.getItem("fanzzy-products")),
+        Promise.resolve(browserLocalStorage.getItem("fanzzy-products")),
         fetchStoreSetting("productBarcodes"),
       ]);
       const barcodeMap = (() => {
@@ -6134,7 +6163,7 @@ function PromotionOffersWorkspace({ onNotify }: { onNotify: (message: string) =>
 
   const persist = async (next: PromotionOffer[], message: string) => {
     setOffers(next);
-    window.localStorage.setItem(promotionStorageKey, JSON.stringify(next));
+    browserLocalStorage.setItem(promotionStorageKey, JSON.stringify(next));
     const remoteError = await saveStoreSetting("promotionalOffers", JSON.stringify(next));
     window.dispatchEvent(new Event("fanzzy-promotions-updated"));
     onNotify(remoteError ? `${message} · saved locally` : message);
@@ -6292,12 +6321,12 @@ function WalkInReturnsWorkspace({ onNotify }: { onNotify: (message: string) => v
 
   const loadLocalReturnSummary = (lookupOrderId: string): ReturnOrderSummary | null => {
     try {
-      const rawOrders = JSON.parse(window.localStorage.getItem("fanzzy-orders") || "[]") as unknown[];
+      const rawOrders = JSON.parse(browserLocalStorage.getItem("fanzzy-orders") || "[]") as unknown[];
       const localOrder = Array.isArray(rawOrders)
         ? rawOrders.map(normalizeOrderRecordForDisplay).find((order): order is OrderRecord => Boolean(order && order.id.toLowerCase() === lookupOrderId.toLowerCase()))
         : null;
       if (!localOrder) return null;
-      const rawReturns = JSON.parse(window.localStorage.getItem("fanzzy-walk-in-returns") || "[]") as WalkInReturnRecord[];
+      const rawReturns = JSON.parse(browserLocalStorage.getItem("fanzzy-walk-in-returns") || "[]") as WalkInReturnRecord[];
       const localReturns = Array.isArray(rawReturns) ? rawReturns : [];
       return summarizeReturnableOrder(localOrder, localReturns);
     } catch {
@@ -6511,7 +6540,7 @@ function RefundRequestsWorkspace({ onNotify }: { onNotify: (message: string) => 
     let active = true;
     const loadRequests = async () => {
       const remote = await fetchStoreSetting("refundRequests");
-      const stored = remote.value || window.localStorage.getItem("fanzzy-refund-requests");
+      const stored = remote.value || browserLocalStorage.getItem("fanzzy-refund-requests");
       if (!active) return;
       setRequests(parseRefundRequests(stored));
       setLoading(false);
@@ -6536,13 +6565,13 @@ function RefundRequestsWorkspace({ onNotify }: { onNotify: (message: string) => 
     setBusyId(request.id);
     try {
       const remote = await fetchStoreSetting("refundRequests");
-      const current = parseRefundRequests(remote.value || window.localStorage.getItem("fanzzy-refund-requests"));
+      const current = parseRefundRequests(remote.value || browserLocalStorage.getItem("fanzzy-refund-requests"));
       const next = current.map((item) => item.id === request.id
         ? { ...item, status, updatedAt: new Date().toISOString() }
         : item);
       const error = await saveStoreSetting("refundRequests", JSON.stringify(next));
       if (error) throw new Error("Refund request could not be updated.");
-      window.localStorage.setItem("fanzzy-refund-requests", JSON.stringify(next));
+      browserLocalStorage.setItem("fanzzy-refund-requests", JSON.stringify(next));
       setRequests(next);
       window.dispatchEvent(new Event("fanzzy-refund-requests-updated"));
       onNotify(`${request.id} marked ${status.toLowerCase()}`);
@@ -6702,14 +6731,14 @@ function OrdersWorkspace({
       }
       const localOrders: OrderRecord[] = [];
       try {
-        const stored = window.localStorage.getItem("fanzzy-orders");
+        const stored = browserLocalStorage.getItem("fanzzy-orders");
         const parsed = stored ? JSON.parse(stored) as OrderRecord[] : [];
         if (Array.isArray(parsed)) parsed.forEach((order) => {
           const normalized = normalizeOrderRecordForDisplay(order);
           if (normalized && !isDemoOrder(normalized) && hasConfirmedPayment(normalized)) localOrders.push(normalized);
         });
       } catch {
-        window.localStorage.removeItem("fanzzy-orders");
+        browserLocalStorage.removeItem("fanzzy-orders");
       }
       // Show locally cached orders only while the first live request is loading.
       // Do not replace an already rendered list on every polling cycle.
@@ -6803,7 +6832,7 @@ function OrdersWorkspace({
   const persistOrders = async (next: OrderRecord[]) => {
     const visible = filterVisibleOrders(next);
     setOrders(visible);
-    window.localStorage.setItem("fanzzy-orders", JSON.stringify(visible));
+    browserLocalStorage.setItem("fanzzy-orders", JSON.stringify(visible));
     // Retain pending payments while an admin updates an order.
     const remote = await fetchStoreOrders<OrderRecord>();
     const allOrders = new Map<string, OrderRecord>();
@@ -7431,7 +7460,7 @@ function HubWorkspace({
     const loadHubs = async () => {
       const remote = await fetchStoreSetting("pickupHubs");
       const remoteHubs = remote.value ? parseAdminPickupHubs(remote.value) : [];
-      const localHubs = parseAdminPickupHubs(window.localStorage.getItem("fanzzy-pickup-hubs"));
+      const localHubs = parseAdminPickupHubs(browserLocalStorage.getItem("fanzzy-pickup-hubs"));
       const storedHubs = remoteHubs.length ? remoteHubs : localHubs;
       if (active && storedHubs.length) setHubs(storedHubs);
     };
@@ -7443,7 +7472,7 @@ function HubWorkspace({
 
   const persistHubs = async (next: PickupHub[]) => {
     const remoteError = await saveStoreSetting("pickupHubs", JSON.stringify(next));
-    window.localStorage.setItem("fanzzy-pickup-hubs", JSON.stringify(next));
+    browserLocalStorage.setItem("fanzzy-pickup-hubs", JSON.stringify(next));
     window.dispatchEvent(new Event("fanzzy-pickup-hubs-updated"));
     onNotify(remoteError ? "Hubs saved locally; Supabase needs its tables" : "Pickup hubs updated on storefront");
   };
@@ -7535,7 +7564,7 @@ function DeliveryChargeWorkspace({
     const loadDeliveryCharge = async () => {
       const remote = await fetchStoreSetting("deliveryCharge");
       const stored =
-        remote.value || window.localStorage.getItem("fanzzy-delivery-charge");
+        remote.value || browserLocalStorage.getItem("fanzzy-delivery-charge");
       if (!stored) return;
       try {
         const parsed = JSON.parse(stored) as {
@@ -7557,7 +7586,7 @@ function DeliveryChargeWorkspace({
           setFreeAbove(String(Number.isFinite(parsed.freeAbove) ? parsed.freeAbove : 999));
         }
       } catch {
-        window.localStorage.removeItem("fanzzy-delivery-charge");
+        browserLocalStorage.removeItem("fanzzy-delivery-charge");
       }
     };
     void loadDeliveryCharge();
@@ -7571,7 +7600,7 @@ function DeliveryChargeWorkspace({
     const nextFreeAbove = Math.max(0, Number(freeAbove) || 0);
     const value = JSON.stringify({ enabled, amount: nextAmount, freeAboveEnabled, freeAbove: nextFreeAbove });
     const remoteError = await saveStoreSetting("deliveryCharge", value);
-    window.localStorage.setItem("fanzzy-delivery-charge", value);
+    browserLocalStorage.setItem("fanzzy-delivery-charge", value);
     window.dispatchEvent(new Event("fanzzy-delivery-charge-updated"));
     onNotify(
       remoteError
@@ -7682,7 +7711,7 @@ function HomepageWorkspace({
       const remoteDuration = await fetchStoreSetting("heroSlideDuration");
       const storedDuration =
         remoteDuration.value ||
-        window.localStorage.getItem("fanzzy-hero-slide-duration");
+        browserLocalStorage.getItem("fanzzy-hero-slide-duration");
       if (active && storedDuration) {
         const parsedDuration = Number(storedDuration);
         if (Number.isFinite(parsedDuration))
@@ -7690,7 +7719,7 @@ function HomepageWorkspace({
       }
       const remoteSlides = await fetchStoreSetting("heroSlides");
       const storedSlides =
-        remoteSlides.value || window.localStorage.getItem("fanzzy-hero-slides");
+        remoteSlides.value || browserLocalStorage.getItem("fanzzy-hero-slides");
       if (storedSlides) {
         try {
           const parsed = JSON.parse(storedSlides);
@@ -7706,12 +7735,12 @@ function HomepageWorkspace({
             return;
           }
         } catch {
-          window.localStorage.removeItem("fanzzy-hero-slides");
+          browserLocalStorage.removeItem("fanzzy-hero-slides");
         }
       }
       const legacy = await fetchStoreSetting("heroImage");
       const storedLegacy =
-        legacy.value || window.localStorage.getItem("fanzzy-hero-image");
+        legacy.value || browserLocalStorage.getItem("fanzzy-hero-image");
       if (active && storedLegacy) {
         const next = [storedLegacy, ...defaultHeroSlides.slice(1)];
         setHeroImages(next);
@@ -7797,12 +7826,12 @@ function HomepageWorkspace({
       "heroSlideDuration",
       String(nextDuration),
     );
-    window.localStorage.setItem(
+    browserLocalStorage.setItem(
       "fanzzy-hero-slides",
       JSON.stringify(nextImages),
     );
-    window.localStorage.setItem("fanzzy-hero-image", activeImages[0]);
-    window.localStorage.setItem(
+    browserLocalStorage.setItem("fanzzy-hero-image", activeImages[0]);
+    browserLocalStorage.setItem(
       "fanzzy-hero-slide-duration",
       String(nextDuration),
     );
@@ -8026,12 +8055,12 @@ const updateLocalProductCategories = (
   previousSection: CategorySection,
   nextSection: CategorySection,
 ) => {
-  const stored = window.localStorage.getItem("fanzzy-products");
+  const stored = browserLocalStorage.getItem("fanzzy-products");
   if (!stored) return;
   try {
     const parsed = JSON.parse(stored) as Array<{ category?: unknown }>;
     if (!Array.isArray(parsed)) return;
-    window.localStorage.setItem("fanzzy-products", JSON.stringify(parsed.map((product) => ({
+    browserLocalStorage.setItem("fanzzy-products", JSON.stringify(parsed.map((product) => ({
       ...product,
       category: typeof product.category === "string"
         ? renamedProductCategory(product.category, previousName, nextName, previousSection, nextSection)
@@ -8070,7 +8099,7 @@ function CategoryWorkspace({
       ]);
       let cachedProducts: Array<{ category: string; vendorId?: string }> | null = null;
       try {
-        const storedProducts = window.localStorage.getItem("fanzzy-products");
+        const storedProducts = browserLocalStorage.getItem("fanzzy-products");
         if (storedProducts) {
           const parsed = JSON.parse(storedProducts);
           if (Array.isArray(parsed)) cachedProducts = parsed.filter((product) => product && typeof product.category === "string");
@@ -8098,7 +8127,7 @@ function CategoryWorkspace({
       if (active) setCategoryProducts(hasProductSnapshot ? fanzzyProducts : null);
       let localCategories: AdminCategory[] = [];
       let sharedCategories: AdminCategory[] = [];
-      const stored = window.localStorage.getItem("fanzzy-categories");
+      const stored = browserLocalStorage.getItem("fanzzy-categories");
       if (stored) {
         try {
           const parsed = JSON.parse(stored) as Array<Partial<AdminCategory>>;
@@ -8114,7 +8143,7 @@ function CategoryWorkspace({
               .filter((category) => !isVendorOnlyCategory(category));
           }
         } catch {
-          window.localStorage.removeItem("fanzzy-categories");
+          browserLocalStorage.removeItem("fanzzy-categories");
         }
       }
       if (shared.value) {
@@ -8649,6 +8678,12 @@ function PosWorkspace({
   const [cashDialogOpen, setCashDialogOpen] = useState(false);
   const [lastCashChange, setLastCashChange] = useState<number | null>(null);
   const [lastSale, setLastSale] = useState<OrderRecord | null>(null);
+  const [pendingSaleId, setPendingSaleId] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    void prepareBrowserStorage().then(() => { if (active) setPendingSaleId(readPendingPosSale<OrderRecord>()?.id || null); });
+    return () => { active = false; };
+  }, []);
   const [posQr, setPosQr] = useState<PosQrState>({ status: "idle" });
   const [posQrRefresh, setPosQrRefresh] = useState(0);
   const posQrRef = useRef<PosQrState>({ status: "idle" });
@@ -8691,7 +8726,7 @@ function PosWorkspace({
       const sizeStockMap = readSettingMap<Record<string, Record<string, number>>>(productSettings.productSizeStock.value, {});
       let localCatalog: PosCatalogSource[] = [];
       try {
-        const stored = JSON.parse(window.localStorage.getItem("fanzzy-products") || "[]");
+        const stored = JSON.parse(browserLocalStorage.getItem("fanzzy-products") || "[]");
         if (Array.isArray(stored)) localCatalog = stored as PosCatalogSource[];
       } catch {
         localCatalog = [];
@@ -8944,7 +8979,7 @@ function PosWorkspace({
         if (!response.ok) throw new Error(result.error || "Order confirmation failed. Do not pay again.");
         return result;
       }, () => fetchStoreOrders<OrderRecord>({ includeDeleted: true }));
-      window.localStorage.setItem("fanzzy-orders", JSON.stringify(filterVisibleOrders(confirmed.orders)));
+      browserLocalStorage.setItem("fanzzy-orders", JSON.stringify(filterVisibleOrders(confirmed.orders)));
       window.dispatchEvent(new Event("fanzzy-orders-updated"));
       window.dispatchEvent(new Event("fanzzy-products-updated"));
       setLastSale(confirmed.order);
@@ -8991,7 +9026,7 @@ function PosWorkspace({
         })),
       };
       const pendingOrders = await savePendingPosOrder(pendingOrder, () => fetchStoreOrders<OrderRecord>({ includeDeleted: true }), saveStoreOrders);
-      window.localStorage.setItem("fanzzy-orders", JSON.stringify(filterVisibleOrders(pendingOrders)));
+      browserLocalStorage.setItem("fanzzy-orders", JSON.stringify(filterVisibleOrders(pendingOrders)));
       const Razorpay = await loadAdminRazorpayCheckout();
       const checkout = new Razorpay({
         key: current.keyId, amount: current.amount || Math.round(total * 100), currency: "INR", name: "Fanzzy", description: `Fanzzy POS sale ${posOrderIdRef.current}`, order_id: current.orderId,
@@ -9077,41 +9112,10 @@ function PosWorkspace({
     setCheckoutBusy(true);
     setError("");
     try {
-      const baseCartLines = cartLines.filter(({ selection }) => !selection.variantName && !selection.size);
-      if (isSupabaseReady && baseCartLines.length) {
-        const stockResult = await decrementCatalogStock(baseCartLines.map(({ selection, quantity }) => ({ sku: selection.sku, quantity })));
-        if (stockResult.error) throw stockResult.error;
-      }
-      const nextProducts = products.map((product) => {
-        const productLines = cartLines.filter(({ selection }) => selection.sku === product.sku);
-        if (!productLines.length) return product;
-        const variants = (product.variants || []).map((variant, index) => {
-          const variantName = variant.name || `Option ${index + 1}`;
-          const sold = productLines
-            .filter(({ selection }) => selection.variantName === variantName || (selection.size && selection.size === (variant.size || variant.name)))
-            .reduce((sum, line) => sum + line.quantity, 0);
-          return sold && Number.isFinite(Number(variant.stock))
-            ? { ...variant, stock: Math.max(0, Math.floor(Number(variant.stock) - sold)) }
-            : variant;
-        });
-        const sizeStock = { ...(product.sizeStock || {}) };
-        productLines.forEach(({ selection, quantity }) => {
-          if (selection.size) sizeStock[selection.size] = Math.max(0, Math.floor(Number(sizeStock[selection.size] ?? selection.stock) - quantity));
-        });
-        const sold = productLines.reduce((sum, line) => sum + line.quantity, 0);
-        const stock = Math.max(0, product.stock - sold);
-        const variantType = product.variantType || (product.sizes?.length ? "size" : "normal");
-        const hasStock = hasSellableStock(stock, variantType, product.sizes || [], sizeStock, variants);
-        return { ...product, stock, variants, sizeStock, status: hasStock ? stock < 10 ? "Low stock" as const : "Published" as const : "Draft" as const };
-      });
-      setProducts(nextProducts);
-      persistCatalog(nextProducts);
-      await Promise.all([saveProductVariants(nextProducts), saveProductSizeStock(nextProducts)]);
-
       const now = new Date();
       const token = paymentMethod === "UPI" && posOrderIdRef.current
         ? posOrderIdRef.current.replace(/^#FZ-POS-/i, "")
-        : globalThis.crypto?.randomUUID?.().replace(/-/g, "").slice(-6).toUpperCase() || String(Date.now()).slice(-6);
+        : globalThis.crypto?.randomUUID?.().replace(/-/g, "").toUpperCase() || String(Date.now()).slice(-6);
       const order: OrderRecord = {
         id: paymentMethod === "UPI" && posOrderIdRef.current ? posOrderIdRef.current : `#FZ-POS-${token}`,
         invoiceNumber: `POS-${token}`,
@@ -9145,21 +9149,16 @@ function PosWorkspace({
           size: selection.size,
         })),
       };
-      let localOrders: OrderRecord[] = [];
-      try {
-        const parsed = JSON.parse(window.localStorage.getItem("fanzzy-orders") || "[]") as OrderRecord[];
-        if (Array.isArray(parsed)) localOrders = parsed;
-      } catch {
-        localOrders = [];
-      }
-      const remoteOrders = await fetchStoreOrders<OrderRecord>();
-      const mergedOrders = new Map<string, OrderRecord>();
-      remoteOrders.data?.forEach((candidate) => { if (candidate?.id) mergedOrders.set(candidate.id, candidate); });
-      localOrders.forEach((candidate) => { if (candidate?.id && !mergedOrders.has(candidate.id)) mergedOrders.set(candidate.id, candidate); });
-      mergedOrders.set(order.id, order);
-      const nextOrders = filterVisibleOrders([order, ...Array.from(mergedOrders.values()).filter((candidate) => candidate.id !== order.id)]);
-      window.localStorage.setItem("fanzzy-orders", JSON.stringify(nextOrders));
-      const orderSaveError = await saveStoreOrders(nextOrders);
+      const committed = await commitAtomicPosSale(order);
+      const nextProducts = products.map((product) => {
+        const snapshot = committed.products.find((row) => row.sku === product.sku);
+        return snapshot ? { ...product, ...snapshot } : product;
+      });
+      setProducts(nextProducts);
+      persistCatalog(nextProducts);
+      browserLocalStorage.setItem("fanzzy-orders", JSON.stringify(filterVisibleOrders(committed.orders)));
+      setPendingSaleId(null);
+      window.dispatchEvent(new Event("fanzzy-products-updated"));
       window.dispatchEvent(new Event("fanzzy-orders-updated"));
       setCart({});
       setDiscountValue("");
@@ -9168,18 +9167,43 @@ function PosWorkspace({
       setLastProduct(null);
       posQrRef.current = { status: "idle" };
       setPosQr({ status: "idle" });
-      setLastSale(order);
+      setLastSale(committed.order);
       setLastCashChange(cashPayment?.changePaise != null ? cashPayment.changePaise / 100 : null);
       setCashDialogOpen(false);
       if (paymentMethod === "Cash") window.requestAnimationFrame(() => inputRef.current?.focus());
-      onNotify(orderSaveError ? `${order.id} completed and saved on this device` : `${order.id} sale completed`);
+      onNotify(`${committed.order.id} sale completed`);
     } catch (saleError) {
+      setPendingSaleId(readPendingPosSale<OrderRecord>()?.id || null);
       setError(saleError instanceof Error ? saleError.message : "Could not complete this POS sale.");
     } finally {
       checkoutBusyRef.current = false;
       setCheckoutBusy(false);
       if (paymentMethod !== "Cash") window.requestAnimationFrame(() => inputRef.current?.focus());
     }
+  };
+  const retrySavedSale = async () => {
+    if (checkoutBusyRef.current) return;
+    checkoutBusyRef.current = true; setCheckoutBusy(true); setError("");
+    try {
+      await prepareBrowserStorage();
+      const pending = readPendingPosSale<OrderRecord>();
+      if (!pending) { setPendingSaleId(null); return; }
+      const committed = await commitAtomicPosSale(pending);
+      setProducts((current) => current.map((product) => {
+        const snapshot = committed.products.find((row) => row.sku === product.sku);
+        return snapshot ? { ...product, ...snapshot } : product;
+      }));
+      browserLocalStorage.setItem("fanzzy-orders", JSON.stringify(filterVisibleOrders(committed.orders)));
+      const sameCart = pending.items?.length === cartLines.length && pending.items.every((item) => cartLines.some(({ product, selection, quantity }) =>
+        product.sku === item.productId && quantity === item.quantity && selection.variantName === item.variantName && selection.size === item.size));
+      if (sameCart) { setCart({}); setDiscountValue(""); setCustomerName(""); setCustomerPhone(""); }
+      setLastSale(committed.order); setLastCashChange(null); setPendingSaleId(null); setCashDialogOpen(false);
+      window.dispatchEvent(new Event("fanzzy-orders-updated")); window.dispatchEvent(new Event("fanzzy-products-updated"));
+      onNotify(`${committed.order.id} sale confirmed`);
+    } catch (failure) {
+      setPendingSaleId(readPendingPosSale<OrderRecord>()?.id || null);
+      setError(failure instanceof Error ? failure.message : "Could not confirm the saved sale.");
+    } finally { checkoutBusyRef.current = false; setCheckoutBusy(false); }
   };
   const variantPickerOptions = variantPickerProduct ? variantOptions(variantPickerProduct) : [];
 
@@ -9189,6 +9213,7 @@ function PosWorkspace({
         <div><p className="eyebrow">LIVE POINT OF SALE</p><h2 id="pos-workspace-title">Counter POS</h2><p>Scan a barcode to add products instantly, take payment, and complete an in-store sale.</p></div>
         <span className="pos-live-badge"><i /> Scanner ready</span>
       </div>
+      {pendingSaleId && <div className="pos-error" role="status">Sale {pendingSaleId} needs confirmation. Retry this saved sale before accepting another payment. <button type="button" className="module-secondary" disabled={checkoutBusy} onClick={() => void retrySavedSale()}>Retry saved sale</button></div>}
       <div className="pos-layout" inert={cashDialogOpen || checkoutBusy}>
         <div className="pos-catalog-panel">
           <div className="pos-scan-box">
@@ -9350,7 +9375,7 @@ function ProductLibraryWorkspace({
     let active = true;
     const loadSuppliers = async () => {
       const remote = await fetchStoreSetting("suppliers");
-      const stored = remote.value || window.localStorage.getItem(localSuppliersKey);
+      const stored = remote.value || browserLocalStorage.getItem(localSuppliersKey);
       const parsedSuppliers = parseSupplierRecords(stored);
       const ensured = ensurePreferredSupplier(parsedSuppliers);
       const next = ensured.suppliers;
@@ -9366,7 +9391,7 @@ function ProductLibraryWorkspace({
       }
     };
     const syncSuppliers = () => {
-      const next = ensurePreferredSupplier(parseSupplierRecords(window.localStorage.getItem(localSuppliersKey))).suppliers;
+      const next = ensurePreferredSupplier(parseSupplierRecords(browserLocalStorage.getItem(localSuppliersKey))).suppliers;
       setSuppliers(next);
       const defaultSupplierName = next.find((supplier) => supplier.isDefault)?.name || "";
       if (defaultSupplierName) setNewProduct((current) => current.supplierName ? current : { ...current, supplierName: defaultSupplierName });
@@ -9383,7 +9408,7 @@ function ProductLibraryWorkspace({
   useEffect(() => {
     let active = true;
     const readLocalCategories = () => {
-      const stored = window.localStorage.getItem("fanzzy-categories");
+      const stored = browserLocalStorage.getItem("fanzzy-categories");
       if (!stored) return;
       try {
         const parsed = JSON.parse(stored) as Array<{ name?: string; pieces?: number; image?: string; section?: CategorySection }>;
@@ -9400,7 +9425,7 @@ function ProductLibraryWorkspace({
           );
         }
       } catch {
-        window.localStorage.removeItem("fanzzy-categories");
+        browserLocalStorage.removeItem("fanzzy-categories");
       }
     };
     const loadCategories = async () => {
@@ -9428,7 +9453,7 @@ function ProductLibraryWorkspace({
         }
       }
       if (!remote.error && remote.data) {
-        const stored = window.localStorage.getItem("fanzzy-categories");
+        const stored = browserLocalStorage.getItem("fanzzy-categories");
         let localCategories: Array<{ name: string; pieces: number; image?: string; section?: CategorySection }> = [];
         if (stored) {
           try {
@@ -9444,7 +9469,7 @@ function ProductLibraryWorkspace({
                 }));
             }
           } catch {
-            window.localStorage.removeItem("fanzzy-categories");
+            browserLocalStorage.removeItem("fanzzy-categories");
           }
         }
         const knownCategories = mergeCatalogCategories(sharedCategories, localCategories);
@@ -9490,7 +9515,7 @@ function ProductLibraryWorkspace({
     let active = true;
     const loadDamages = async () => {
       const remote = await fetchStoreSetting("productDamages");
-      const stored = remote.value || window.localStorage.getItem(localProductDamagesKey);
+      const stored = remote.value || browserLocalStorage.getItem(localProductDamagesKey);
       if (!stored) return;
       try {
         const parsed = JSON.parse(stored) as ProductDamageMap;
@@ -9504,7 +9529,7 @@ function ProductLibraryWorkspace({
     };
     void loadDamages();
     const syncDamages = () => {
-      const stored = window.localStorage.getItem(localProductDamagesKey);
+      const stored = browserLocalStorage.getItem(localProductDamagesKey);
       if (!stored) return;
       try {
         const parsed = JSON.parse(stored) as ProductDamageMap;
@@ -9551,7 +9576,7 @@ function ProductLibraryWorkspace({
         fetchStoreSetting("productImageAdjustments"),
         fetchStoreSetting("promotionalOffers"),
       ]);
-      const storedPromotionalOffers = promotionalOffersRemote.value || window.localStorage.getItem(promotionStorageKey);
+      const storedPromotionalOffers = promotionalOffersRemote.value || browserLocalStorage.getItem(promotionStorageKey);
       if (storedPromotionalOffers) {
         try {
           const parsed = JSON.parse(storedPromotionalOffers) as unknown[];
@@ -9674,7 +9699,7 @@ function ProductLibraryWorkspace({
       }
       const localVariantsMap: Record<string, ProductVariant[]> = {};
       const localSizesMap: Record<string, string[]> = {};
-      const storedVariantCache = window.localStorage.getItem(localProductVariantsKey);
+      const storedVariantCache = browserLocalStorage.getItem(localProductVariantsKey);
       if (storedVariantCache) {
         try {
           const parsed = JSON.parse(storedVariantCache) as Record<string, ProductVariant[]>;
@@ -9687,7 +9712,7 @@ function ProductLibraryWorkspace({
           // Ignore malformed local variant cache.
         }
       }
-      const storedCatalog = window.localStorage.getItem("fanzzy-products");
+      const storedCatalog = browserLocalStorage.getItem("fanzzy-products");
       if (storedCatalog) {
         try {
           const parsed = JSON.parse(storedCatalog) as Array<{ sku?: string; variants?: ProductVariant[]; sizes?: string[] }>;
@@ -9760,7 +9785,7 @@ function ProductLibraryWorkspace({
         persistCatalog(mapped);
         return;
       }
-      const stored = window.localStorage.getItem("fanzzy-products");
+      const stored = browserLocalStorage.getItem("fanzzy-products");
       if (!stored) return;
       try {
         const parsed = JSON.parse(stored) as Array<
@@ -9829,7 +9854,7 @@ function ProductLibraryWorkspace({
           persistCatalog(mapped);
         }
       } catch {
-        window.localStorage.removeItem("fanzzy-products");
+        browserLocalStorage.removeItem("fanzzy-products");
       }
     };
     void loadProducts();

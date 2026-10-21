@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import ts from "typescript";
+import { loadBrowserStorage } from "./helpers/browser-storage-fixture.mjs";
 
 const source = await readFile(new URL("../lib/order-history.ts", import.meta.url), "utf8");
 const compiled = ts.transpileModule(source, {
@@ -18,7 +19,11 @@ function loadHistory(initialStorage = {}) {
     removeItem: (key) => { values.delete(key); },
   };
   const api = {};
-  new Function("exports", "window", compiled)(api, { localStorage: storage });
+  const win = { localStorage: storage };
+  new Function("exports", "window", "require", compiled)(api, win, name => {
+    assert.equal(name, "./browser-storage");
+    return loadBrowserStorage(win);
+  });
   return { ...api, storage };
 }
 

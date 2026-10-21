@@ -1,3 +1,4 @@
+import { browserLocalStorage, prepareBrowserStorage, flushBrowserStorage } from "./browser-storage";
 import { supabase } from "./supabase/client";
 
 const externalSiteApiUrl = (process.env.NEXT_PUBLIC_SITE_API_URL ?? "").replace(/\/$/, "");
@@ -18,21 +19,25 @@ const withBearer = (init: RequestInit, token: string) => {
 
 export const siteApiFetch = (path: string, init: RequestInit = {}) => fetch(siteApiUrl(path), init);
 
-export const saveVendorSessionToken = (token: string) => {
-  if (typeof window !== "undefined" && token) window.localStorage.setItem(vendorSessionKey, token);
+export const saveVendorSessionToken = async (token: string) => {
+  if (typeof window !== "undefined" && token) browserLocalStorage.setItem(vendorSessionKey, token);
+  await flushBrowserStorage();
 };
 
-export const clearVendorSessionToken = () => {
-  if (typeof window !== "undefined") window.localStorage.removeItem(vendorSessionKey);
+export const clearVendorSessionToken = async () => {
+  if (typeof window !== "undefined") browserLocalStorage.removeItem(vendorSessionKey);
+  await flushBrowserStorage();
 };
 
-export const vendorApiFetch = (path: string, init: RequestInit = {}) => {
-  const token = typeof window !== "undefined" ? window.localStorage.getItem(vendorSessionKey) || "" : "";
+export const vendorApiFetch = async (path: string, init: RequestInit = {}) => {
+  await prepareBrowserStorage();
+  const token = typeof window !== "undefined" ? browserLocalStorage.getItem(vendorSessionKey) || "" : "";
   return siteApiFetch(path, withBearer(init, token));
 };
 
-export const customerApiFetch = (path: string, init: RequestInit = {}) => {
-  const token = typeof window !== "undefined" ? window.localStorage.getItem(customerSessionKey) || "" : "";
+export const customerApiFetch = async (path: string, init: RequestInit = {}) => {
+  await prepareBrowserStorage();
+  const token = typeof window !== "undefined" ? browserLocalStorage.getItem(customerSessionKey) || "" : "";
   return siteApiFetch(path, withBearer(init, token));
 };
 

@@ -1,4 +1,5 @@
 "use client";
+import { browserLocalStorage } from "../lib/browser-storage";
 
 import { useEffect, useState } from "react";
 
@@ -12,7 +13,7 @@ const AUTO_CLOSE_AFTER_MS = 6 * 1000;
 
 const hasCompletedInstall = () => {
   try {
-    return window.localStorage.getItem(INSTALL_COMPLETED_KEY) === "true";
+    return browserLocalStorage.getItem(INSTALL_COMPLETED_KEY) === "true";
   } catch {
     return false;
   }
@@ -20,7 +21,7 @@ const hasCompletedInstall = () => {
 
 const rememberCompletedInstall = () => {
   try {
-    window.localStorage.setItem(INSTALL_COMPLETED_KEY, "true");
+    browserLocalStorage.setItem(INSTALL_COMPLETED_KEY, "true");
   } catch {
     // Standalone mode still prevents the prompt on the current visit.
   }

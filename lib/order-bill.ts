@@ -1,3 +1,4 @@
+import { browserLocalStorage } from "./browser-storage";
 export type BillOrder = {
   id: string;
   date: string;
@@ -45,7 +46,7 @@ export const defaultBillDesignSettings: BillDesignSettings = {
 const billDesignSettings = (): BillDesignSettings => {
   if (typeof window === "undefined") return defaultBillDesignSettings;
   try {
-    const stored = JSON.parse(window.localStorage.getItem("fanzzy-bill-design") || "null") as Partial<BillDesignSettings> | null;
+    const stored = JSON.parse(browserLocalStorage.getItem("fanzzy-bill-design") || "null") as Partial<BillDesignSettings> | null;
     return { ...defaultBillDesignSettings, ...(stored || {}) };
   } catch {
     return defaultBillDesignSettings;

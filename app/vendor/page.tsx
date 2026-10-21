@@ -1,4 +1,5 @@
 "use client";
+import { browserSessionStorage } from "../../lib/browser-storage";
 /* eslint-disable @next/next/no-html-link-for-pages */
 
 import { useEffect, useRef, useState } from "react";
@@ -49,17 +50,17 @@ const vendorNavItems = ["Dashboard", "Products", "Add Product", "Inventory", "Ca
 const readVendorDashboardCache = (): VendorDashboardCache | null => {
   if (typeof window === "undefined") return null;
   try {
-    const raw = window.sessionStorage.getItem(vendorDashboardCacheKey);
+    const raw = browserSessionStorage.getItem(vendorDashboardCacheKey);
     if (!raw) return null;
     const cached = JSON.parse(raw) as Partial<VendorDashboardCache>;
     const data = cached.data as Dashboard | undefined;
     if (!cached.vendorId || !cached.savedAt || Date.now() - cached.savedAt > vendorDashboardCacheMaxAge || !data?.vendor || !Array.isArray(data.products) || !Array.isArray(data.orders)) {
-      window.sessionStorage.removeItem(vendorDashboardCacheKey);
+      browserSessionStorage.removeItem(vendorDashboardCacheKey);
       return null;
     }
     return cached as VendorDashboardCache;
   } catch {
-    window.sessionStorage.removeItem(vendorDashboardCacheKey);
+    browserSessionStorage.removeItem(vendorDashboardCacheKey);
     return null;
   }
 };
@@ -69,14 +70,14 @@ const writeVendorDashboardCache = (data: Dashboard) => {
   const vendorId = String((data.vendor as Vendor & { id?: string } | undefined)?.id || "");
   if (!vendorId) return;
   try {
-    window.sessionStorage.setItem(vendorDashboardCacheKey, JSON.stringify({ savedAt: Date.now(), vendorId, data } satisfies VendorDashboardCache));
+    browserSessionStorage.setItem(vendorDashboardCacheKey, JSON.stringify({ savedAt: Date.now(), vendorId, data } satisfies VendorDashboardCache));
   } catch {
     // A storage limit should never prevent the live dashboard from rendering.
   }
 };
 
 const clearVendorDashboardCache = () => {
-  if (typeof window !== "undefined") window.sessionStorage.removeItem(vendorDashboardCacheKey);
+  if (typeof window !== "undefined") browserSessionStorage.removeItem(vendorDashboardCacheKey);
 };
 
 type VendorOrderItem = Record<string, unknown> & {
@@ -254,7 +255,7 @@ function VendorLogin({ error, onSuccess }: { error?: string; onSuccess: () => vo
       if (!response.ok) throw new Error(body.error || "Could not sign in");
       if (!body.sessionToken) throw new Error("The vendor session could not be created.");
       clearVendorDashboardCache();
-      saveVendorSessionToken(body.sessionToken);
+      await saveVendorSessionToken(body.sessionToken);
       onSuccess();
     } catch (caught) {
       setLoginError(caught instanceof Error ? caught.message : "Could not sign in");
@@ -328,7 +329,7 @@ export default function VendorDashboardPage() {
       if (response.status === 401) {
         freshDashboardSettled = true;
         clearVendorDashboardCache();
-        clearVendorSessionToken();
+        await clearVendorSessionToken();
         setData(null);
         setError("");
         return;
@@ -721,7 +722,7 @@ export default function VendorDashboardPage() {
     setOrderDetailsLoading(false);
   };
 
-  const logout = async () => { await vendorApiFetch("/vendor-auth/logout", { method: "POST" }).catch(() => undefined); clearVendorDashboardCache(); clearVendorSessionToken(); window.location.assign("/vendor"); };
+  const logout = async () => { await vendorApiFetch("/vendor-auth/logout", { method: "POST" }).catch(() => undefined); clearVendorDashboardCache(); await clearVendorSessionToken(); window.location.assign("/vendor"); };
 
   if (dashboardLoading && !data) return <VendorPortalLoadingShell />;
   if (!data) return <VendorLogin error={error} onSuccess={() => { setDashboardLoading(true); void load(); }} />;

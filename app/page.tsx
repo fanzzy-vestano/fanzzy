@@ -1,4 +1,7 @@
 "use client";
+import { supportsUpiIdEntry, customerUpiOptions, paymentConfirmationGate } from "../lib/customer-upi-checkout";
+import { browserLocalStorage, browserSessionStorage, prepareBrowserStorage, flushBrowserStorage, batchBrowserStorage } from "../lib/browser-storage";
+import { receiveTransferredGuestCart } from "../lib/cart-navigation";
 
 /* eslint-disable react-hooks/set-state-in-effect, react/no-unescaped-entities */
 
@@ -185,16 +188,17 @@ type RazorpayCheckoutOptions = {
   notes: { address: string; fanzzy_order_id: string };
   theme: { color: string };
   handler: (response: RazorpayCheckoutResponse) => void;
+  config?: ReturnType<typeof customerUpiOptions>["config"];
   modal: { ondismiss: () => void };
 };
-type RazorpayCheckout = { open: () => void };
+type RazorpayCheckout = { open: () => void; on?: (event: "payment.failed", handler: (response: { error?: { description?: string } }) => void) => void };
 
 const readOverlayProduct = (): Product | null => {
   if (typeof window === "undefined") return null;
   const productId = new URLSearchParams(window.location.search).get("fanzzy-product");
   if (!productId) return null;
   try {
-    const stored = window.sessionStorage.getItem("fanzzy-overlay-product");
+    const stored = browserSessionStorage.getItem("fanzzy-overlay-product");
     const product = stored ? normalizeStoredProduct(JSON.parse(stored), 0) : null;
     const normalize = (value?: string) => String(value || "").trim().replace(/[^a-z0-9]/gi, "").toLowerCase();
     return product && [product.id, product.sku].some((key) => normalize(key) === normalize(productId)) ? product : null;
@@ -309,14 +313,13 @@ const storefrontProductCacheKey = "fanzzy-storefront-products-v2";
 const persistStorefrontProductCache = (catalog: Product[]) => {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(storefrontProductCacheKey, JSON.stringify(catalog));
-    return;
+    if (browserLocalStorage.setItem(storefrontProductCacheKey, JSON.stringify(catalog))) return;
   } catch {
     // Large data-URL images can exceed localStorage in a test browser. Keep
     // the complete product list cached while dropping only those heavy blobs.
   }
   try {
-    window.localStorage.setItem(storefrontProductCacheKey, JSON.stringify(catalog.map((product) => ({
+    browserLocalStorage.setItem(storefrontProductCacheKey, JSON.stringify(catalog.map((product) => ({
       ...product,
       image: product.image.startsWith("data:") ? "" : product.image,
       hoverImage: product.hoverImage?.startsWith("data:") ? "" : product.hoverImage,
@@ -527,7 +530,7 @@ const defaultHeroSlideDuration = 5.2;
 const readCachedHeroSlides = (): string[] => {
   if (typeof window === "undefined") return [];
   try {
-    const stored = window.localStorage.getItem("fanzzy-hero-slides");
+    const stored = browserLocalStorage.getItem("fanzzy-hero-slides");
     const parsed = stored ? JSON.parse(stored) : [];
     return Array.isArray(parsed)
       ? parsed.filter((value): value is string => typeof value === "string" && value.trim().length > 0 && !value.includes(blockedHeroImage)).slice(0, 4)
@@ -750,7 +753,7 @@ function normalizeStoredProduct(value: unknown, index: number): Product | null {
 const readCachedStorefrontProducts = (): Product[] => {
   if (typeof window === "undefined") return [];
   try {
-    const stored = window.localStorage.getItem(storefrontProductCacheKey);
+    const stored = browserLocalStorage.getItem(storefrontProductCacheKey);
     if (!stored) return [];
     const parsed: unknown = JSON.parse(stored);
     if (!Array.isArray(parsed)) return [];
@@ -856,6 +859,12 @@ export default function Home() {
   const cartOwnerId = useRef<string | null>(null);
   const localInventoryAdjustments = useRef(new Set<string>());
   const [cartReadyOwner, setCartReadyOwner] = useState<string | null>(null);
+  const [storageReady, setStorageReady] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void prepareBrowserStorage().then(() => { if (active) setStorageReady(true); });
+    return () => { active = false; };
+  }, []);
   const [cartOpen, setCartOpen] = useState(false);
   // The compact cart summary is a post-add confirmation, not a persistent
   // banner. Keep it closed on a fresh page load and reopen it from add-to-cart.
@@ -875,6 +884,18 @@ export default function Home() {
   ]);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [isPaying, setIsPaying] = useState(false);
+  const [upiChoice, setUpiChoice] = useState("qr-app");
+  const [upiIdSupported, setUpiIdSupported] = useState(false);
+  const [paymentNotice, setPaymentNotice] = useState("");
+  const [confirmationPending, setConfirmationPending] = useState(false);
+  const checkoutBusyRef = useRef(false);
+  const retryConfirmationRef = useRef<(() => Promise<void>) | null>(null);
+  const paymentAttemptRef = useRef<{
+    fingerprint: string; order: CustomerOrder;
+    provider?: { id: string; amount: number; currency: string; keyId: string };
+    gate: ReturnType<typeof paymentConfirmationGate>;
+  } | null>(null);
+  useEffect(() => { setUpiIdSupported(supportsUpiIdEntry(navigator)); }, []);
   const [authOpen, setAuthOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
@@ -1038,11 +1059,11 @@ export default function Home() {
     let active = true;
     const loadDeliveryCharge = async () => {
       const remote = await fetchStoreSetting("deliveryCharge");
-      const stored = remote.value || window.localStorage.getItem("fanzzy-delivery-charge");
+      const stored = remote.value || browserLocalStorage.getItem("fanzzy-delivery-charge");
       if (active) setDeliveryCharge(parseDeliveryCharge(stored));
     };
     const refreshDeliveryCharge = () => {
-      setDeliveryCharge(parseDeliveryCharge(window.localStorage.getItem("fanzzy-delivery-charge")));
+      setDeliveryCharge(parseDeliveryCharge(browserLocalStorage.getItem("fanzzy-delivery-charge")));
       void loadDeliveryCharge().catch(() => undefined);
     };
     void loadDeliveryCharge().catch(() => undefined);
@@ -1082,11 +1103,11 @@ export default function Home() {
     const loadPickupHubs = async () => {
       const remote = await fetchStoreSetting("pickupHubs");
       const remoteHubs = parsePickupHubs(remote.value);
-      const localHubs = parsePickupHubs(window.localStorage.getItem("fanzzy-pickup-hubs"));
+      const localHubs = parsePickupHubs(browserLocalStorage.getItem("fanzzy-pickup-hubs"));
       if (active) setPickupHubs(remoteHubs.length ? remoteHubs : localHubs);
     };
     const refreshPickupHubs = () => {
-      setPickupHubs(parsePickupHubs(window.localStorage.getItem("fanzzy-pickup-hubs")));
+      setPickupHubs(parsePickupHubs(browserLocalStorage.getItem("fanzzy-pickup-hubs")));
       void loadPickupHubs().catch(() => undefined);
     };
     void loadPickupHubs().catch(() => undefined);
@@ -1189,7 +1210,7 @@ export default function Home() {
         }
       }
       const localVariantsMap: Record<string, ProductVariant[]> = {};
-      const storedVariantCache = window.localStorage.getItem(localProductVariantsKey);
+      const storedVariantCache = browserLocalStorage.getItem(localProductVariantsKey);
       if (storedVariantCache) {
         try {
           const parsed = JSON.parse(storedVariantCache) as Record<string, ProductVariant[]>;
@@ -1202,7 +1223,7 @@ export default function Home() {
           // Ignore malformed local variant cache.
         }
       }
-      const stored = window.localStorage.getItem(storefrontProductCacheKey);
+      const stored = browserLocalStorage.getItem(storefrontProductCacheKey);
       let localProducts: Product[] = [];
       if (stored) {
         try {
@@ -1224,7 +1245,7 @@ export default function Home() {
             });
           }
         } catch {
-          window.localStorage.removeItem(storefrontProductCacheKey);
+          browserLocalStorage.removeItem(storefrontProductCacheKey);
         }
       }
       if (!remote.error && remote.data !== null) {
@@ -1363,7 +1384,7 @@ export default function Home() {
   useEffect(() => {
     let active = true;
     const syncCategories = async () => {
-      const stored = window.localStorage.getItem("fanzzy-categories");
+      const stored = browserLocalStorage.getItem("fanzzy-categories");
       let localCategories: StorefrontCategory[] = [];
       if (stored) {
         try {
@@ -1375,7 +1396,7 @@ export default function Home() {
             section: category.section || "normal",
           }));
         } catch {
-          window.localStorage.removeItem("fanzzy-categories");
+          browserLocalStorage.removeItem("fanzzy-categories");
         }
       }
       if (active && localCategories.length) setCategories(dedupeStorefrontCategories(localCategories));
@@ -1467,11 +1488,11 @@ export default function Home() {
     };
     const loadRefundRequests = async () => {
       const remote = await fetchStoreSetting("refundRequests");
-      const stored = remote.value || window.localStorage.getItem("fanzzy-refund-requests");
+      const stored = remote.value || browserLocalStorage.getItem("fanzzy-refund-requests");
       if (active) setRefundRequests(parseRequests(stored));
     };
     const refreshRefundRequests = () => {
-      setRefundRequests(parseRequests(window.localStorage.getItem("fanzzy-refund-requests")));
+      setRefundRequests(parseRequests(browserLocalStorage.getItem("fanzzy-refund-requests")));
       void loadRefundRequests().catch(() => undefined);
     };
     void loadRefundRequests().catch(() => undefined);
@@ -1488,11 +1509,11 @@ export default function Home() {
     let active = true;
     const loadPaymentSettings = async () => {
       const remote = await fetchStoreSetting("paymentMethods");
-      const stored = remote.value || window.localStorage.getItem("fanzzy-payment-methods");
+      const stored = remote.value || browserLocalStorage.getItem("fanzzy-payment-methods");
       if (active && stored) setPaymentSettings(parsePaymentSettings(stored));
     };
     const refreshPaymentSettings = () => {
-      setPaymentSettings(parsePaymentSettings(window.localStorage.getItem("fanzzy-payment-methods")));
+      setPaymentSettings(parsePaymentSettings(browserLocalStorage.getItem("fanzzy-payment-methods")));
       void loadPaymentSettings().catch(() => undefined);
     };
     void loadPaymentSettings().catch(() => undefined);
@@ -1513,7 +1534,7 @@ export default function Home() {
   useEffect(() => {
     const syncAgentCoupons = async () => {
       const remote = await fetchStoreSetting("agents");
-      const stored = remote.value || window.localStorage.getItem("fanzzy-agents");
+      const stored = remote.value || browserLocalStorage.getItem("fanzzy-agents");
       setAgentCoupons(parseAgentCoupons(stored));
     };
     const runSyncAgentCoupons = () => { void syncAgentCoupons().catch(() => setAgentCoupons([])); };
@@ -1808,11 +1829,13 @@ export default function Home() {
   const orderTotal = Math.max(0, subtotal - couponDiscount - bogoDiscount + deliveryTotal + codTotal);
 
   useEffect(() => {
+    if (!storageReady) return;
     const userId = authUser?.id;
     const ownerId = userId || "guest";
+    receiveTransferredGuestCart();
     const readCart = <T,>(key: string): T => {
       try {
-        const parsed = JSON.parse(window.localStorage.getItem(key) || "{}");
+        const parsed = JSON.parse(browserLocalStorage.getItem(key) || "{}");
         return parsed && typeof parsed === "object" ? parsed as T : {} as T;
       } catch {
         return {} as T;
@@ -1824,6 +1847,7 @@ export default function Home() {
       setCart(readCart<Record<string, number>>(cartStorageKey(ownerId)));
       setCartVariants(readCart<Record<string, ProductVariant | null>>(cartVariantsStorageKey(ownerId)));
       setCartSizes(readCart<Record<string, string | null>>(`fanzzy-cart-sizes:${ownerId}`));
+      setCartPromotionLines(readCart<Record<string, PromotionCartLine>>(`fanzzy-cart-promotions:${ownerId}`));
       cartOwnerId.current = ownerId;
       setCartReadyOwner(ownerId);
       return;
@@ -1835,6 +1859,8 @@ export default function Home() {
     const userVariants = readCart<Record<string, ProductVariant | null>>(cartVariantsStorageKey(userId));
     const guestSizes = readCart<Record<string, string | null>>(`fanzzy-cart-sizes:guest`);
     const userSizes = readCart<Record<string, string | null>>(`fanzzy-cart-sizes:${userId}`);
+    const guestPromotions = readCart<Record<string, PromotionCartLine>>("fanzzy-cart-promotions:guest");
+    const userPromotions = readCart<Record<string, PromotionCartLine>>(`fanzzy-cart-promotions:${userId}`);
     const mergedCart = { ...userCart };
     Object.entries(guestCart).forEach(([cartKey, quantity]) => {
       mergedCart[cartKey] = (mergedCart[cartKey] ?? 0) + quantity;
@@ -1842,12 +1868,20 @@ export default function Home() {
     setCart(mergedCart);
     setCartVariants({ ...guestVariants, ...userVariants });
     setCartSizes({ ...guestSizes, ...userSizes });
-    removeOptionalBrowserCache(cartStorageKey("guest"));
-    removeOptionalBrowserCache(cartVariantsStorageKey("guest"));
-    removeOptionalBrowserCache("fanzzy-cart-sizes:guest");
+    setCartPromotionLines({ ...guestPromotions, ...userPromotions });
+    batchBrowserStorage(() => {
+      writeOptionalBrowserCache(cartStorageKey(ownerId), mergedCart);
+      writeOptionalBrowserCache(cartVariantsStorageKey(ownerId), { ...guestVariants, ...userVariants });
+      writeOptionalBrowserCache(`fanzzy-cart-sizes:${ownerId}`, { ...guestSizes, ...userSizes });
+      writeOptionalBrowserCache(`fanzzy-cart-promotions:${ownerId}`, { ...guestPromotions, ...userPromotions });
+      removeOptionalBrowserCache(cartStorageKey("guest"));
+      removeOptionalBrowserCache(cartVariantsStorageKey("guest"));
+      removeOptionalBrowserCache("fanzzy-cart-sizes:guest");
+      removeOptionalBrowserCache("fanzzy-cart-promotions:guest");
+    });
     cartOwnerId.current = ownerId;
     setCartReadyOwner(ownerId);
-  }, [authUser?.id]);
+  }, [authUser?.id, storageReady]);
 
   useEffect(() => {
     const ownerId = authUser?.id || "guest";
@@ -1855,11 +1889,22 @@ export default function Home() {
     writeOptionalBrowserCache(cartStorageKey(ownerId), cart);
     writeOptionalBrowserCache(cartVariantsStorageKey(ownerId), cartVariants);
     writeOptionalBrowserCache(`fanzzy-cart-sizes:${ownerId}`, cartSizes);
-  }, [authUser?.id, cartReadyOwner, cart, cartVariants, cartSizes]);
+    writeOptionalBrowserCache(`fanzzy-cart-promotions:${ownerId}`, cartPromotionLines);
+    void flushBrowserStorage();
+  }, [authUser?.id, cartReadyOwner, cart, cartVariants, cartSizes, cartPromotionLines]);
 
   useEffect(() => {
+    if (!storageReady) return;
     let active = true;
     const storedUser = readStoredCustomerAuthUser();
+    if (storedUser) {
+      setAuthUser(storedUser);
+      setCheckoutForm((current) => ({ ...current, phone: current.phone || storedUser.phone }));
+    }
+    const syncStoredUser = (event: StorageEvent) => {
+      if (event.key === "fanzzy-customer-session-token" || event.key === "fanzzy-customer-remembered-user") setAuthUser(readStoredCustomerAuthUser());
+    };
+    window.addEventListener("storage", syncStoredUser);
     const loadCustomerSession = async () => {
       try {
         const response = await customerAuthRequest("session", { cache: "no-store" });
@@ -1886,7 +1931,7 @@ export default function Home() {
           return;
         }
         setAuthUser(user);
-        saveCustomerAuthUser(user);
+        await saveCustomerAuthUser(user);
         if (user) setCheckoutForm((current) => ({ ...current, phone: current.phone || user.phone }));
       } catch {
         // Keep a locally restorable session through temporary network/CORS failures.
@@ -1897,8 +1942,9 @@ export default function Home() {
     void loadCustomerSession();
     return () => {
       active = false;
+      window.removeEventListener("storage", syncStoredUser);
     };
-  }, []);
+  }, [storageReady]);
 
   useEffect(() => {
     if (!authUser) return;
@@ -1907,13 +1953,13 @@ export default function Home() {
         setAuthJustVerified(false);
         setAuthOpen(false);
       }
-      if (window.localStorage.getItem(checkoutAfterAuthKey) === "1" && cartItems.length) {
-        window.localStorage.removeItem(checkoutAfterAuthKey);
+      if (browserLocalStorage.getItem(checkoutAfterAuthKey) === "1" && cartItems.length) {
+        browserLocalStorage.removeItem(checkoutAfterAuthKey);
         setAuthOpen(false);
         setCheckoutOpen(true);
       }
-      if (window.localStorage.getItem(ordersAfterAuthKey) === "1") {
-        window.localStorage.removeItem(ordersAfterAuthKey);
+      if (browserLocalStorage.getItem(ordersAfterAuthKey) === "1") {
+        browserLocalStorage.removeItem(ordersAfterAuthKey);
         setAuthOpen(false);
         setOrdersOpen(true);
       }
@@ -1932,10 +1978,10 @@ export default function Home() {
       const remote = await fetchStoreSetting("announcement");
       if (!remote.error && remote.value !== null) {
         setAnnouncementText(remote.value);
-        window.localStorage.setItem("fanzzy-announcement", remote.value);
+        browserLocalStorage.setItem("fanzzy-announcement", remote.value);
         return;
       }
-      const stored = window.localStorage.getItem("fanzzy-announcement");
+      const stored = browserLocalStorage.getItem("fanzzy-announcement");
       if (stored !== null) setAnnouncementText(stored);
     };
     const runSyncAnnouncement = () => { void syncAnnouncement().catch(() => undefined); };
@@ -1951,7 +1997,7 @@ export default function Home() {
   useEffect(() => {
     const syncMarketing = async () => {
       const remote = await fetchStoreSetting("marketingRecords");
-      const stored = remote.value || window.localStorage.getItem("fanzzy-marketing-records");
+      const stored = remote.value || browserLocalStorage.getItem("fanzzy-marketing-records");
       if (!stored) {
         setMarketingRecords([]);
         setActiveCampaign(null);
@@ -1981,7 +2027,7 @@ export default function Home() {
   useEffect(() => {
     const syncPromotions = async () => {
       const remote = await fetchStoreSetting("promotionalOffers");
-      const stored = remote.value || window.localStorage.getItem(promotionStorageKey);
+      const stored = remote.value || browserLocalStorage.getItem(promotionStorageKey);
       if (!stored) { setPromotionalOffers([]); return; }
       try {
         const parsed = JSON.parse(stored) as unknown[];
@@ -2003,24 +2049,24 @@ export default function Home() {
     if (cachedSlides.length) setHeroSlides(cachedSlides);
     const syncHeroSlides = async () => {
       const remoteSlides = await fetchStoreSetting("heroSlides");
-      const storedSlides = remoteSlides.value || window.localStorage.getItem("fanzzy-hero-slides");
+      const storedSlides = remoteSlides.value || browserLocalStorage.getItem("fanzzy-hero-slides");
       if (storedSlides) {
         try {
           const parsed = JSON.parse(storedSlides);
           const allowedSlides = Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string" && value.trim().length > 0 && !value.includes(blockedHeroImage)).slice(0, 4) : [];
           if (allowedSlides.length) {
-            window.localStorage.setItem("fanzzy-hero-slides", JSON.stringify(allowedSlides));
+            browserLocalStorage.setItem("fanzzy-hero-slides", JSON.stringify(allowedSlides));
             setHeroSlides(allowedSlides);
             return;
           }
         } catch {
-          window.localStorage.removeItem("fanzzy-hero-slides");
+          browserLocalStorage.removeItem("fanzzy-hero-slides");
         }
       }
       const legacy = await fetchStoreSetting("heroImage");
-      const storedLegacy = legacy.value || window.localStorage.getItem("fanzzy-hero-image");
+      const storedLegacy = legacy.value || browserLocalStorage.getItem("fanzzy-hero-image");
       if (storedLegacy && !storedLegacy.includes(blockedHeroImage)) {
-        window.localStorage.setItem("fanzzy-hero-slides", JSON.stringify([storedLegacy]));
+        browserLocalStorage.setItem("fanzzy-hero-slides", JSON.stringify([storedLegacy]));
         setHeroSlides([storedLegacy]);
       }
     };
@@ -2048,7 +2094,7 @@ export default function Home() {
   useEffect(() => {
     const syncHeroSlideDuration = async () => {
       const remote = await fetchStoreSetting("heroSlideDuration");
-      const stored = remote.value || window.localStorage.getItem("fanzzy-hero-slide-duration");
+      const stored = remote.value || browserLocalStorage.getItem("fanzzy-hero-slide-duration");
       const parsed = Number(stored);
       if (Number.isFinite(parsed)) setHeroSlideDuration(Math.min(30, Math.max(2, parsed)));
     };
@@ -2222,8 +2268,8 @@ export default function Home() {
     announce("Item removed from cart");
   };
   const closeAuth = useCallback(() => {
-    window.localStorage.removeItem(checkoutAfterAuthKey);
-    window.localStorage.removeItem(ordersAfterAuthKey);
+    browserLocalStorage.removeItem(checkoutAfterAuthKey);
+    browserLocalStorage.removeItem(ordersAfterAuthKey);
     setAuthOpen(false);
     setAuthMessage("");
     setAuthOtp("");
@@ -2286,7 +2332,7 @@ export default function Home() {
     if (!zoomedImage) {
       const scrollY = Math.round(window.scrollY);
       overlayScrollY.current = scrollY;
-      window.sessionStorage.setItem(overlayReturnScrollStorageKey, String(scrollY));
+      browserSessionStorage.setItem(overlayReturnScrollStorageKey, String(scrollY));
     }
     setZoomedImage(image);
   }, [zoomedImage]);
@@ -2305,8 +2351,8 @@ export default function Home() {
 
   useEffect(() => {
     if (new URLSearchParams(window.location.search).get("fanzzy-overlay") || new URLSearchParams(window.location.search).get("fanzzy-product")) return;
-    const storedScrollY = Number(window.sessionStorage.getItem(overlayReturnScrollStorageKey));
-    window.sessionStorage.removeItem(overlayReturnScrollStorageKey);
+    const storedScrollY = Number(browserSessionStorage.getItem(overlayReturnScrollStorageKey));
+    browserSessionStorage.removeItem(overlayReturnScrollStorageKey);
     const savedPageScrollY = Number((window.history.state?.fanzzyPage as Partial<StorefrontPageHistoryState> | undefined)?.scrollY);
     // A return position is only valid when it belongs to the current
     // storefront history entry. Old session values can otherwise send a
@@ -2487,7 +2533,7 @@ export default function Home() {
       );
       if (previousLayers.length === 0) {
         overlayScrollY.current = Math.round(window.scrollY);
-        window.sessionStorage.setItem(overlayReturnScrollStorageKey, String(overlayScrollY.current));
+        browserSessionStorage.setItem(overlayReturnScrollStorageKey, String(overlayScrollY.current));
         window.history.replaceState(
           {
             ...window.history.state,
@@ -2498,7 +2544,7 @@ export default function Home() {
           window.location.href,
         );
       }
-      if (quickProduct) window.sessionStorage.setItem("fanzzy-overlay-product", JSON.stringify(quickProduct));
+      if (quickProduct) browserSessionStorage.setItem("fanzzy-overlay-product", JSON.stringify(quickProduct));
       for (let index = previousLayers.length; index < activeOverlayLayers.length; index += 1) {
         window.history.pushState(
           { ...window.history.state, fanzzyOverlay: activeOverlayLayers[index] },
@@ -2529,7 +2575,7 @@ export default function Home() {
             restoreStorefrontScrollPosition(restoreScrollY);
           }
           overlayScrollY.current = null;
-          window.sessionStorage.removeItem(overlayReturnScrollStorageKey);
+          browserSessionStorage.removeItem(overlayReturnScrollStorageKey);
         }
         return;
       }
@@ -2544,7 +2590,7 @@ export default function Home() {
           restoreStorefrontScrollPosition(restoreScrollY);
         }
         overlayScrollY.current = null;
-        window.sessionStorage.removeItem(overlayReturnScrollStorageKey);
+        browserSessionStorage.removeItem(overlayReturnScrollStorageKey);
       }
       window.history.go(-removedLayerCount);
       return;
@@ -2632,7 +2678,7 @@ export default function Home() {
       if (typeof pageHistoryState?.search === "string") setSearch(pageHistoryState.search);
       if (typeof pageHistoryState?.productSort === "string") setProductSort(pageHistoryState.productSort);
 
-      const storedScrollY = Number(window.sessionStorage.getItem(overlayReturnScrollStorageKey));
+      const storedScrollY = Number(browserSessionStorage.getItem(overlayReturnScrollStorageKey));
       const restoreScrollY = Number.isFinite(storedScrollY) && storedScrollY >= 0
         ? storedScrollY
         : Number(overlayScrollY.current ?? pageHistoryState?.scrollY);
@@ -2669,7 +2715,7 @@ export default function Home() {
   }, [activeOverlayKey, activeOverlayLayers, closeAuth, closeQuickProduct]);
   const signOut = async () => {
     await customerAuthRequest("sign-out", { method: "POST" });
-    clearCustomerAuthTokens();
+    await clearCustomerAuthTokens();
     setAuthUser(null);
     setProfileOpen(false);
     announce("Signed out successfully");
@@ -2713,7 +2759,7 @@ export default function Home() {
         return;
       }
       setOtpSent(true);
-      saveCustomerAuthTokens(result);
+      await saveCustomerAuthTokens(result);
       setOtpCooldown(60);
       setAuthMessage("OTP sent successfully by SMS");
     } catch {
@@ -2741,9 +2787,9 @@ export default function Home() {
         setAuthMessage(result.error || (response.status === 410 ? "OTP expired" : "Invalid OTP"));
         return;
       }
-      saveCustomerAuthTokens(result);
-      clearPendingCustomerAuthToken();
-      saveCustomerAuthUser(result.user);
+      await saveCustomerAuthTokens(result);
+      await clearPendingCustomerAuthToken();
+      await saveCustomerAuthUser(result.user);
       setAuthUser(result.user);
       setCheckoutForm((current) => ({ ...current, phone: current.phone || result.user!.phone }));
       setAuthOtp("");
@@ -2761,7 +2807,7 @@ export default function Home() {
     if (!cartItems.length) return announce("Add a piece to your cart first");
     if (cartStockIssues.length) return announce(cartHasSoldOutItems ? "Remove unavailable items before checkout" : "Reduce item quantities before checkout");
     if (!authUser) {
-      window.localStorage.setItem(checkoutAfterAuthKey, "1");
+      browserLocalStorage.setItem(checkoutAfterAuthKey, "1");
       setCartOpen(false);
       setQuickProduct(null);
       setAuthMessage("");
@@ -2796,7 +2842,7 @@ export default function Home() {
       setOrdersOpen(true);
       return;
     }
-    window.localStorage.setItem(ordersAfterAuthKey, "1");
+    browserLocalStorage.setItem(ordersAfterAuthKey, "1");
     setAuthMessage("Sign in with a one-time SMS code to view your orders.");
     setAuthOpen(true);
   };
@@ -2807,7 +2853,7 @@ export default function Home() {
     let coupon = findCoupon([...agentCoupons, ...marketingRecords]);
     if (!coupon) {
       const remote = await fetchStoreSetting("agents");
-      const freshAgentCoupons = parseAgentCoupons(remote.value || window.localStorage.getItem("fanzzy-agents"));
+      const freshAgentCoupons = parseAgentCoupons(remote.value || browserLocalStorage.getItem("fanzzy-agents"));
       if (freshAgentCoupons.length) {
         setAgentCoupons(freshAgentCoupons);
         coupon = findCoupon([...freshAgentCoupons, ...marketingRecords]);
@@ -2896,7 +2942,7 @@ export default function Home() {
     if (localInventoryAdjustments.current.has(sessionKey)) return;
     let adjustedIds: string[] = [];
     try {
-      const parsed = JSON.parse(window.localStorage.getItem(storageKey) || "[]") as unknown;
+      const parsed = JSON.parse(browserLocalStorage.getItem(storageKey) || "[]") as unknown;
       if (Array.isArray(parsed)) adjustedIds = parsed.filter((value): value is string => typeof value === "string");
     } catch {
       adjustedIds = [];
@@ -2915,7 +2961,7 @@ export default function Home() {
       const remote = await fetchStoreSetting("refundRequests");
       let allRequests: RefundRequest[] = [];
       try {
-        const parsed = JSON.parse(remote.value || window.localStorage.getItem("fanzzy-refund-requests") || "[]") as unknown;
+        const parsed = JSON.parse(remote.value || browserLocalStorage.getItem("fanzzy-refund-requests") || "[]") as unknown;
         if (Array.isArray(parsed)) allRequests = parsed.filter((request): request is RefundRequest => Boolean(request && typeof request === "object" && typeof (request as RefundRequest).orderId === "string" && typeof (request as RefundRequest).userId === "string"));
       } catch {
         allRequests = [];
@@ -2930,7 +2976,7 @@ export default function Home() {
       const nextRequests = [nextRequest, ...allRequests.filter((request) => request.id !== nextRequest.id)];
       const saveError = await saveStoreSetting("refundRequests", JSON.stringify(nextRequests));
       if (saveError) throw new Error("Refund request could not be sent. Please try again.");
-      window.localStorage.setItem("fanzzy-refund-requests", JSON.stringify(nextRequests));
+      browserLocalStorage.setItem("fanzzy-refund-requests", JSON.stringify(nextRequests));
       setRefundRequests(nextRequests);
       window.dispatchEvent(new Event("fanzzy-refund-requests-updated"));
       announce(`Refund request sent for ${order.id}`);
@@ -2940,7 +2986,7 @@ export default function Home() {
       setRefundSubmittingId(null);
     }
   };
-  const persistConfirmedOrder = async (newOrder: CustomerOrder) => {
+  const persistConfirmedOrder = async (newOrder: CustomerOrder, clearCart = true) => {
     if (!authUser) {
       setIsPaying(false);
       setCheckoutOpen(false);
@@ -2957,9 +3003,11 @@ export default function Home() {
     window.dispatchEvent(new Event("fanzzy-orders-updated"));
     setOrders(userOrders);
     setOrderConfirmation(newOrder);
-    setCart({});
-    setCartVariants({});
-    setCartPromotionLines({});
+    if (clearCart) {
+      setCart({});
+      setCartVariants({});
+      setCartPromotionLines({});
+    }
     setCheckoutOpen(false);
     setFulfillmentMethod("delivery");
     setSelectedPickupHubId("");
@@ -2985,7 +3033,8 @@ export default function Home() {
     window.dispatchEvent(new Event("fanzzy-orders-updated"));
   };
   const submitCheckout = async () => {
-    if (isPaying) return;
+    if (isPaying || checkoutBusyRef.current) return;
+    if (paymentAttemptRef.current?.gate.proof) { await retryConfirmationRef.current?.(); return; }
     if (!authUser) {
       setCheckoutOpen(false);
       setAuthMessage("Sign in with a one-time SMS code before placing an order.");
@@ -3028,8 +3077,22 @@ export default function Home() {
       ? `Pickup from ${selectedPickupHub.name} · ${selectedPickupHub.place}`
       : `${checkoutForm.address.trim()}, Landmark: ${checkoutForm.landmark.trim()}, ${pincode}`;
 
+    const fingerprint = JSON.stringify([authUser.id, checkoutForm, fulfillmentMethod, selectedPickupHub?.id, orderTotal,
+      cartItems.map((item) => [item.cartKey || item.id, item.quantity, item.variant?.name, item.size, item.promotion, getCartLinePrice(item)]), paymentMethod, appliedCoupon?.code]);
+    const attemptKey = "fanzzy-customer-checkout-attempt:" + authUser.id;
+    if (!paymentAttemptRef.current) {
+      try {
+        const saved = JSON.parse(browserLocalStorage.getItem(attemptKey) || "null");
+        if ((saved?.fingerprint === fingerprint || saved?.proof) && saved.order?.userId === authUser.id && typeof saved.order.id === "string" && typeof saved.provider?.id === "string") {
+          const proof = saved.proof;
+          if (proof && (![proof.razorpay_order_id, proof.razorpay_payment_id, proof.razorpay_signature].every((value) => typeof value === "string" && value) || proof.razorpay_order_id !== saved.provider.id)) throw new Error("Invalid remembered payment proof");
+          paymentAttemptRef.current = { fingerprint: saved.fingerprint, order: saved.order, provider: saved.provider, gate: paymentConfirmationGate(proof || null) };
+        }
+      } catch { /* backend confirmation is always authoritative */ }
+    }
+    const previousAttempt = (paymentAttemptRef.current?.gate.proof || paymentAttemptRef.current?.fingerprint === fingerprint) ? paymentAttemptRef.current : null;
     const orderToken = globalThis.crypto?.randomUUID?.().replace(/-/g, "").slice(-6).toUpperCase() || "000000";
-    const orderId = `#FZ-${orderToken}`;
+    const orderId = previousAttempt?.order.id || `#FZ-${orderToken}`;
     const pendingOrder: CustomerOrder = {
       id: orderId,
       userId: authUser.id,
@@ -3058,11 +3121,19 @@ export default function Home() {
       items: cartItems.map((product) => ({ productId: product.id, productName: product.name, name: `${product.billName || product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}${product.size ? ` · Size ${product.size}` : ""}`, quantity: product.quantity, price: formatINR(getCartLinePrice(product)), regularPrice: getCustomerPrice(product), image: product.image, variantName: product.variant?.name, variantImage: product.variant?.image, size: product.size || undefined, hsnCode: product.hsnCode || undefined, supplierName: product.supplierName || undefined, vendorId: product.vendorId || null, vendorName: product.vendorName || "Vestano", vendorSlug: product.vendorSlug, promotion: product.promotion || undefined })),
     };
 
+    checkoutBusyRef.current = true;
     setIsPaying(true);
+    setPaymentNotice("Preparing secure payment…");
+    const attempt = previousAttempt || { fingerprint, order: pendingOrder, gate: paymentConfirmationGate() };
+    paymentAttemptRef.current = attempt;
+    const rememberAttempt = async () => {
+      browserLocalStorage.setItem(attemptKey, JSON.stringify({ fingerprint: attempt.fingerprint, order: attempt.order, provider: attempt.provider, proof: attempt.gate.proof }));
+      await flushBrowserStorage();
+    };
     let stockReserved = false;
     let reservedPendingOrder = pendingOrder;
     const releaseCheckoutStock = async () => {
-      if (!stockReserved) return;
+      if (!stockReserved || attempt.gate.proof) return;
       // Flip the local guard first so a dismiss callback and a verification
       // failure cannot release the same reservation twice.
       stockReserved = false;
@@ -3080,54 +3151,114 @@ export default function Home() {
     try {
       // Save before opening Razorpay so a completed payment can always be matched
       // in Admin Orders, even if the customer's browser closes during the callback.
-      await persistPendingOrder(pendingOrder);
-      const reservationResponse = await fetch(razorpayApiUrl("reserve-stock"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fanzzyOrderId: orderId }),
-      });
-      const reservation = await readRazorpayResponse<{ reserved?: boolean; reservedAt?: string; error?: string }>(reservationResponse);
-      if (!reservationResponse.ok || !reservation.reserved) {
-        throw new Error(reservation.error || "This product is no longer available in the requested quantity");
+      if (previousAttempt) {
+        const existing = await fetchStoreOrders<CustomerOrder>();
+        if (existing.error) throw new Error("Order status could not be checked. Please retry; do not pay again.");
+        const paid = existing.data?.find((order) => order.id === orderId && belongsToCustomer(order, authUser) && isPaidOrder(order));
+        if (paid) {
+          await persistConfirmedOrder(paid, attempt.fingerprint === fingerprint); browserLocalStorage.removeItem(attemptKey); await flushBrowserStorage();
+          paymentAttemptRef.current = null; checkoutBusyRef.current = false; setPaymentNotice(""); return;
+        }
+        if (attempt.gate.proof) {
+          const canonical = existing.data?.find((order) => order.id === orderId && belongsToCustomer(order, authUser));
+          if (!canonical) throw new Error("Saved order was not found. Contact support before paying again.");
+          reservedPendingOrder = canonical;
+          stockReserved = canonical.inventoryReserved === true && canonical.inventoryReleased !== true;
+        }
       }
-      stockReserved = true;
-      reservedPendingOrder = {
-        ...pendingOrder,
-        inventoryReserved: true,
-        inventoryReservedAt: reservation.reservedAt || new Date().toISOString(),
-        inventoryReleased: false,
-        inventoryAdjusted: false,
-      };
-      await persistPendingOrder(reservedPendingOrder);
-      if (paymentMethod === "cod") {
-        const codResponse = await customerApiFetch("/orders/confirm-cod", {
+      if (!attempt.gate.proof) {
+        await persistPendingOrder(pendingOrder);
+        const reservationResponse = await fetch(razorpayApiUrl("reserve-stock"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ fanzzyOrderId: orderId }),
         });
-        const confirmation = await readRazorpayResponse<{ confirmed?: boolean; order?: Partial<CustomerOrder>; error?: string }>(codResponse);
-        if (!codResponse.ok || !confirmation.confirmed) throw new Error(confirmation.error || "COD order confirmation failed");
-        stockReserved = false;
-        const codOrder: CustomerOrder = {
-          ...reservedPendingOrder,
-          ...(confirmation.order || {}),
-          paymentMethod: "cod",
-          paymentStatus: "cod_pending",
-          inventoryAdjusted: confirmation.order?.inventoryAdjusted === true,
+        const reservation = await readRazorpayResponse<{ reserved?: boolean; reservedAt?: string; error?: string }>(reservationResponse);
+        if (!reservationResponse.ok || !reservation.reserved) {
+          throw new Error(reservation.error || "This product is no longer available in the requested quantity");
+        }
+        stockReserved = true;
+        reservedPendingOrder = {
+          ...pendingOrder,
+          inventoryReserved: true,
+          inventoryReservedAt: reservation.reservedAt || new Date().toISOString(),
+          inventoryReleased: false,
+          inventoryAdjusted: false,
         };
-        await persistConfirmedOrder(codOrder);
-        return;
+        await persistPendingOrder(reservedPendingOrder);
+        if (paymentMethod === "cod") {
+          const codResponse = await customerApiFetch("/orders/confirm-cod", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ fanzzyOrderId: orderId }),
+          });
+          const confirmation = await readRazorpayResponse<{ confirmed?: boolean; order?: Partial<CustomerOrder>; error?: string }>(codResponse);
+          if (!codResponse.ok || !confirmation.confirmed) throw new Error(confirmation.error || "COD order confirmation failed");
+          stockReserved = false;
+          const codOrder: CustomerOrder = {
+            ...reservedPendingOrder,
+            ...(confirmation.order || {}),
+            paymentMethod: "cod",
+            paymentStatus: "cod_pending",
+            inventoryAdjusted: confirmation.order?.inventoryAdjusted === true,
+          };
+          await persistConfirmedOrder(codOrder);
+          paymentAttemptRef.current = null; checkoutBusyRef.current = false; setPaymentNotice("");
+          return;
+        }
       }
-      const orderResponse = await fetch(razorpayApiUrl("order"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ amount: Math.round(orderTotal * 100), receipt: orderId.replace("#", ""), fanzzyOrderId: orderId }),
-      });
-      const razorpayOrder = await readRazorpayResponse<{ id?: string; amount?: number; currency?: string; keyId?: string; error?: string }>(orderResponse);
-      if (!orderResponse.ok || !razorpayOrder.id || !razorpayOrder.keyId) throw new Error(razorpayOrder.error || "Razorpay order creation failed");
+      let razorpayOrder = attempt.provider;
+      if (attempt.gate.proof && !razorpayOrder) throw new Error("Payment reference is missing. Contact support; do not pay again.");
+      if (!razorpayOrder) {
+        const orderResponse = await fetch(razorpayApiUrl("order"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ amount: Math.round(orderTotal * 100), receipt: orderId.replace("#", ""), fanzzyOrderId: orderId }),
+        });
+        const created = await readRazorpayResponse<{ id?: string; amount?: number; currency?: string; keyId?: string; error?: string }>(orderResponse);
+        if (!orderResponse.ok || !created.id || !created.keyId) throw new Error(created.error || "Razorpay order creation failed");
+        razorpayOrder = { id: created.id, keyId: created.keyId, amount: created.amount || Math.round(orderTotal * 100), currency: created.currency || "INR" };
+        attempt.provider = razorpayOrder;
+      }
       reservedPendingOrder = { ...reservedPendingOrder, razorpayOrderId: razorpayOrder.id };
-      await persistPendingOrder(reservedPendingOrder);
-      const Razorpay = await loadRazorpayCheckout();
+      attempt.order = reservedPendingOrder;
+      if (!attempt.gate.proof) await persistPendingOrder(reservedPendingOrder);
+      await rememberAttempt();
+      const Razorpay = attempt.gate.proof ? null : await loadRazorpayCheckout();
+      const confirmPayment = async (payment: RazorpayCheckoutResponse) => {
+        if (attempt.gate.confirmed) return;
+        if (payment.razorpay_order_id !== razorpayOrder.id) {
+          setPaymentNotice("Payment reference mismatch. Contact support before paying again.");
+          return;
+        }
+        try {
+          setIsPaying(true); setConfirmationPending(false); setPaymentNotice("Confirming payment with the server…");
+          await attempt.gate.confirm(payment, async () => {
+            await rememberAttempt();
+            const verifyResponse = await fetch(razorpayApiUrl("verify"), {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ razorpayOrderId: payment.razorpay_order_id, razorpayPaymentId: payment.razorpay_payment_id, razorpaySignature: payment.razorpay_signature }),
+            });
+            const verification = await readRazorpayResponse<{ verified?: boolean; error?: string; inventoryAdjusted?: boolean }>(verifyResponse);
+            if (!verifyResponse.ok || !verification.verified) throw new Error(verification.error || "Payment confirmation is pending.");
+            stockReserved = false;
+            await persistConfirmedOrder({ ...reservedPendingOrder, paymentStatus: "paid", razorpayOrderId: payment.razorpay_order_id, razorpayPaymentId: payment.razorpay_payment_id, inventoryAdjusted: verification.inventoryAdjusted === true }, attempt.fingerprint === fingerprint);
+          });
+          browserLocalStorage.removeItem(attemptKey); await flushBrowserStorage();
+          setIsPaying(false); setPaymentNotice(""); setConfirmationPending(false); checkoutBusyRef.current = false;
+          if (paymentAttemptRef.current === attempt) paymentAttemptRef.current = null;
+          retryConfirmationRef.current = null;
+        } catch (error) {
+          // A payment may already be captured. Keep its proof and reservation;
+          // retry verification, never create another payment or release stock.
+          setIsPaying(false); checkoutBusyRef.current = false; setConfirmationPending(true);
+          const message = error instanceof Error ? error.message : "Payment confirmation is pending.";
+          setPaymentNotice(message + " Do not pay again. Retry confirmation."); announce(message);
+        }
+      };
+      retryConfirmationRef.current = async () => { if (attempt.gate.proof) await confirmPayment(attempt.gate.proof); };
+      if (attempt.gate.proof) { await confirmPayment(attempt.gate.proof); return; }
+      if (!Razorpay) throw new Error("Secure checkout is unavailable. Please retry.");
       const checkout = new Razorpay({
         key: razorpayOrder.keyId,
         amount: razorpayOrder.amount || Math.round(orderTotal * 100),
@@ -3138,38 +3269,26 @@ export default function Home() {
         prefill: { name, contact: checkoutForm.phone.trim(), ...(checkoutForm.email.trim() ? { email: checkoutForm.email.trim() } : {}) },
         notes: { address: orderAddress, fanzzy_order_id: orderId },
         theme: { color: "#4b1c2b" },
-        handler: (payment) => {
-          void (async () => {
-            try {
-              const verifyResponse = await fetch(razorpayApiUrl("verify"), {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  razorpayOrderId: payment.razorpay_order_id,
-                  razorpayPaymentId: payment.razorpay_payment_id,
-                  razorpaySignature: payment.razorpay_signature,
-                }),
-              });
-              const verification = await readRazorpayResponse<{ verified?: boolean; error?: string; inventoryAdjusted?: boolean }>(verifyResponse);
-              if (!verifyResponse.ok || !verification.verified) throw new Error(verification.error || "Payment verification failed");
-              const paidOrder = { ...reservedPendingOrder, paymentStatus: "paid" as const, razorpayOrderId: payment.razorpay_order_id, razorpayPaymentId: payment.razorpay_payment_id, inventoryAdjusted: verification.inventoryAdjusted === true };
-              // The verify endpoint has now made the reservation permanent for
-              // this paid order. Never release it after this point.
-              stockReserved = false;
-              await persistConfirmedOrder(paidOrder);
-            } catch (error) {
-              await releaseCheckoutStock();
-              setIsPaying(false);
-              announce(error instanceof Error ? error.message : "Payment could not be verified");
-            }
-          })();
-        },
-        modal: { ondismiss: () => { void releaseCheckoutStock(); setIsPaying(false); } },
+        ...customerUpiOptions(upiChoice === "upi-id", upiIdSupported),
+        handler: (payment) => { void confirmPayment(payment); },
+        modal: { ondismiss: () => {
+          if (attempt.gate.proof) return;
+          void releaseCheckoutStock().finally(() => {
+            setIsPaying(false); checkoutBusyRef.current = false;
+            setPaymentNotice("Payment was not completed. Retry or choose QR / a UPI app.");
+          });
+        } },
       });
+      checkout.on?.("payment.failed", (response) => {
+        if (attempt.gate.proof) return;
+        setPaymentNotice((response.error?.description || "Payment failed.") + " Retry in Razorpay or choose QR / a UPI app.");
+      });
+      setPaymentNotice("Payment pending. Complete it in Razorpay; keep this page open.");
       checkout.open();
     } catch (error) {
       await releaseCheckoutStock();
-      setIsPaying(false);
+      setIsPaying(false); checkoutBusyRef.current = false;
+      setPaymentNotice(error instanceof Error ? error.message : "Online payment could not start. Please retry.");
       announce(error instanceof Error ? error.message : "Online payment could not start");
     }
   };
@@ -3531,6 +3650,14 @@ export default function Home() {
                   {paymentSettings.online && <label><input type="radio" name="payment-method" checked={paymentMethod === "online"} onChange={() => setPaymentMethod("online")} /> <span>Pay online<small>Secure payment through {paymentSettings.provider}</small></span></label>}
                   {paymentSettings.cod && <label><input type="radio" name="payment-method" checked={paymentMethod === "cod"} onChange={() => setPaymentMethod("cod")} /> <span>Cash on delivery<small>{codTotal > 0 ? `Pay on arrival · ${formatINR(codTotal)} COD charge` : "Pay when your order arrives"}</small></span></label>}
                 </div>
+                {paymentMethod === "online" && paymentSettings.online && <div className="checkout-upi-options">
+                  <p className="field-label">UPI payment</p>
+                  <div className="fulfillment-options">
+                    <label><input type="radio" name="upi-choice" checked={upiChoice === "qr-app"} onChange={() => setUpiChoice("qr-app")} disabled={isPaying || confirmationPending} /><span>UPI QR or app<small>Scan in Razorpay or choose an available UPI app</small></span></label>
+                    <label><input type="radio" name="upi-choice" checked={upiChoice === "upi-id"} onChange={() => setUpiChoice("upi-id")} disabled={!upiIdSupported || isPaying || confirmationPending} /><span>Pay using UPI ID<small>{upiIdSupported ? "Enter and validate your UPI ID securely in Razorpay" : "Unavailable on this device. Use QR or a UPI app."}</small></span></label>
+                  </div>
+                  {upiChoice === "upi-id" && <small>Razorpay shows UPI ID entry only when supported by your account and device. QR and app options remain available.</small>}
+                </div>}
                 {!paymentSettings.online && !paymentSettings.cod && <small className="checkout-field-error">No payment methods are available right now.</small>}
               </div>
               <div className="checkout-coupon checkout-wide">
@@ -3544,11 +3671,13 @@ export default function Home() {
             <div className="checkout-total"><span>{fulfillmentMethod === "pickup" ? "Pickup" : "Delivery"}</span><strong>{fulfillmentMethod === "pickup" ? "Free" : deliveryTotal > 0 ? formatINR(deliveryTotal) : "Free"}</strong></div>
             {codTotal > 0 && <div className="checkout-total"><span>COD charge</span><strong>{formatINR(codTotal)}</strong></div>}
             <div className="checkout-total"><span>Order total</span><strong>{formatINR(orderTotal)}</strong></div>
+            {paymentNotice && <p className="auth-message" role="status" aria-live="polite">{paymentNotice}</p>}
             <div className="checkout-actions">
-              <button className="button button-dark" type="button" onClick={submitCheckout} disabled={isPaying}>{isPaying ? (paymentMethod === "cod" ? "Confirming COD…" : "Opening payment…") : paymentMethod === "cod" ? "Place COD order" : "Pay securely"} <span>↗</span></button>
+              {confirmationPending && <button className="button button-dark" type="button" disabled={isPaying} onClick={() => void retryConfirmationRef.current?.()}>Retry payment confirmation</button>}
+              <button className="button button-dark" type="button" onClick={submitCheckout} disabled={isPaying || confirmationPending}>{isPaying ? (paymentMethod === "cod" ? "Confirming COD…" : "Processing payment…") : paymentMethod === "cod" ? "Place COD order" : "Pay securely"} <span>↗</span></button>
               <button className="save-text" type="button" onClick={() => setCheckoutOpen(false)} disabled={isPaying}>Back to cart</button>
             </div>
-            {isPaying && <p className="checkout-payment-status" role="status">{paymentMethod === "cod" ? "Saving your COD order and preparing the shipment…" : "Saving your order and opening secure payment…"}</p>}
+            {isPaying && paymentMethod === "cod" && <p className="checkout-payment-status" role="status">Saving your COD order and preparing the shipment…</p>}
           </section>
         </div>
       )}

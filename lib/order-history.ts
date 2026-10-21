@@ -1,3 +1,4 @@
+import { browserLocalStorage } from "./browser-storage";
 export type OrderHistoryDeletion = {
   order: Record<string, unknown> & { id: string };
   deletedAt: string;
@@ -50,7 +51,7 @@ const rememberDeletion = (deletion: OrderHistoryDeletion) => {
 const readCachedDeletions = () => {
   if (typeof window !== "undefined") {
     try {
-      const stored = window.localStorage.getItem(deletionCacheKey) || "[]";
+      const stored = browserLocalStorage.getItem(deletionCacheKey) || "[]";
       if (stored === lastCachedValue) return Array.from(cachedDeletions.values());
       const parsed: unknown = JSON.parse(stored);
       lastCachedValue = stored;
@@ -87,7 +88,7 @@ export function cacheOrderHistoryDeletions(deletions: OrderHistoryDeletion[]): O
   const merged = Array.from(cachedDeletions.values());
   if (typeof window !== "undefined") {
     try {
-      const storage = window.localStorage;
+      const storage = browserLocalStorage;
       const orderCacheKeys = Array.from({ length: storage.length }, (_, index) => storage.key(index))
         .filter((key): key is string => Boolean(key && (key === "fanzzy-orders" || key.startsWith("fanzzy-orders:"))));
       for (const key of orderCacheKeys) {
