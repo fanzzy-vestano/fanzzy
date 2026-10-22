@@ -38,6 +38,7 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return <html lang="en"><head>
+    <script defer src={`${siteBasePath}/google-analytics.js`} />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <link rel="preconnect" href={process.env.NEXT_PUBLIC_SUPABASE_URL || "https://pdrcrkxeyqxqgpwfxqpu.supabase.co"} crossOrigin="anonymous" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />

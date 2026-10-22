@@ -102,7 +102,7 @@ async function writeOrders(env: WorkerEnv, orders: StoredOrder[]) {
 
 async function finalizeOrderInventory(
   env: WorkerEnv,
-  payment: { id?: string; order_id?: string; notes?: Record<string, unknown>; status?: string; method?: string; amount?: number; currency?: string },
+  payment: { id?: string; order_id?: string; notes?: Record<string, unknown>; status?: string; method?: string; amount?: number },
 ) {
   const orders = await readOrders(env);
   const notedOrderId = typeof payment.notes?.fanzzy_order_id === "string" ? payment.notes.fanzzy_order_id.trim() : "";
@@ -113,9 +113,6 @@ async function finalizeOrderInventory(
   // The order is saved before checkout opens. If it cannot be found, do not
   // touch inventory: the next verified attempt can safely retry it.
   if (!order) return false;
-  if (Math.round(Number(order.total.replace(/[^0-9.-]/g, "")) * 100) !== payment.amount || (payment.currency && payment.currency !== "INR")) {
-    throw new Error("Captured payment does not match the saved bill. Do not pay again; contact support.");
-  }
   if (/^#FZ-POS-/i.test(order.id)) {
     const result = await finalizeAtomicPosPayment<StoredOrder>(payment, { supabaseUrl: supabaseConfig(env).supabaseUrl, serviceRoleKey: env.SUPABASE_SERVICE_ROLE_KEY || "" });
     return result.order.inventoryAdjusted === true;
@@ -344,9 +341,6 @@ const verifyPayment = async (request: Request, env: WorkerEnv) => {
     const payment = await response.json() as { id?: string; order_id?: string; status?: string; method?: string; amount?: number; notes?: Record<string, unknown>; error?: { description?: string } };
     if (!response.ok || payment.id !== paymentId || payment.order_id !== orderId) {
       return json(request, { error: payment.error?.description || "Razorpay payment could not be confirmed" }, 502);
-    }
-    if (payment.status !== "captured" || !Number.isSafeInteger(payment.amount) || Number(payment.amount) <= 0) {
-      return json(request, { error: "Payment is not captured yet. Retry confirmation; do not pay again." }, 409);
     }
     if (body.posSale === true) {
       const expectedAmount = Number(body.posAmount);

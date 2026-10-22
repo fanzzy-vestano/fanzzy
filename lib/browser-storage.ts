@@ -29,7 +29,7 @@ function stateFor(kind: StoreKind): StoreState | null {
 
 // Only irreplaceable state belongs in this backup. Catalog images and order
 // caches must never crowd out credentials, carts, or an uncertain POS attempt.
-const criticalKey = (key: string) => /^fanzzy-(?:(?:customer-(?:pending-token|session-token|remembered-user)|vendor-session-token|pos-sale-attempt|store-profile|shipping-rules)$|customer-checkout-attempt:|cart(?::|-variants:|-sizes:|-promotions:))/.test(key);
+const criticalKey = (key: string) => /^fanzzy-(?:(?:customer-(?:pending-token|session-token|remembered-user)|vendor-session-token|pos-sale-attempt|store-profile|shipping-rules)$|cart(?::|-variants:|-sizes:|-promotions:))/.test(key);
 
 function watchOtherDocuments(state: StoreState, db: IDBDatabase) {
   try {

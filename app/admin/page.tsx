@@ -63,6 +63,8 @@ import { AdminInstallButton } from "./admin-install";
 type AdminProduct = {
   name: string;
   sku: string;
+  vendorId?: string;
+  vendorName?: string;
   createdAt?: string;
   category: string;
   stock: number;
@@ -883,6 +885,8 @@ const persistCatalog = (catalog: AdminProduct[]) => {
     id: product.sku.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
     name: product.name,
     sku: product.sku,
+    vendorId: product.vendorId,
+    vendorName: product.vendorName,
     category: product.category,
     stock: product.stock,
     status: product.status,
@@ -3388,6 +3392,7 @@ type SalesProductReportRow = {
   date: string;
   productName: string;
   sku: string;
+  hsnNumber: string;
   units: number;
   unitRate: number;
   grossSales: number;
@@ -3482,15 +3487,27 @@ function ReportsWorkspace({
       if (active) setOrders(filterVisibleOrders(Array.from(merged.values())).filter((order) => order?.date && order?.total && hasConfirmedPayment(order)));
     };
     const syncProducts = async () => {
-      const [remote, pricingRemote, variantsRemote, variantTypeRemote, sizesRemote, sizeStockRemote] = await Promise.all([
+      const [remote, pricingRemote, variantsRemote, variantTypeRemote, sizesRemote, sizeStockRemote, hsnCodeRemote] = await Promise.all([
         fetchCatalogProducts(),
         fetchStoreSetting("productPricing"),
         fetchStoreSetting("productVariants"),
         fetchStoreSetting("productVariantType"),
         fetchStoreSetting("productSizes"),
         fetchStoreSetting("productSizeStock"),
+        fetchStoreSetting("productHsnCodes"),
       ]);
       if (!active) return;
+      let hsnCodeMap: Record<string, string> = {};
+      if (hsnCodeRemote.value) {
+        try {
+          const parsed = JSON.parse(hsnCodeRemote.value) as Record<string, unknown>;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            hsnCodeMap = Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+          }
+        } catch {
+          hsnCodeMap = {};
+        }
+      }
       let pricingMap: Record<string, { gstRate?: number; markup?: number }> = {};
       if (pricingRemote.value) {
         try {
@@ -3573,6 +3590,7 @@ function ReportsWorkspace({
                 image: product.image || adminPlaceholderImage,
                 hoverImage: product.hoverImage || product.image || adminPlaceholderImage,
                 gstRate: pricingMap[product.sku]?.gstRate || 0,
+                hsnCode: hsnCodeMap[product.sku]?.trim() || "",
                 markup: pricingMap[product.sku]?.markup || 0,
                 sizes,
                 sizeStock,
@@ -3676,6 +3694,7 @@ function ReportsWorkspace({
           date: order.date,
           productName: match?.name || item.name || item.productId || "Unknown product",
           sku: match?.sku || item.productId || "",
+          hsnNumber: match?.hsnCode?.trim() || "nill",
           units,
           unitRate: grossSales / units,
           grossSales,
@@ -3817,8 +3836,8 @@ function ReportsWorkspace({
     let headers: string[] = [];
     let rows: unknown[][] = [];
     if (view === "sales") {
-      headers = ["invoice_number", "order_id", "customer_name", "date", "product", "sku", "units_sold", "item_rate", "taxable_sales", "cgst", "sgst", "gross_sales", "gross_profit"];
-      rows = report.salesProductRows.map((row) => [row.invoiceNumber, row.orderId, row.customerName, row.date, row.productName, row.sku, row.units, formatMoney(row.unitRate), formatMoney(row.taxableSales), formatMoney(row.cgst), formatMoney(row.sgst), formatMoney(row.grossSales), row.grossProfit === null ? "" : formatMoney(row.grossProfit)]);
+      headers = ["invoice_number", "order_id", "customer_name", "date", "product", "sku", "hsn_number", "units_sold", "item_rate", "taxable_sales", "cgst", "sgst", "gross_sales", "gross_profit"];
+      rows = report.salesProductRows.map((row) => [row.invoiceNumber, row.orderId, row.customerName, row.date, row.productName, row.sku, row.hsnNumber, row.units, formatMoney(row.unitRate), formatMoney(row.taxableSales), formatMoney(row.cgst), formatMoney(row.sgst), formatMoney(row.grossSales), row.grossProfit === null ? "" : formatMoney(row.grossProfit)]);
     } else if (view === "category") {
       headers = ["category", "products", "units_sold", "revenue", "profit", "stock_units", "stock_value", "cost_value"];
       rows = report.categoryRows.map((category) => [category.name, category.products, category.units, formatAdminCurrency(category.revenue), formatAdminCurrency(category.profit), category.stockUnits, formatAdminCurrency(category.stockValue), formatAdminCurrency(category.costValue)]);
@@ -3938,7 +3957,7 @@ function ReportsWorkspace({
           <div className="report-detail-block"><div className="report-detail-block-head"><strong>Daily sales detail</strong><span>{report.dailyRows.length} active dates</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Date</th><th>Orders</th><th>Units</th><th>Revenue</th></tr></thead><tbody>{report.dailyRows.length ? report.dailyRows.map((day) => <tr key={day.date}><td>{day.date}</td><td>{day.orders}</td><td>{day.units}</td><td>{formatAdminCurrency(day.revenue)}</td></tr>) : <tr><td colSpan={4}>No confirmed sales in this period.</td></tr>}</tbody></table></div></div>
         </div>}
         {view === "sales" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Payment &amp; fulfilment</strong><span>Order mix</span></div><div className="report-mini-list">{report.payments.map((payment) => <div key={payment.name}><span>{payment.name}<small>{formatAdminCurrency(payment.revenue)}</small></span><strong>{payment.count}</strong></div>)}{report.fulfilment.map((method) => <div key={method.name}><span>{method.name}<small>Fulfilment method</small></span><strong>{method.count}</strong></div>)}</div></div>}
-        {view === "sales" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Sales by product</strong><span>{report.salesProductRows.length} product lines</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Invoice number</th><th>Order ID</th><th>Customer name</th><th>Date</th><th>Product</th><th>SKU</th><th>Units</th><th>Item rate</th><th>Taxable sales</th><th>CGST</th><th>SGST</th><th>Gross sales</th><th>Gross profit</th></tr></thead><tbody>{report.salesProductRows.length ? report.salesProductRows.map((row, index) => <tr key={`${row.orderId}-${row.sku}-${index}`}><td>{row.invoiceNumber}</td><td>{row.orderId}</td><td>{row.customerName}</td><td>{row.date}</td><td>{row.productName}</td><td>{row.sku || "—"}</td><td>{row.units}</td><td>{formatMoney(row.unitRate)}</td><td>{formatMoney(row.taxableSales)}</td><td>{formatMoney(row.cgst)}</td><td>{formatMoney(row.sgst)}</td><td>{formatMoney(row.grossSales)}</td><td>{row.grossProfit === null ? "Unavailable" : formatMoney(row.grossProfit)}</td></tr>) : <tr><td colSpan={13}>No confirmed sales in this period.</td></tr>}</tbody></table></div><p className="report-help">Item rate is the gross selling rate for one unit. CGST and SGST are split equally from the GST included in each product sale. Gross profit is taxable sales less product cost. Decimal values are shown up to 2 places.</p></div>}
+        {view === "sales" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Sales by product</strong><span>{report.salesProductRows.length} product lines</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Invoice number</th><th>Order ID</th><th>Customer name</th><th>Date</th><th>Product</th><th>SKU</th><th>Hsn number</th><th>Units</th><th>Item rate</th><th>Taxable sales</th><th>CGST</th><th>SGST</th><th>Gross sales</th><th>Gross profit</th></tr></thead><tbody>{report.salesProductRows.length ? report.salesProductRows.map((row, index) => <tr key={`${row.orderId}-${row.sku}-${index}`}><td>{row.invoiceNumber}</td><td>{row.orderId}</td><td>{row.customerName}</td><td>{row.date}</td><td>{row.productName}</td><td>{row.sku || "—"}</td><td>{row.hsnNumber}</td><td>{row.units}</td><td>{formatMoney(row.unitRate)}</td><td>{formatMoney(row.taxableSales)}</td><td>{formatMoney(row.cgst)}</td><td>{formatMoney(row.sgst)}</td><td>{formatMoney(row.grossSales)}</td><td>{row.grossProfit === null ? "Unavailable" : formatMoney(row.grossProfit)}</td></tr>) : <tr><td colSpan={14}>No confirmed sales in this period.</td></tr>}</tbody></table></div><p className="report-help">Item rate is the gross selling rate for one unit. CGST and SGST are split equally from the GST included in each product sale. Gross profit is taxable sales less product cost. Decimal values are shown up to 2 places.</p></div>}
         {view === "overview" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Category summary</strong><span>{report.categoryRows.length} categories</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Category</th><th>Products</th><th>Units sold</th><th>Revenue</th><th>Profit</th><th>Stock value</th><th>Cost value</th></tr></thead><tbody>{report.categoryRows.map((category) => <tr key={category.name}><td>{category.name}</td><td>{category.products}</td><td>{category.units}</td><td>{formatAdminCurrency(category.revenue)}</td><td>{formatAdminCurrency(category.profit)}</td><td>{formatAdminCurrency(category.stockValue)}</td><td>{formatAdminCurrency(category.costValue)}</td></tr>)}</tbody></table></div></div>}
         {view === "category" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Every category</strong><span>{report.categoryRows.length} rows</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Category</th><th>Products</th><th>Units sold</th><th>Revenue</th><th>Profit</th><th>Stock units</th><th>Stock value</th><th>Cost value</th></tr></thead><tbody>{report.categoryRows.map((category) => <tr key={category.name}><td>{category.name}</td><td>{category.products}</td><td>{category.units}</td><td>{formatAdminCurrency(category.revenue)}</td><td>{formatAdminCurrency(category.profit)}</td><td>{category.stockUnits}</td><td>{formatAdminCurrency(category.stockValue)}</td><td>{formatAdminCurrency(category.costValue)}</td></tr>)}</tbody></table></div></div>}
         {(view === "item" || view === "top-selling") && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><div><strong>{view === "top-selling" ? "Ranked best sellers" : "Every catalog item"}</strong><span>{view === "top-selling" ? report.topProducts.length : itemReportRows.length} rows</span></div>{view === "item" && <label className="report-table-filter">Filter items<select value={itemMovementFilter} onChange={(event) => setItemMovementFilter(event.target.value as ReportMovementFilter)}><option value="all">All items</option><option value="sales">Sales items</option><option value="slow">Slow moving</option><option value="no-sales">No sales</option><option value="out-of-stock">Out of stock</option></select></label>}</div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>{view === "top-selling" ? "Rank" : "Product"}</th><th>{view === "top-selling" ? "Product" : "SKU"}</th><th>Category</th><th>Units</th><th>Revenue</th><th>Profit</th><th>Stock</th>{view === "item" && <th>Stock details</th>}<th>Stock value</th><th>Cost value</th><th>Movement</th></tr></thead><tbody>{(view === "top-selling" ? report.topProducts : itemReportRows).map((row, index) => <tr key={row.product.sku}><td>{view === "top-selling" ? String(index + 1).padStart(2, "0") : row.product.name}</td><td>{view === "top-selling" ? row.product.name : row.product.sku}</td><td>{row.product.category}</td><td>{row.units}</td><td>{formatAdminCurrency(row.revenue)}</td><td>{formatAdminCurrency(row.profit)}</td><td>{row.stock}</td>{view === "item" && <td>{row.stockDetails}</td>}<td>{formatAdminCurrency(row.stockValue)}</td><td>{formatAdminCurrency(row.costValue)}</td><td><span className={`report-movement ${row.movement.toLowerCase().replace(/\s+/g, "-")}`}>{row.movement}</span></td></tr>)}</tbody></table></div>{view === "item" && <p className="report-help">Stock and cost value include variant or size stock when those quantities are configured. Stock details shows the quantity for each option.</p>}</div>}
@@ -9287,6 +9306,21 @@ function ProductLibraryWorkspace({
   const [productCategoryFilter, setProductCategoryFilter] = useState("all");
   const [productVariantFilter, setProductVariantFilter] = useState("all");
   const [productSupplierFilter, setProductSupplierFilter] = useState("all");
+  const [productVendorFilter, setProductVendorFilter] = useState("all");
+  const [productHsnFilter, setProductHsnFilter] = useState("all");
+  const [productGstFilter, setProductGstFilter] = useState("all");
+  const [productVendors, setProductVendors] = useState<Array<{ id: string; business_name: string }>>([]);
+  useEffect(() => {
+    let active = true;
+    void adminApiFetch("/admin/vendors", { cache: "no-store" }).then(async (response) => {
+      if (!response.ok) return;
+      const body = await response.json() as { vendors?: Array<{ id: string; business_name: string }> };
+      if (active) setProductVendors(body.vendors || []);
+    }).catch(() => {
+      // Catalog vendor names remain available if the vendor directory cannot load.
+    });
+    return () => { active = false; };
+  }, []);
   const [catalogCategories, setCatalogCategories] = useState<Array<{ name: string; pieces: number; image?: string; section?: CategorySection }>>([]);
   const [scannerOpen, setScannerOpen] = useState(false);
   const [printingBarcodeSku, setPrintingBarcodeSku] = useState<string | null>(null);
@@ -9747,6 +9781,8 @@ function ProductLibraryWorkspace({
           const pricing = calculatePricing(`₹${(product.cost ?? 0).toLocaleString("en-IN")}`, String(gstRate), String(normalizedMarkup));
           return {
           name: product.name,
+          vendorId: product.vendorId,
+          vendorName: product.vendorName,
           price: normalizeWholeSellingPrice(product.price),
            cost: `₹${(product.cost ?? 0).toLocaleString("en-IN")}`,
            compareAt: product.compareAt,
@@ -9819,6 +9855,8 @@ function ProductLibraryWorkspace({
                 const pricing = calculatePricing(String(rawCost ?? "₹0"), String(gstRate), String(normalizedMarkup));
                 return {
                   name: product.name!.trim(),
+                  vendorId: product.vendorId,
+                  vendorName: product.vendorName,
                   price: normalizeWholeSellingPrice(rawPrice ?? "₹0"),
                   cost:
                     typeof rawCost === "number"
@@ -9890,6 +9928,14 @@ function ProductLibraryWorkspace({
     ].map((name) => name.trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
     [products, suppliers],
   );
+  const productVendorOptions = useMemo(() => {
+    const vendors = new Map<string, string>();
+    products.forEach((product) => {
+      if (product.vendorId) vendors.set(product.vendorId, product.vendorName || `Vendor ${product.vendorId}`);
+    });
+    productVendors.forEach((vendor) => vendors.set(vendor.id, vendor.business_name));
+    return Array.from(vendors, ([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
+  }, [products, productVendors]);
   const filteredProducts = useMemo(() => {
     const query = productSearch.trim().toLowerCase();
     return products.filter((product) => {
@@ -9908,9 +9954,17 @@ function ProductLibraryWorkspace({
         || (productVariantFilter === "with-variants" && variants.length > 0);
       const matchesSupplier = productSupplierFilter === "all"
         || product.supplierName?.trim().toLowerCase() === productSupplierFilter.trim().toLowerCase();
-      return matchesSearch && matchesCategory && matchesVariant && matchesSupplier;
+      const matchesVendor = productVendorFilter === "all"
+        || (productVendorFilter === "no-vendor" ? !product.vendorId : product.vendorId === productVendorFilter);
+      const hasHsnCode = Boolean(product.hsnCode?.trim());
+      const matchesHsn = productHsnFilter === "all"
+        || (productHsnFilter === "with-hsn" ? hasHsnCode : !hasHsnCode);
+      const hasGst = (product.gstRate ?? 0) > 0;
+      const matchesGst = productGstFilter === "all"
+        || (productGstFilter === "with-gst" ? hasGst : !hasGst);
+      return matchesSearch && matchesCategory && matchesVariant && matchesSupplier && matchesVendor && matchesHsn && matchesGst;
     });
-  }, [resolveProductCategory, productCategoryFilter, productSearch, productSupplierFilter, productVariantFilter, products]);
+  }, [resolveProductCategory, productCategoryFilter, productSearch, productSupplierFilter, productVariantFilter, productVendorFilter, productHsnFilter, productGstFilter, products]);
   const selectedBarcodeProductCount = Object.keys(selectedBarcodeCopies).length;
   const selectedBarcodeLabelCount = Object.values(selectedBarcodeCopies).reduce((sum, copies) => sum + copies, 0);
   const allVisibleBarcodesSelected = filteredProducts.length > 0
@@ -11161,7 +11215,31 @@ function ProductLibraryWorkspace({
             {productSuppliers.map((supplier) => <option key={supplier} value={supplier}>{supplier}</option>)}
           </select>
         </label>
-        {(productSearch || productCategoryFilter !== "all" || productVariantFilter !== "all" || productSupplierFilter !== "all") && (
+        <label>
+          <span>Vendor</span>
+          <select value={productVendorFilter} onChange={(event) => setProductVendorFilter(event.target.value)} aria-label="Filter by vendor">
+            <option value="all">All vendors</option>
+            <option value="no-vendor">Product excluded vendor</option>
+            {productVendorOptions.map((vendor) => <option key={vendor.id} value={vendor.id}>{vendor.name}</option>)}
+          </select>
+        </label>
+        <label>
+          <span>HSN code</span>
+          <select value={productHsnFilter} onChange={(event) => setProductHsnFilter(event.target.value)} aria-label="Filter by HSN code">
+            <option value="all">All products</option>
+            <option value="with-hsn">Has HSN code</option>
+            <option value="without-hsn">No HSN code</option>
+          </select>
+        </label>
+        <label>
+          <span>GST</span>
+          <select value={productGstFilter} onChange={(event) => setProductGstFilter(event.target.value)} aria-label="Filter by GST">
+            <option value="all">All products</option>
+            <option value="with-gst">Has GST</option>
+            <option value="without-gst">No GST</option>
+          </select>
+        </label>
+        {(productSearch || productCategoryFilter !== "all" || productVariantFilter !== "all" || productSupplierFilter !== "all" || productVendorFilter !== "all" || productHsnFilter !== "all" || productGstFilter !== "all") && (
           <button
             className="product-library-filter-reset"
             type="button"
@@ -11170,6 +11248,9 @@ function ProductLibraryWorkspace({
               setProductCategoryFilter("all");
               setProductVariantFilter("all");
               setProductSupplierFilter("all");
+              setProductVendorFilter("all");
+              setProductHsnFilter("all");
+              setProductGstFilter("all");
             }}
           >
             Clear
@@ -11220,7 +11301,7 @@ function ProductLibraryWorkspace({
         {filteredProducts.length === 0 && (
           <div className="product-library-empty">
             <strong>No products match these filters</strong>
-            <span>Try another search, category, or variant.</span>
+            <span>Try another search, category, variant, supplier bill, vendor, HSN code, or GST filter.</span>
           </div>
         )}
       </div>

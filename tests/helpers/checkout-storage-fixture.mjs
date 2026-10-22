@@ -28,7 +28,7 @@ if (names.size || !effects.history || !effects.cart) throw Error("Missing checko
 const compile = source => ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText;
-const modules = Object.fromEntries(["browser-storage", "order-history", "optional-browser-cache", "customer-upi-checkout"].map(name => [name,
+const modules = Object.fromEntries(["browser-storage", "order-history", "optional-browser-cache"].map(name => [name,
   compile(readFileSync(new URL("lib/" + name + ".ts", root), "utf8")),
 ]));
 const checkoutCode = compile(declarations.join("\n") + "\nconst historyEffect = " + effects.history + ";\nconst cartEffect = " + effects.cart + ";");
@@ -85,10 +85,7 @@ function runtime(window, options = {}, modules, checkoutCode) {
   const cache = loadModule(modules["optional-browser-cache"]);
   const product = { id: "LOCAL-PRODUCT", name: "Local product", price: 9, stock: 5, quantity: 1, image: "/fixture.png" };
   const scope = {
-    window, Event, ...storage, ...customerOrders, ...cache, ...loadModule(modules["customer-upi-checkout"]),
-    checkoutBusyRef: { current: false }, paymentAttemptRef: { current: null }, retryConfirmationRef: { current: null },
-    upiChoice: options.upiChoice || "qr-app", upiIdSupported: options.upiIdSupported === true,
-    setPaymentNotice: value => { state.paymentNotice = value; }, setConfirmationPending: value => { state.confirmationPending = value; },
+    window, Event, ...storage, ...customerOrders, ...cache,
     persistStorefrontProductCache: value => cache.writeOptionalBrowserCache("fanzzy-storefront-products-v2", value),
     fetchStoreOrders: async () => {
       const response = await mockFetch("/orders");
@@ -110,8 +107,7 @@ function runtime(window, options = {}, modules, checkoutCode) {
     razorpayApiUrl: path => "/mock/" + path,
     loadRazorpayCheckout: async () => class {
       constructor(config) { state.providerOptions = config; }
-      open() { state.opened = true; state.openCount = (state.openCount || 0) + 1; }
-      on(event, callback) { (state.providerEvents ||= {})[event] = callback; }
+      open() { state.opened = true; }
     },
     announce: text => state.toasts.push(text),
     setIsPaying: value => { scope.isPaying = value; state.paying = value; },

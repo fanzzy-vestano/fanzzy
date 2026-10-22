@@ -1,5 +1,4 @@
 "use client";
-import { supportsUpiIdEntry, customerUpiOptions, paymentConfirmationGate } from "../lib/customer-upi-checkout";
 import { browserLocalStorage, browserSessionStorage, prepareBrowserStorage, flushBrowserStorage, batchBrowserStorage } from "../lib/browser-storage";
 import { receiveTransferredGuestCart } from "../lib/cart-navigation";
 
@@ -188,10 +187,9 @@ type RazorpayCheckoutOptions = {
   notes: { address: string; fanzzy_order_id: string };
   theme: { color: string };
   handler: (response: RazorpayCheckoutResponse) => void;
-  config?: ReturnType<typeof customerUpiOptions>["config"];
   modal: { ondismiss: () => void };
 };
-type RazorpayCheckout = { open: () => void; on?: (event: "payment.failed", handler: (response: { error?: { description?: string } }) => void) => void };
+type RazorpayCheckout = { open: () => void };
 
 const readOverlayProduct = (): Product | null => {
   if (typeof window === "undefined") return null;
@@ -884,18 +882,6 @@ export default function Home() {
   ]);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [isPaying, setIsPaying] = useState(false);
-  const [upiChoice, setUpiChoice] = useState("qr-app");
-  const [upiIdSupported, setUpiIdSupported] = useState(false);
-  const [paymentNotice, setPaymentNotice] = useState("");
-  const [confirmationPending, setConfirmationPending] = useState(false);
-  const checkoutBusyRef = useRef(false);
-  const retryConfirmationRef = useRef<(() => Promise<void>) | null>(null);
-  const paymentAttemptRef = useRef<{
-    fingerprint: string; order: CustomerOrder;
-    provider?: { id: string; amount: number; currency: string; keyId: string };
-    gate: ReturnType<typeof paymentConfirmationGate>;
-  } | null>(null);
-  useEffect(() => { setUpiIdSupported(supportsUpiIdEntry(navigator)); }, []);
   const [authOpen, setAuthOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
@@ -2986,7 +2972,7 @@ export default function Home() {
       setRefundSubmittingId(null);
     }
   };
-  const persistConfirmedOrder = async (newOrder: CustomerOrder, clearCart = true) => {
+  const persistConfirmedOrder = async (newOrder: CustomerOrder) => {
     if (!authUser) {
       setIsPaying(false);
       setCheckoutOpen(false);
@@ -3003,11 +2989,9 @@ export default function Home() {
     window.dispatchEvent(new Event("fanzzy-orders-updated"));
     setOrders(userOrders);
     setOrderConfirmation(newOrder);
-    if (clearCart) {
-      setCart({});
-      setCartVariants({});
-      setCartPromotionLines({});
-    }
+    setCart({});
+    setCartVariants({});
+    setCartPromotionLines({});
     setCheckoutOpen(false);
     setFulfillmentMethod("delivery");
     setSelectedPickupHubId("");
@@ -3033,8 +3017,7 @@ export default function Home() {
     window.dispatchEvent(new Event("fanzzy-orders-updated"));
   };
   const submitCheckout = async () => {
-    if (isPaying || checkoutBusyRef.current) return;
-    if (paymentAttemptRef.current?.gate.proof) { await retryConfirmationRef.current?.(); return; }
+    if (isPaying) return;
     if (!authUser) {
       setCheckoutOpen(false);
       setAuthMessage("Sign in with a one-time SMS code before placing an order.");
@@ -3077,22 +3060,8 @@ export default function Home() {
       ? `Pickup from ${selectedPickupHub.name} · ${selectedPickupHub.place}`
       : `${checkoutForm.address.trim()}, Landmark: ${checkoutForm.landmark.trim()}, ${pincode}`;
 
-    const fingerprint = JSON.stringify([authUser.id, checkoutForm, fulfillmentMethod, selectedPickupHub?.id, orderTotal,
-      cartItems.map((item) => [item.cartKey || item.id, item.quantity, item.variant?.name, item.size, item.promotion, getCartLinePrice(item)]), paymentMethod, appliedCoupon?.code]);
-    const attemptKey = "fanzzy-customer-checkout-attempt:" + authUser.id;
-    if (!paymentAttemptRef.current) {
-      try {
-        const saved = JSON.parse(browserLocalStorage.getItem(attemptKey) || "null");
-        if ((saved?.fingerprint === fingerprint || saved?.proof) && saved.order?.userId === authUser.id && typeof saved.order.id === "string" && typeof saved.provider?.id === "string") {
-          const proof = saved.proof;
-          if (proof && (![proof.razorpay_order_id, proof.razorpay_payment_id, proof.razorpay_signature].every((value) => typeof value === "string" && value) || proof.razorpay_order_id !== saved.provider.id)) throw new Error("Invalid remembered payment proof");
-          paymentAttemptRef.current = { fingerprint: saved.fingerprint, order: saved.order, provider: saved.provider, gate: paymentConfirmationGate(proof || null) };
-        }
-      } catch { /* backend confirmation is always authoritative */ }
-    }
-    const previousAttempt = (paymentAttemptRef.current?.gate.proof || paymentAttemptRef.current?.fingerprint === fingerprint) ? paymentAttemptRef.current : null;
     const orderToken = globalThis.crypto?.randomUUID?.().replace(/-/g, "").slice(-6).toUpperCase() || "000000";
-    const orderId = previousAttempt?.order.id || `#FZ-${orderToken}`;
+    const orderId = `#FZ-${orderToken}`;
     const pendingOrder: CustomerOrder = {
       id: orderId,
       userId: authUser.id,
@@ -3121,19 +3090,11 @@ export default function Home() {
       items: cartItems.map((product) => ({ productId: product.id, productName: product.name, name: `${product.billName || product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}${product.size ? ` · Size ${product.size}` : ""}`, quantity: product.quantity, price: formatINR(getCartLinePrice(product)), regularPrice: getCustomerPrice(product), image: product.image, variantName: product.variant?.name, variantImage: product.variant?.image, size: product.size || undefined, hsnCode: product.hsnCode || undefined, supplierName: product.supplierName || undefined, vendorId: product.vendorId || null, vendorName: product.vendorName || "Vestano", vendorSlug: product.vendorSlug, promotion: product.promotion || undefined })),
     };
 
-    checkoutBusyRef.current = true;
     setIsPaying(true);
-    setPaymentNotice("Preparing secure payment…");
-    const attempt = previousAttempt || { fingerprint, order: pendingOrder, gate: paymentConfirmationGate() };
-    paymentAttemptRef.current = attempt;
-    const rememberAttempt = async () => {
-      browserLocalStorage.setItem(attemptKey, JSON.stringify({ fingerprint: attempt.fingerprint, order: attempt.order, provider: attempt.provider, proof: attempt.gate.proof }));
-      await flushBrowserStorage();
-    };
     let stockReserved = false;
     let reservedPendingOrder = pendingOrder;
     const releaseCheckoutStock = async () => {
-      if (!stockReserved || attempt.gate.proof) return;
+      if (!stockReserved) return;
       // Flip the local guard first so a dismiss callback and a verification
       // failure cannot release the same reservation twice.
       stockReserved = false;
@@ -3151,114 +3112,54 @@ export default function Home() {
     try {
       // Save before opening Razorpay so a completed payment can always be matched
       // in Admin Orders, even if the customer's browser closes during the callback.
-      if (previousAttempt) {
-        const existing = await fetchStoreOrders<CustomerOrder>();
-        if (existing.error) throw new Error("Order status could not be checked. Please retry; do not pay again.");
-        const paid = existing.data?.find((order) => order.id === orderId && belongsToCustomer(order, authUser) && isPaidOrder(order));
-        if (paid) {
-          await persistConfirmedOrder(paid, attempt.fingerprint === fingerprint); browserLocalStorage.removeItem(attemptKey); await flushBrowserStorage();
-          paymentAttemptRef.current = null; checkoutBusyRef.current = false; setPaymentNotice(""); return;
-        }
-        if (attempt.gate.proof) {
-          const canonical = existing.data?.find((order) => order.id === orderId && belongsToCustomer(order, authUser));
-          if (!canonical) throw new Error("Saved order was not found. Contact support before paying again.");
-          reservedPendingOrder = canonical;
-          stockReserved = canonical.inventoryReserved === true && canonical.inventoryReleased !== true;
-        }
+      await persistPendingOrder(pendingOrder);
+      const reservationResponse = await fetch(razorpayApiUrl("reserve-stock"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fanzzyOrderId: orderId }),
+      });
+      const reservation = await readRazorpayResponse<{ reserved?: boolean; reservedAt?: string; error?: string }>(reservationResponse);
+      if (!reservationResponse.ok || !reservation.reserved) {
+        throw new Error(reservation.error || "This product is no longer available in the requested quantity");
       }
-      if (!attempt.gate.proof) {
-        await persistPendingOrder(pendingOrder);
-        const reservationResponse = await fetch(razorpayApiUrl("reserve-stock"), {
+      stockReserved = true;
+      reservedPendingOrder = {
+        ...pendingOrder,
+        inventoryReserved: true,
+        inventoryReservedAt: reservation.reservedAt || new Date().toISOString(),
+        inventoryReleased: false,
+        inventoryAdjusted: false,
+      };
+      await persistPendingOrder(reservedPendingOrder);
+      if (paymentMethod === "cod") {
+        const codResponse = await customerApiFetch("/orders/confirm-cod", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ fanzzyOrderId: orderId }),
         });
-        const reservation = await readRazorpayResponse<{ reserved?: boolean; reservedAt?: string; error?: string }>(reservationResponse);
-        if (!reservationResponse.ok || !reservation.reserved) {
-          throw new Error(reservation.error || "This product is no longer available in the requested quantity");
-        }
-        stockReserved = true;
-        reservedPendingOrder = {
-          ...pendingOrder,
-          inventoryReserved: true,
-          inventoryReservedAt: reservation.reservedAt || new Date().toISOString(),
-          inventoryReleased: false,
-          inventoryAdjusted: false,
+        const confirmation = await readRazorpayResponse<{ confirmed?: boolean; order?: Partial<CustomerOrder>; error?: string }>(codResponse);
+        if (!codResponse.ok || !confirmation.confirmed) throw new Error(confirmation.error || "COD order confirmation failed");
+        stockReserved = false;
+        const codOrder: CustomerOrder = {
+          ...reservedPendingOrder,
+          ...(confirmation.order || {}),
+          paymentMethod: "cod",
+          paymentStatus: "cod_pending",
+          inventoryAdjusted: confirmation.order?.inventoryAdjusted === true,
         };
-        await persistPendingOrder(reservedPendingOrder);
-        if (paymentMethod === "cod") {
-          const codResponse = await customerApiFetch("/orders/confirm-cod", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ fanzzyOrderId: orderId }),
-          });
-          const confirmation = await readRazorpayResponse<{ confirmed?: boolean; order?: Partial<CustomerOrder>; error?: string }>(codResponse);
-          if (!codResponse.ok || !confirmation.confirmed) throw new Error(confirmation.error || "COD order confirmation failed");
-          stockReserved = false;
-          const codOrder: CustomerOrder = {
-            ...reservedPendingOrder,
-            ...(confirmation.order || {}),
-            paymentMethod: "cod",
-            paymentStatus: "cod_pending",
-            inventoryAdjusted: confirmation.order?.inventoryAdjusted === true,
-          };
-          await persistConfirmedOrder(codOrder);
-          paymentAttemptRef.current = null; checkoutBusyRef.current = false; setPaymentNotice("");
-          return;
-        }
+        await persistConfirmedOrder(codOrder);
+        return;
       }
-      let razorpayOrder = attempt.provider;
-      if (attempt.gate.proof && !razorpayOrder) throw new Error("Payment reference is missing. Contact support; do not pay again.");
-      if (!razorpayOrder) {
-        const orderResponse = await fetch(razorpayApiUrl("order"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ amount: Math.round(orderTotal * 100), receipt: orderId.replace("#", ""), fanzzyOrderId: orderId }),
-        });
-        const created = await readRazorpayResponse<{ id?: string; amount?: number; currency?: string; keyId?: string; error?: string }>(orderResponse);
-        if (!orderResponse.ok || !created.id || !created.keyId) throw new Error(created.error || "Razorpay order creation failed");
-        razorpayOrder = { id: created.id, keyId: created.keyId, amount: created.amount || Math.round(orderTotal * 100), currency: created.currency || "INR" };
-        attempt.provider = razorpayOrder;
-      }
+      const orderResponse = await fetch(razorpayApiUrl("order"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ amount: Math.round(orderTotal * 100), receipt: orderId.replace("#", ""), fanzzyOrderId: orderId }),
+      });
+      const razorpayOrder = await readRazorpayResponse<{ id?: string; amount?: number; currency?: string; keyId?: string; error?: string }>(orderResponse);
+      if (!orderResponse.ok || !razorpayOrder.id || !razorpayOrder.keyId) throw new Error(razorpayOrder.error || "Razorpay order creation failed");
       reservedPendingOrder = { ...reservedPendingOrder, razorpayOrderId: razorpayOrder.id };
-      attempt.order = reservedPendingOrder;
-      if (!attempt.gate.proof) await persistPendingOrder(reservedPendingOrder);
-      await rememberAttempt();
-      const Razorpay = attempt.gate.proof ? null : await loadRazorpayCheckout();
-      const confirmPayment = async (payment: RazorpayCheckoutResponse) => {
-        if (attempt.gate.confirmed) return;
-        if (payment.razorpay_order_id !== razorpayOrder.id) {
-          setPaymentNotice("Payment reference mismatch. Contact support before paying again.");
-          return;
-        }
-        try {
-          setIsPaying(true); setConfirmationPending(false); setPaymentNotice("Confirming payment with the server…");
-          await attempt.gate.confirm(payment, async () => {
-            await rememberAttempt();
-            const verifyResponse = await fetch(razorpayApiUrl("verify"), {
-              method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ razorpayOrderId: payment.razorpay_order_id, razorpayPaymentId: payment.razorpay_payment_id, razorpaySignature: payment.razorpay_signature }),
-            });
-            const verification = await readRazorpayResponse<{ verified?: boolean; error?: string; inventoryAdjusted?: boolean }>(verifyResponse);
-            if (!verifyResponse.ok || !verification.verified) throw new Error(verification.error || "Payment confirmation is pending.");
-            stockReserved = false;
-            await persistConfirmedOrder({ ...reservedPendingOrder, paymentStatus: "paid", razorpayOrderId: payment.razorpay_order_id, razorpayPaymentId: payment.razorpay_payment_id, inventoryAdjusted: verification.inventoryAdjusted === true }, attempt.fingerprint === fingerprint);
-          });
-          browserLocalStorage.removeItem(attemptKey); await flushBrowserStorage();
-          setIsPaying(false); setPaymentNotice(""); setConfirmationPending(false); checkoutBusyRef.current = false;
-          if (paymentAttemptRef.current === attempt) paymentAttemptRef.current = null;
-          retryConfirmationRef.current = null;
-        } catch (error) {
-          // A payment may already be captured. Keep its proof and reservation;
-          // retry verification, never create another payment or release stock.
-          setIsPaying(false); checkoutBusyRef.current = false; setConfirmationPending(true);
-          const message = error instanceof Error ? error.message : "Payment confirmation is pending.";
-          setPaymentNotice(message + " Do not pay again. Retry confirmation."); announce(message);
-        }
-      };
-      retryConfirmationRef.current = async () => { if (attempt.gate.proof) await confirmPayment(attempt.gate.proof); };
-      if (attempt.gate.proof) { await confirmPayment(attempt.gate.proof); return; }
-      if (!Razorpay) throw new Error("Secure checkout is unavailable. Please retry.");
+      await persistPendingOrder(reservedPendingOrder);
+      const Razorpay = await loadRazorpayCheckout();
       const checkout = new Razorpay({
         key: razorpayOrder.keyId,
         amount: razorpayOrder.amount || Math.round(orderTotal * 100),
@@ -3269,26 +3170,38 @@ export default function Home() {
         prefill: { name, contact: checkoutForm.phone.trim(), ...(checkoutForm.email.trim() ? { email: checkoutForm.email.trim() } : {}) },
         notes: { address: orderAddress, fanzzy_order_id: orderId },
         theme: { color: "#4b1c2b" },
-        ...customerUpiOptions(upiChoice === "upi-id", upiIdSupported),
-        handler: (payment) => { void confirmPayment(payment); },
-        modal: { ondismiss: () => {
-          if (attempt.gate.proof) return;
-          void releaseCheckoutStock().finally(() => {
-            setIsPaying(false); checkoutBusyRef.current = false;
-            setPaymentNotice("Payment was not completed. Retry or choose QR / a UPI app.");
-          });
-        } },
+        handler: (payment) => {
+          void (async () => {
+            try {
+              const verifyResponse = await fetch(razorpayApiUrl("verify"), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  razorpayOrderId: payment.razorpay_order_id,
+                  razorpayPaymentId: payment.razorpay_payment_id,
+                  razorpaySignature: payment.razorpay_signature,
+                }),
+              });
+              const verification = await readRazorpayResponse<{ verified?: boolean; error?: string; inventoryAdjusted?: boolean }>(verifyResponse);
+              if (!verifyResponse.ok || !verification.verified) throw new Error(verification.error || "Payment verification failed");
+              const paidOrder = { ...reservedPendingOrder, paymentStatus: "paid" as const, razorpayOrderId: payment.razorpay_order_id, razorpayPaymentId: payment.razorpay_payment_id, inventoryAdjusted: verification.inventoryAdjusted === true };
+              // The verify endpoint has now made the reservation permanent for
+              // this paid order. Never release it after this point.
+              stockReserved = false;
+              await persistConfirmedOrder(paidOrder);
+            } catch (error) {
+              await releaseCheckoutStock();
+              setIsPaying(false);
+              announce(error instanceof Error ? error.message : "Payment could not be verified");
+            }
+          })();
+        },
+        modal: { ondismiss: () => { void releaseCheckoutStock(); setIsPaying(false); } },
       });
-      checkout.on?.("payment.failed", (response) => {
-        if (attempt.gate.proof) return;
-        setPaymentNotice((response.error?.description || "Payment failed.") + " Retry in Razorpay or choose QR / a UPI app.");
-      });
-      setPaymentNotice("Payment pending. Complete it in Razorpay; keep this page open.");
       checkout.open();
     } catch (error) {
       await releaseCheckoutStock();
-      setIsPaying(false); checkoutBusyRef.current = false;
-      setPaymentNotice(error instanceof Error ? error.message : "Online payment could not start. Please retry.");
+      setIsPaying(false);
       announce(error instanceof Error ? error.message : "Online payment could not start");
     }
   };
@@ -3650,14 +3563,6 @@ export default function Home() {
                   {paymentSettings.online && <label><input type="radio" name="payment-method" checked={paymentMethod === "online"} onChange={() => setPaymentMethod("online")} /> <span>Pay online<small>Secure payment through {paymentSettings.provider}</small></span></label>}
                   {paymentSettings.cod && <label><input type="radio" name="payment-method" checked={paymentMethod === "cod"} onChange={() => setPaymentMethod("cod")} /> <span>Cash on delivery<small>{codTotal > 0 ? `Pay on arrival · ${formatINR(codTotal)} COD charge` : "Pay when your order arrives"}</small></span></label>}
                 </div>
-                {paymentMethod === "online" && paymentSettings.online && <div className="checkout-upi-options">
-                  <p className="field-label">UPI payment</p>
-                  <div className="fulfillment-options">
-                    <label><input type="radio" name="upi-choice" checked={upiChoice === "qr-app"} onChange={() => setUpiChoice("qr-app")} disabled={isPaying || confirmationPending} /><span>UPI QR or app<small>Scan in Razorpay or choose an available UPI app</small></span></label>
-                    <label><input type="radio" name="upi-choice" checked={upiChoice === "upi-id"} onChange={() => setUpiChoice("upi-id")} disabled={!upiIdSupported || isPaying || confirmationPending} /><span>Pay using UPI ID<small>{upiIdSupported ? "Enter and validate your UPI ID securely in Razorpay" : "Unavailable on this device. Use QR or a UPI app."}</small></span></label>
-                  </div>
-                  {upiChoice === "upi-id" && <small>Razorpay shows UPI ID entry only when supported by your account and device. QR and app options remain available.</small>}
-                </div>}
                 {!paymentSettings.online && !paymentSettings.cod && <small className="checkout-field-error">No payment methods are available right now.</small>}
               </div>
               <div className="checkout-coupon checkout-wide">
@@ -3671,13 +3576,11 @@ export default function Home() {
             <div className="checkout-total"><span>{fulfillmentMethod === "pickup" ? "Pickup" : "Delivery"}</span><strong>{fulfillmentMethod === "pickup" ? "Free" : deliveryTotal > 0 ? formatINR(deliveryTotal) : "Free"}</strong></div>
             {codTotal > 0 && <div className="checkout-total"><span>COD charge</span><strong>{formatINR(codTotal)}</strong></div>}
             <div className="checkout-total"><span>Order total</span><strong>{formatINR(orderTotal)}</strong></div>
-            {paymentNotice && <p className="auth-message" role="status" aria-live="polite">{paymentNotice}</p>}
             <div className="checkout-actions">
-              {confirmationPending && <button className="button button-dark" type="button" disabled={isPaying} onClick={() => void retryConfirmationRef.current?.()}>Retry payment confirmation</button>}
-              <button className="button button-dark" type="button" onClick={submitCheckout} disabled={isPaying || confirmationPending}>{isPaying ? (paymentMethod === "cod" ? "Confirming COD…" : "Processing payment…") : paymentMethod === "cod" ? "Place COD order" : "Pay securely"} <span>↗</span></button>
+              <button className="button button-dark" type="button" onClick={submitCheckout} disabled={isPaying}>{isPaying ? (paymentMethod === "cod" ? "Confirming COD…" : "Opening payment…") : paymentMethod === "cod" ? "Place COD order" : "Pay securely"} <span>↗</span></button>
               <button className="save-text" type="button" onClick={() => setCheckoutOpen(false)} disabled={isPaying}>Back to cart</button>
             </div>
-            {isPaying && paymentMethod === "cod" && <p className="checkout-payment-status" role="status">Saving your COD order and preparing the shipment…</p>}
+            {isPaying && <p className="checkout-payment-status" role="status">{paymentMethod === "cod" ? "Saving your COD order and preparing the shipment…" : "Saving your order and opening secure payment…"}</p>}
           </section>
         </div>
       )}

@@ -68,7 +68,6 @@ export type RazorpayPayment = {
   method?: string;
   order_id?: string;
   amount?: number;
-  currency?: string;
   email?: string;
   contact?: string;
   created_at?: number;
@@ -592,15 +591,8 @@ export async function reconcilePendingOrderInventory() {
 
 async function finalizeRazorpayPaymentInternal(payment: RazorpayPayment, receipt?: string) {
   if (!payment.id) throw new Error("Razorpay payment ID is missing");
-  if (payment.status !== "captured" || !Number.isSafeInteger(payment.amount) || Number(payment.amount) <= 0) {
-    throw new Error("Payment is not captured yet. Retry confirmation; do not pay again.");
-  }
   const orders = await readOrders();
   const matchedPos = orders.find((candidate) => candidate.razorpayPaymentId === payment.id || Boolean(payment.order_id && candidate.razorpayOrderId === payment.order_id));
-  const matchedBill = matchedPos || orders.find((candidate) => candidate.id === payment.notes?.fanzzy_order_id);
-  if (matchedBill && (Math.round(Number(matchedBill.total.replace(/[^0-9.-]/g, "")) * 100) !== payment.amount || (payment.currency && payment.currency !== "INR"))) {
-    throw new Error("Captured payment does not match the saved bill. Do not pay again; contact support.");
-  }
   if ((matchedPos && isPosOrder(matchedPos)) || /^#?FZ-POS-/i.test(String(payment.notes?.fanzzy_order_id || receipt || ""))) {
     return (await finalizeAtomicPosPayment<StoredOrder>(payment, { supabaseUrl, serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || "" })).order;
   }

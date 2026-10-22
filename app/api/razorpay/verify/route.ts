@@ -46,11 +46,8 @@ export async function POST(request: Request) {
       headers: { Authorization: `Basic ${Buffer.from(`${process.env.RAZORPAY_KEY_ID || ""}:${keySecret}`).toString("base64")}` },
     });
     const payment = await paymentResponse.json() as RazorpayPayment & { status?: string; method?: string; amount?: number; error?: { description?: string } };
-    if (!paymentResponse.ok || payment.id !== paymentId || payment.order_id !== orderId) {
+    if (!paymentResponse.ok || payment.order_id !== orderId) {
       return json({ error: payment.error?.description || "Razorpay payment could not be confirmed" }, 502);
-    }
-    if (payment.status !== "captured" || !Number.isSafeInteger(payment.amount) || Number(payment.amount) <= 0) {
-      return json({ error: "Payment is not captured yet. Retry confirmation; do not pay again." }, 409);
     }
     if (body.posSale === true) {
       const expectedAmount = Number(body.posAmount);
