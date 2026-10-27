@@ -216,8 +216,6 @@ const delhiveryPickupFailureMessage = (error: unknown) => {
 // a payment-repair/sync run.
 const delhiveryAutomationStartDate = "2026-09-05";
 
-const requiresAdminShipmentWeight = () => /^(1|true|yes|on)$/i.test(String(process.env.DELHIVERY_REQUIRE_ADMIN_WEIGHT || ""));
-
 const isDeliveryOrderReadyForPickup = (order: StoredOrder) =>
   orderNeedsDelivery(order)
   && Boolean(order.delhiveryAwb)
@@ -305,7 +303,7 @@ async function ensureDelhiveryShipment(orders: StoredOrder[], order: StoredOrder
     await ensureDelhiveryPickupRequest(orders, order);
     return;
   }
-  if (requiresAdminShipmentWeight() && !force && !order.delhiveryWeightGrams) {
+  if (!force) {
     if (order.delhiveryShipmentStatus !== "awaiting_weight") {
       order.delhiveryShipmentStatus = "awaiting_weight";
       delete order.delhiveryShipmentError;
@@ -710,8 +708,8 @@ export async function createAdminDelhiveryShipment(orderId: string, weightGrams:
     if (!order.paymentStatus || !["paid", "cod_pending", "cod_collected"].includes(order.paymentStatus)) throw new Error("Payment or COD confirmation is required before creating the shipment.");
     if (order.status === "Delivered" || order.status === "Cancelled") throw new Error(`A ${order.status.toLowerCase()} order cannot create a new shipment.`);
     if (order.delhiveryAwb) return order;
-    const normalizedWeight = Math.round(Number(weightGrams));
-    if (!Number.isFinite(normalizedWeight) || normalizedWeight < 500 || normalizedWeight > 30_000) throw new Error("Packed parcel weight must be between 500 and 30,000 grams.");
+    const normalizedWeight = Number(weightGrams);
+    if (!Number.isInteger(normalizedWeight) || normalizedWeight < 1 || normalizedWeight > 30_000) throw new Error("Packed parcel weight must be between 1 and 30,000 grams.");
     const options = await loadDelhiveryAdminOptions();
     if (!options.pickupLocations.includes(pickupLocation)) throw new Error("Select the configured Delhivery pickup location.");
     if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(pickupTime)) throw new Error("Enter a valid Delhivery pickup time.");

@@ -18,7 +18,8 @@ function loadShipping(overrides = {}, handleFetch) {
     if (cache.has(file)) return cache.get(file).exports;
     const cjsModule = { exports: {} };
     cache.set(file, cjsModule);
-    const source = ts.transpileModule(readFileSync(file, "utf8"), {
+    const input = readFileSync(file, "utf8") + (file === resolve(root, "lib/razorpay-payment-sync.ts") ? "\nexport { ensureDelhiveryShipment as ensureDelhiveryShipmentForTest };" : "");
+    const source = ts.transpileModule(input, {
       compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
     }).outputText;
     vm.runInNewContext(source, {
@@ -155,6 +156,40 @@ test("missing setup returns actionable diagnostics without leaking credentials",
   assert.match(options.configurationError, /valid origin pincode/);
   assert.doesNotMatch(options.configurationError, /private-test-token/);
   assert.equal(shipping.isDelhiveryConfigured(), false);
+});
+
+test("light parcels retain actual packed grams instead of being rounded up to 500 grams", async () => {
+  for (const weight of [1, 100, 499, 500]) {
+    const shipping = loadShipping(configured, async (url, init) => {
+      if (url.includes("/pin-codes/")) return Response.json({ delivery_codes: [{ postal_code: { pin: "560001", pre_paid: "Y" } }] });
+      if (url.includes("/cmu/create")) {
+        const payload = JSON.parse(new URLSearchParams(init.body).get("data"));
+        assert.equal(payload.shipments[0].weight, weight);
+        return Response.json({ waybill: "LOCAL-WEIGHT-ONLY" });
+      }
+      throw new Error("Unexpected network call");
+    });
+    await shipping.manifestDelhiveryShipment({ ...order, delhiveryWeightGrams: weight, items: [{ ...order.items[0], quantity: 3 }] });
+  }
+});
+
+test("payment and COD synchronization wait for manual shipment creation even with a false weight flag", async () => {
+  for (const paymentMethod of ["online", "cod"]) {
+    let saved = [{ ...order, id: "#FZ-MANUAL-WAIT", status: "Processing", paymentStatus: paymentMethod === "cod" ? "cod_pending" : "paid", paymentMethod, fulfillmentMethod: "delivery", createdAt: new Date().toISOString() }];
+    const shipping = loadShipping({ ...configured, DELHIVERY_REQUIRE_ADMIN_WEIGHT: "false", NEXT_PUBLIC_SUPABASE_URL: "https://db.example.test", SUPABASE_SERVICE_ROLE_KEY: "local-only" }, async (url, init = {}) => {
+      if (url.includes("store_settings?key=eq.orders")) return Response.json([{ value: JSON.stringify(saved) }]);
+      if (url.includes("store_settings?on_conflict=key")) {
+        saved = JSON.parse(JSON.parse(init.body)[0].value);
+        return new Response(null, { status: 201 });
+      }
+      throw new Error(`Unexpected network call: ${url}`);
+    });
+    const sync = shipping.load(resolve(root, "lib/razorpay-payment-sync.ts"));
+    await sync.ensureDelhiveryShipmentForTest(saved, saved[0]);
+    assert.equal(saved[0].delhiveryShipmentStatus, "awaiting_weight");
+    assert.equal(saved[0].delhiveryAwb, undefined);
+    assert.equal(shipping.requests.some(([url]) => url.includes("delhivery.com")), false);
+  }
 });
 
 test("incomplete production setup stops shipment creation before any external request", async () => {

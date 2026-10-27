@@ -6974,9 +6974,9 @@ function OrdersWorkspace({
   };
   const createDelhiveryShipment = async () => {
     if (!selectedOrder || !orderNeedsDelivery(selectedOrder) || shipmentCreating) return;
-    const weightGrams = Math.round(Number(shipmentWeight));
-    if (!Number.isFinite(weightGrams) || weightGrams < 500 || weightGrams > 30_000) {
-      setShipmentWeightError("Enter a packed parcel weight between 500 and 30,000 grams.");
+    const weightGrams = Number(shipmentWeight);
+    if (!Number.isInteger(weightGrams) || weightGrams < 1 || weightGrams > 30_000) {
+      setShipmentWeightError("Enter a packed parcel weight between 1 and 30,000 grams.");
       return;
     }
     if (!delhiveryPickupLocations.includes(shipmentPickupLocation)) {
@@ -7312,8 +7312,8 @@ function OrdersWorkspace({
                 </> : <>
                   <p className="product-detail-meta">{selectedOrder.delhiveryShipmentStatus === "pending" ? "Shipment creation is in progress." : selectedOrder.delhiveryShipmentStatus === "failed" ? selectedOrder.delhiveryShipmentError || "Shipment creation needs attention before tracking can be shown." : "Pack the complete order, weigh the parcel, then create its Delhivery shipment."}</p>
                   <div className="admin-delhivery-weight-form">
-                    <label htmlFor="delhivery-packed-weight">Packed parcel weight <span>grams · allowed range 500–30,000</span></label>
-                    <input id="delhivery-packed-weight" type="number" min="500" max="30000" step="1" inputMode="numeric" value={shipmentWeight} onChange={(event) => { setShipmentWeight(event.target.value); if (shipmentWeightError) setShipmentWeightError(""); }} placeholder="e.g. 650" aria-describedby="delhivery-weight-range delhivery-weight-error" aria-invalid={Boolean(shipmentWeightError)} disabled={shipmentCreating || selectedOrder.delhiveryShipmentStatus === "pending"} />
+                    <label htmlFor="delhivery-packed-weight">Packed parcel weight <span>grams · allowed range 1–30,000</span></label>
+                    <input id="delhivery-packed-weight" type="number" min="1" max="30000" step="1" inputMode="numeric" value={shipmentWeight} onChange={(event) => { setShipmentWeight(event.target.value); if (shipmentWeightError) setShipmentWeightError(""); }} placeholder="e.g. 100" aria-describedby="delhivery-weight-range delhivery-weight-error" aria-invalid={Boolean(shipmentWeightError)} disabled={shipmentCreating || selectedOrder.delhiveryShipmentStatus === "pending"} />
                     <label htmlFor="delhivery-pickup-location">Delhivery pickup location <span>Existing registered warehouse</span></label>
                     <DelhiveryPickupSelect value={shipmentPickupLocation} locations={delhiveryPickupLocations} labels={delhiveryLocationLabels} loading={delhiveryLocationsLoading} onRefresh={() => setDelhiveryConfigRevision(value => value + 1)} onChange={(value) => { setShipmentPickupLocation(value); if (shipmentWeightError) setShipmentWeightError(""); }} disabled={shipmentCreating || selectedOrder.delhiveryShipmentStatus === "pending"} />
                     <label htmlFor="delhivery-pickup-date">Pickup date <span>India time · today through the next 7 days</span></label>

@@ -360,7 +360,7 @@ export async function manifestDelhiveryShipment(order: DelhiveryOrder): Promise<
   const hsnCodes = items.map((item) => String(item.hsnCode || current.defaultHsnCode).trim()).filter(Boolean);
   if (!hsnCodes.length) throw delhiveryError("An HSN code is required before creating a Delhivery shipment.");
   const savedWeight = Number(order.delhiveryWeightGrams);
-  const weight = Math.max(500, Math.round(Number.isFinite(savedWeight) && savedWeight > 0 ? savedWeight : current.defaultWeightGrams * quantity));
+  const weight = Math.max(1, Math.round(Number.isFinite(savedWeight) && savedWeight > 0 ? savedWeight : current.defaultWeightGrams * quantity));
   const description = items.map((item) => `${item.name} x${item.quantity}`).join(", ").slice(0, 256) || "Fanzzy order";
   const payload = {
     shipments: [{
