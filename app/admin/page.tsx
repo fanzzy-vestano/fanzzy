@@ -10,7 +10,7 @@ import PosCashPaymentDialog from "./PosCashPaymentDialog";
 import OrderDeleteDialog from "./OrderDeleteDialog";
 import { filterVisibleOrders } from "../../lib/order-history";
 import { calculateCashPayment, formatPosCurrency } from "../../lib/pos-cash-payment";
-import { orderNeedsDelivery } from "../../lib/order-fulfillment";
+import { canCreateDelhiveryShipment, orderNeedsDelivery } from "../../lib/order-fulfillment";
 import { pickupDateRange, selectedPickupSchedule } from "../../lib/delhivery-pickup-date";
 import { isDelhiveryPickupRetryBlocked } from "../../lib/delhivery-status";
 import { createProductCategoryResolver, mergeCatalogCategories } from "../../lib/catalog-categories";
@@ -6973,7 +6973,7 @@ function OrdersWorkspace({
     }
   };
   const createDelhiveryShipment = async () => {
-    if (!selectedOrder || !orderNeedsDelivery(selectedOrder) || shipmentCreating) return;
+    if (!selectedOrder || !canCreateDelhiveryShipment(selectedOrder) || shipmentCreating) return;
     const weightGrams = Number(shipmentWeight);
     if (!Number.isInteger(weightGrams) || weightGrams < 1 || weightGrams > 30_000) {
       setShipmentWeightError("Enter a packed parcel weight between 1 and 30,000 grams.");
@@ -7284,7 +7284,7 @@ function OrdersWorkspace({
                   <span>{selectedOrder.razorpayPaymentId || selectedOrder.razorpayOrderId}</span>
                 </div>}
               </section>
-              {orderNeedsDelivery(selectedOrder) && <section className="admin-customer-details admin-delhivery-details">
+              {orderNeedsDelivery(selectedOrder) && (selectedOrder.delhiveryAwb || canCreateDelhiveryShipment(selectedOrder)) && <section className="admin-customer-details admin-delhivery-details">
                 <p className="eyebrow">DELHIVERY SHIPMENT</p>
                 {!selectedOrder.delhiveryAwb && delhiveryConfigError && <p className="admin-delhivery-weight-error" role="alert">{delhiveryConfigError}</p>}
                 {selectedOrder.delhiveryAwb ? <>

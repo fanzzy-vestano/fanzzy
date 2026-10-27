@@ -386,9 +386,9 @@ test("pickup retry leaves scheduled, covered and pending requests unchanged", as
   }
 });
 
-test("POS orders never need delivery, including legacy online-paid records marked as delivery", () => {
+test("POS orders and terminal orders cannot create Delhivery shipments", () => {
   const shipping = loadShipping();
-  const { orderNeedsDelivery } = shipping.load(resolve(root, "lib/order-fulfillment.ts"));
+  const { canCreateDelhiveryShipment, orderNeedsDelivery } = shipping.load(resolve(root, "lib/order-fulfillment.ts"));
   for (const id of ["#FZ-POS-C8A456", "FZ-POS-C8A456", " #fz-pos-c8a456 "]) {
     for (const fulfillmentMethod of [undefined, "delivery", "pickup"]) {
       assert.equal(orderNeedsDelivery({ ...order, id, fulfillmentMethod }), false);
@@ -397,6 +397,10 @@ test("POS orders never need delivery, including legacy online-paid records marke
   assert.equal(orderNeedsDelivery({ ...order, id: "#FZ-E635DF" }), true);
   assert.equal(orderNeedsDelivery({ ...order, id: "#FZ-E635DF", fulfillmentMethod: "delivery" }), true);
   assert.equal(orderNeedsDelivery({ ...order, id: "#FZ-E635DF", fulfillmentMethod: "pickup" }), false);
+  assert.equal(canCreateDelhiveryShipment({ ...order, id: "#FZ-POS-C8A456", fulfillmentMethod: "delivery" }), false);
+  assert.equal(canCreateDelhiveryShipment({ ...order, id: "#FZ-E635DF", status: "Delivered" }), false);
+  assert.equal(canCreateDelhiveryShipment({ ...order, id: "#FZ-E635DF", status: "Cancelled" }), false);
+  assert.equal(canCreateDelhiveryShipment({ ...order, id: "#FZ-E635DF", status: "Processing" }), true);
   assert.equal(shipping.requests.length, 0);
 });
 
