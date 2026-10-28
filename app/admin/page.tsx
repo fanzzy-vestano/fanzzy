@@ -13,6 +13,7 @@ import { calculateCashPayment, formatPosCurrency } from "../../lib/pos-cash-paym
 import { canCreateDelhiveryShipment, orderNeedsDelivery } from "../../lib/order-fulfillment";
 import { pickupDateRange, selectedPickupSchedule } from "../../lib/delhivery-pickup-date";
 import { isDelhiveryPickupRetryBlocked } from "../../lib/delhivery-status";
+import { createReportWorkbook } from "../../lib/report-workbook";
 import { createProductCategoryResolver, mergeCatalogCategories } from "../../lib/catalog-categories";
 import { countAdminCategoryProducts } from "../../lib/catalog/category-counts";
 import {
@@ -3466,6 +3467,7 @@ function ReportsWorkspace({
   const [products, setProducts] = useState<AdminProduct[]>(adminProducts);
   const [productDamages, setProductDamages] = useState<ProductDamageMap>({});
   const [itemMovementFilter, setItemMovementFilter] = useState<ReportMovementFilter>("all");
+  const [exportingReport, setExportingReport] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -3831,8 +3833,8 @@ function ReportsWorkspace({
     if (itemMovementFilter === "out-of-stock") return row.product.stock <= 0;
     return true;
   });
-  const exportReport = () => {
-    const escapeCsv = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')}"`;
+  const exportReport = async () => {
+    if (exportingReport) return;
     let headers: string[] = [];
     let rows: unknown[][] = [];
     if (view === "sales") {
@@ -3875,17 +3877,26 @@ function ReportsWorkspace({
          ...report.statuses.map((status) => ["Order status", status.name, status.count, "Orders"]),
       ];
     }
-    const csv = [headers, ...rows].map((row) => row.map(escapeCsv).join(",")).join("\r\n");
-    const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `fanzzy-${view === "overview" ? "all-reports" : `${view}-report`}-${new Date().toISOString().slice(0, 10)}.csv`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 0);
-    onNotify("Report exported");
+    setExportingReport(true);
+    try {
+      const blob = await createReportWorkbook(headers, rows);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `fanzzy-${view === "overview" ? "all-reports" : `${view}-report`}-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      document.body.appendChild(link);
+      try {
+        link.click();
+      } finally {
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+      onNotify("Excel report exported");
+    } catch {
+      onNotify("Could not export report. Please try again.");
+    } finally {
+      setExportingReport(false);
+    }
   };
 
   return (
@@ -3897,7 +3908,7 @@ function ReportsWorkspace({
           <p>See what sells, what is slowing down, and where your store is strongest.</p>
         </div>
         <div className="report-period-control">
-          <button className="module-secondary report-export-button" onClick={exportReport}>Export report ↗</button>
+          <button className="module-secondary report-export-button" onClick={exportReport} disabled={exportingReport}>{exportingReport ? "Exporting…" : "Export report ↗"}</button>
           <label>
             {view === "sales" ? "Sales filter" : "Report period"}
             <select value={period} onChange={(event) => setPeriod(event.target.value as ReportPeriod)}>
@@ -3949,7 +3960,7 @@ function ReportsWorkspace({
         </article>}
       </div>
       <section className="report-detail-panel">
-        <div className="report-detail-head"><div><p className="eyebrow">FULL BREAKDOWN</p><h3>{detailTitle}</h3><span>{periodLabel} · {filteredOrders.length} confirmed orders · {products.length} catalog items</span></div><span className="report-detail-note">Use Export report for the same detail in CSV format.</span></div>
+        <div className="report-detail-head"><div><p className="eyebrow">FULL BREAKDOWN</p><h3>{detailTitle}</h3><span>{periodLabel} · {filteredOrders.length} confirmed orders · {products.length} catalog items</span></div><span className="report-detail-note">Use Export report for the same detail in Excel Workbook (.xlsx) format.</span></div>
         {view === "overview" && <div className="report-detail-split">
           <div className="report-detail-block"><div className="report-detail-block-head"><strong>Daily sales detail</strong><span>{report.dailyRows.length} active dates</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Date</th><th>Orders</th><th>Units</th><th>Revenue</th></tr></thead><tbody>{report.dailyRows.length ? report.dailyRows.map((day) => <tr key={day.date}><td>{day.date}</td><td>{day.orders}</td><td>{day.units}</td><td>{formatAdminCurrency(day.revenue)}</td></tr>) : <tr><td colSpan={4}>No confirmed sales in this period.</td></tr>}</tbody></table></div></div>
         </div>}
