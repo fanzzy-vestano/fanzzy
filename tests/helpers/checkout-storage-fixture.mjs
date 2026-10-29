@@ -28,7 +28,7 @@ if (names.size || !effects.history || !effects.cart) throw Error("Missing checko
 const compile = source => ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText;
-const modules = Object.fromEntries(["browser-storage", "order-history", "optional-browser-cache"].map(name => [name,
+const modules = Object.fromEntries(["browser-storage", "order-history", "optional-browser-cache", "sales-promotions", "website-sales-promotions"].map(name => [name,
   compile(readFileSync(new URL("lib/" + name + ".ts", root), "utf8")),
 ]));
 const checkoutCode = compile(declarations.join("\n") + "\nconst historyEffect = " + effects.history + ";\nconst cartEffect = " + effects.cart + ";");
@@ -77,15 +77,23 @@ function runtime(window, options = {}, modules, checkoutCode) {
     new Function("require", "exports", "window", code)(name => {
       if (name === "./site-api-client") return { customerApiFetch: mockFetch };
       if (name === "./browser-storage") return storage;
+      if (name === "./sales-promotions") return salesPromotions;
       throw Error("Unmocked import: " + name);
     }, exports, window);
     return exports;
   }
   const customerOrders = loadModule(modules["order-history"]);
   const cache = loadModule(modules["optional-browser-cache"]);
+  const salesPromotions = loadModule(modules["sales-promotions"]);
+  const websitePromotions = loadModule(modules["website-sales-promotions"]);
   const product = { id: "LOCAL-PRODUCT", name: "Local product", price: 9, stock: 5, quantity: 1, image: "/fixture.png" };
+  const websiteOfferInput = { lines: [{ productId: product.id, price: product.price, quantity: 1 }], legacyCoupon: 0, legacyPromotion: 0, delivery: { enabled: true, amount: 30, freeAboveEnabled: false, freeAbove: 500 }, pickup: false };
   const scope = {
     window, Event, ...storage, ...customerOrders, ...cache,
+    ...websitePromotions, websiteOfferInput, websiteOffers: { promotions: [], context: {} },
+    onlineOffer: websitePromotions.calculateWebsiteSalesPromotion({ ...websiteOfferInput, promotions: [] }),
+    loadWebsiteOffers: async () => ({ promotions: [], context: {} }), salesCouponCode: "", checkingOffersRef: { current: false },
+    setWebsiteOffers: () => {}, setOfferTime: () => {}, setCheckingOffers: () => {}, setSalesCouponCode: () => {},
     persistStorefrontProductCache: value => cache.writeOptionalBrowserCache("fanzzy-storefront-products-v2", value),
     fetchStoreOrders: async () => {
       const response = await mockFetch("/orders");
