@@ -6,6 +6,7 @@ import { commitAtomicPosSale, readPendingPosSale } from "../../lib/pos-sale-clie
 import { Component, memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ErrorInfo } from "react";
 import { Eye, Pencil, Printer, Trash2 } from "lucide-react";
 import DelhiveryPickupSelect from "./DelhiveryPickupSelect";
+import OffersDashboard from "./OffersManager";
 import PosCashPaymentDialog from "./PosCashPaymentDialog";
 import OrderDeleteDialog from "./OrderDeleteDialog";
 import { filterVisibleOrders } from "../../lib/order-history";
@@ -145,6 +146,7 @@ type AdminPermission =
   | "Agents"
   | "Marketing"
   | "Buy 1 Get X Free"
+  | "Offers"
   | "Homepage"
   | "Delivery charge"
   | "Hub"
@@ -190,6 +192,7 @@ const allAdminPermissions: AdminPermission[] = [
   "Agents",
   "Marketing",
   "Buy 1 Get X Free",
+  "Offers",
   "Homepage",
   "Delivery charge",
   "Hub",
@@ -1252,6 +1255,7 @@ const menu = [
   { label: "Agents", icon: "✦" },
   { label: "Marketing", icon: "◈" },
   { label: "Buy 1 Get X Free", icon: "✦" },
+  { label: "Offers", icon: "✦" },
   { label: "Homepage", icon: "⌂" },
   { label: "Delivery charge", icon: "₹" },
   { label: "Hub", icon: "⌖" },
@@ -2936,6 +2940,7 @@ const moduleContent: Record<
     secondary: "New coupon",
     rows: [],
   },
+  Offers: { eyebrow: "PROMOTIONS", title: "Offers", description: "Manage store offers and promotion definitions.", primary: "New promotion", secondary: "View offers", rows: [] },
   "Buy 1 Get X Free": {
     eyebrow: "PROMOTIONS",
     title: "Buy 1 Get X Free",
@@ -3007,6 +3012,7 @@ function ModuleWorkspace({
     return <DeliveryChargeWorkspace onNotify={onNotify} />;
   if (module === "Hub") return <HubWorkspace onNotify={onNotify} />;
   if (module === "Marketing") return <MarketingWorkspace onNotify={onNotify} />;
+  if (module === "Offers") return <PromotionOffersWorkspace onNotify={onNotify} showOffersDashboard />;
   if (module === "Buy 1 Get X Free") return <PromotionOffersWorkspace onNotify={onNotify} />;
   if (module === "Collections")
     return <CollectionsWorkspace onNotify={onNotify} />;
@@ -6126,7 +6132,7 @@ type PromotionCatalogOption = {
   variants: Array<{ name: string; size?: string; image?: string; stock?: number; price?: number }>;
 };
 
-function PromotionOffersWorkspace({ onNotify }: { onNotify: (message: string) => void }) {
+function PromotionOffersWorkspace({ onNotify, showOffersDashboard = false }: { onNotify: (message: string) => void; showOffersDashboard?: boolean }) {
   const [offers, setOffers] = useState<PromotionOffer[]>([]);
   const [catalog, setCatalog] = useState<PromotionCatalogOption[]>([]);
   const [search, setSearch] = useState("");
@@ -6299,6 +6305,7 @@ function PromotionOffersWorkspace({ onNotify }: { onNotify: (message: string) =>
 
   return (
     <section className="panel module-workspace promotion-workspace">
+      {showOffersDashboard ? <OffersDashboard offers={offers} products={catalog} onNewBogo={openNew} onEdit={openEdit} onToggle={(offer) => void toggleOffer(offer)} onArchive={(offer) => void deleteOffer(offer)} onNotify={onNotify} /> : <>
       <div className="module-workspace-head">
         <div><p className="eyebrow">PROMOTIONS</p><h2>Buy 1 Get X Free</h2><p>Choose one product, then let customers select 1–4 free variants or sizes from that same product.</p></div>
         <div className="module-actions"><button className="module-secondary" onClick={() => onNotify("Offer report is ready from usage data")}>View report ↗</button><button className="module-primary" onClick={openNew}>+ Create offer</button></div>
@@ -6313,6 +6320,8 @@ function PromotionOffersWorkspace({ onNotify }: { onNotify: (message: string) =>
         )) : <div className="promotion-empty"><span>✦</span><h3>No promotional offers yet</h3><p>Create a Buy 1 Get 1, Buy 1 Get 2, Buy 1 Get 3, or Buy 1 Get 4 offer for one product.</p><button className="module-primary" onClick={openNew}>Create your first offer</button></div>}
       </div>
       <div className="promotion-footnote"><strong>Operational safeguards</strong><span>Offers are stored with reusable product/variant IDs. Status, dates, usage limits, and selection rules are checked before a storefront application is accepted.</span></div>
+
+      </>}
 
       {selected && <div className="product-modal-backdrop" onClick={() => setSelected(null)}><div className="product-detail-card promotion-detail-modal" onClick={(event) => event.stopPropagation()}><p className="eyebrow">{offerTypeLabel(selected)}</p><h3>{selected.name}</h3><p className="product-detail-meta">{selected.description || "No description added."}</p><div className="promotion-detail-grid"><span><small>Status</small><strong>{selected.status}</strong></span><span><small>Usage</small><strong>{selected.usageCount}{selected.maxTotalUsage ? ` / ${selected.maxTotalUsage}` : ""}</strong></span><span><small>Paid scope</small><strong>{selected.eligiblePaid.length || "All"}</strong></span><span><small>Free scope</small><strong>{selected.eligibleFree.length || "Same product"}</strong></span></div><p className="promotion-rules">{selected.allowMultipleQualifyingSets ? "Multiple qualifying sets enabled" : "Applies once per cart"} · {selected.allowSameVariantMultipleTimes ? "Repeat variants allowed" : "Unique variants only"} · {selected.automatic ? "Automatic" : `Coupon ${selected.couponCode || "required"}`}</p><div className="product-detail-actions"><button className="module-primary" onClick={() => openEdit(selected)}>Edit offer</button><button className="module-secondary" onClick={() => void toggleOffer(selected)}>{selected.status === "Active" ? "Deactivate" : "Activate"}</button><button className="module-secondary" onClick={() => setSelected(null)}>Close</button></div></div></div>}
 
