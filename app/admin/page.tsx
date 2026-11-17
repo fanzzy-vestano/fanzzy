@@ -1,7 +1,7 @@
 "use client";
 /* eslint-disable react-hooks/set-state-in-effect, react-hooks/refs */
 
-import { Component, memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ErrorInfo } from "react";
+import { Component, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ErrorInfo } from "react";
 import { Eye, Pencil, Printer, Trash2 } from "lucide-react";
 import QRCode from "react-qr-code";
 import DelhiveryPickupSelect from "./DelhiveryPickupSelect";
@@ -1579,6 +1579,16 @@ function AdminLoginGate() {
 
 function AdminDashboard() {
   const [active, setActive] = useState("Overview");
+  const workspaceRef = useRef<HTMLElement>(null);
+  const scrollWorkspaceToTop = useCallback(() => {
+    // Desktop scrolls the workspace panel. On mobile the document scrolls.
+    workspaceRef.current?.scrollTo({ top: 0, behavior: "instant" });
+    window.scrollTo({ top: 0, behavior: "instant" });
+  }, []);
+  useLayoutEffect(() => {
+    if (active === "Products") scrollWorkspaceToTop();
+  }, [active, scrollWorkspaceToTop]);
+
   const [liveDate, setLiveDate] = useState(() => new Date());
   const [adminRoles, setAdminRoles] = useState<AdminRole[]>(defaultAdminRoles);
   const [activeRoleId, setActiveRoleId] = useState("vestano");
@@ -1946,6 +1956,7 @@ function AdminDashboard() {
                   setPosWorkspaceRequest((current) => current + 1);
                   return;
                 }
+                if (item.label === "Products" && active === "Products") scrollWorkspaceToTop();
                 setActive(item.label);
               }}
             >
@@ -1969,6 +1980,7 @@ function AdminDashboard() {
         </div>
       </aside>
       <section
+        ref={workspaceRef}
         className={`admin-content ${active !== "Overview" ? "module-active" : ""}`}
       >
         <header className="admin-topbar">
