@@ -42,16 +42,16 @@ jobs:
       - name: Verify rendered pages
         run: pnpm test:rendered
       - name: Configure GitHub Pages
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/codex/sms-only-otp'
         uses: actions/configure-pages@v5
       - name: Upload the verified application
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/codex/sms-only-otp'
         uses: actions/upload-pages-artifact@v4
         with:
           path: docs
 
   deploy:
-    if: github.ref == 'refs/heads/master'
+    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/codex/sms-only-otp'
     needs: verify
     runs-on: ubuntu-latest
     environment:

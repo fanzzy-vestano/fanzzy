@@ -60,6 +60,14 @@ import { AdminInstallButton } from "./admin-install";
 
 const isLocalTestPreview = process.env.NEXT_PUBLIC_FANZZY_ENV === "local-test";
 
+let walkInReturnRequestSequence = 0;
+
+const createWalkInReturnRequestId = (orderId: string, orderItemId: string, index: number) => {
+  walkInReturnRequestSequence += 1;
+  const token = globalThis.crypto?.randomUUID?.() || `fallback-${walkInReturnRequestSequence}`;
+  return `walk-in-${orderId}-${orderItemId}-${token}-${index}`;
+};
+
 type AdminProduct = {
   name: string;
   sku: string;
@@ -6529,7 +6537,7 @@ function PosRefundsWorkspace({ onNotify, embedded = false }: { onNotify: (messag
             settlementStatus,
             cashAmount: parseMoneyValue(cashAmount),
             staffMember,
-            clientRequestId: `walk-in-${summary.order.id}-${selection.line.id}-${Date.now()}-${index}`,
+            clientRequestId: createWalkInReturnRequestId(summary.order.id, selection.line.id, index),
           }),
         });
         const result = await response.json() as { record?: WalkInReturnRecord; summary?: ReturnOrderSummary; error?: string };

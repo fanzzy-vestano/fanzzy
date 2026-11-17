@@ -79,7 +79,7 @@ const capturedPayment = {
 function refundModule(orders, options = {}) {
   const writes = [];
   const providerReads = [];
-  const module = load({
+  const refundService = load({
     "node:crypto": { createHash },
     "./payment-policy": {
       paymentConfigurationError: () => null,
@@ -121,13 +121,13 @@ function refundModule(orders, options = {}) {
       });
     }),
   });
-  return { module, writes, providerReads };
+  return { refundService, writes, providerReads };
 }
 
 test("server-side cancelled-order refund uses the saved cancellation amount and records Razorpay's reference", async () => {
   const orders = [paidOrder()];
-  const { module, writes } = refundModule(orders);
-  const result = await module.issueCancellationRazorpayRefund("#FZ-REFUND-01", "cancel_fixture");
+  const { refundService, writes } = refundModule(orders);
+  const result = await refundService.issueCancellationRazorpayRefund("#FZ-REFUND-01", "cancel_fixture");
 
   assert.equal(result.refundReference, "rfnd_fixture");
   assert.equal(result.providerStatus, "processed");
@@ -141,7 +141,7 @@ test("server-side cancelled-order refund uses the saved cancellation amount and 
 test("existing deterministic Razorpay refund is recorded without another provider write", async () => {
   const orders = [paidOrder()];
   const receipt = `fanzzy-cancel-${createHash("sha256").update("#FZ-REFUND-01:cancel_fixture").digest("hex").slice(0, 20)}`;
-  const { module, writes, providerReads } = refundModule(orders, {
+  const { refundService, writes, providerReads } = refundModule(orders, {
     existingRefund: {
       id: "rfnd_existing",
       payment_id: "pay_fixture",
@@ -155,7 +155,7 @@ test("existing deterministic Razorpay refund is recorded without another provide
     },
   });
 
-  const result = await module.issueCancellationRazorpayRefund("#FZ-REFUND-01", "cancel_fixture");
+  const result = await refundService.issueCancellationRazorpayRefund("#FZ-REFUND-01", "cancel_fixture");
   assert.equal(result.refundReference, "rfnd_existing");
   assert.equal(writes.length, 1);
   assert.equal(providerReads.some((path) => path.includes("/refunds")), true);
@@ -164,9 +164,9 @@ test("existing deterministic Razorpay refund is recorded without another provide
 test("COD or uncaptured orders are rejected before Razorpay is called", async () => {
   const order = paidOrder();
   order.paymentMethod = "cod";
-  const { module, writes, providerReads } = refundModule([order]);
+  const { refundService, writes, providerReads } = refundModule([order]);
   await assert.rejects(
-    () => module.issueCancellationRazorpayRefund("#FZ-REFUND-01", "cancel_fixture"),
+    () => refundService.issueCancellationRazorpayRefund("#FZ-REFUND-01", "cancel_fixture"),
     /Only captured online payments/,
   );
   assert.equal(writes.length, 0);
@@ -176,9 +176,9 @@ test("COD or uncaptured orders are rejected before Razorpay is called", async ()
 test("old local placeholder payments are never sent to Razorpay", async () => {
   const order = paidOrder();
   order.razorpayPaymentId = "pay_local_cancel_razorpay_001";
-  const { module, writes, providerReads } = refundModule([order]);
+  const { refundService, writes, providerReads } = refundModule([order]);
   await assert.rejects(
-    () => module.issueCancellationRazorpayRefund("#FZ-REFUND-01", "cancel_fixture"),
+    () => refundService.issueCancellationRazorpayRefund("#FZ-REFUND-01", "cancel_fixture"),
     /local sample cancellation/,
   );
   assert.equal(writes.length, 0);
