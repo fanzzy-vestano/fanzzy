@@ -1,17 +1,39 @@
-﻿"use client";
+"use client";
 
 /* eslint-disable react-hooks/set-state-in-effect, react/no-unescaped-entities */
 
-import { memo, type FormEvent, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { filterCatalogProducts } from "../lib/catalog/catalog-visibility";
+
+import {
+  memo,
+  type FormEvent,
+  type PointerEvent as ReactPointerEvent,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { fetchHomepageSettings } from "../lib/homepage-settings";
+import { onlineRefundChoices } from "../lib/online-refund-selection";
+import { evaluateSalesPromotions, parseSalesPromotions, type SalesPromotion } from "../lib/sales-promotions";
+import { calculateWebsiteSalesPromotion, websitePromotionClock, websiteProductOffer } from "../lib/website-sales-promotions";
+import {
+  fetchCustomerOrders,
+  savePendingCustomerOrder,
+} from "../lib/customer-orders";
+import {
+  removeOptionalBrowserCache,
+  writeOptionalBrowserCache,
+} from "../lib/optional-browser-cache";
 import {
   fetchCatalogCategories,
   fetchCatalogProducts,
-  fetchStoreOrders,
   fetchStoreSetting,
   fetchStoreSettings,
   fetchVendorCategoryNames,
   inferLegacyCategorySections,
-  saveStoreOrders,
   saveStoreSetting,
   subscribeToCatalogProducts,
   subscribeToStoreSetting,
@@ -21,7 +43,6 @@ import {
   type ProductVariantType,
 } from "../lib/supabase/catalog";
 import { isGenericLuxuryCategoryName } from "../lib/catalog-categories";
-import { printOrderBill } from "../lib/order-bill";
 import { storefrontImageProps } from "../lib/storefront-images";
 import {
   clearCustomerAuthTokens,
@@ -31,7 +52,17 @@ import {
   saveCustomerAuthTokens,
   saveCustomerAuthUser,
 } from "../lib/customer-auth-client";
-import { customerApiFetch, siteApiFetch } from "../lib/site-api-client";
+import {
+  customerCancellationReasons,
+  isCustomerCancellationReason,
+  type CustomerCancellationRecord,
+  type CustomerCancellationReason,
+} from "../lib/customer-cancellation";
+import {
+  customerApiFetch,
+  customerAuthorizedFetch,
+  siteApiFetch,
+} from "../lib/site-api-client";
 import {
   allocateBundlePrices,
   isPromotionLive,
@@ -91,7 +122,13 @@ type StorefrontVendor = {
   featured: boolean;
 };
 type ImageAdjustments = { zoom: number; x: number; y: number; rotate: number };
-type ProductVariant = { name: string; size?: string; image: string; stock?: number; adjustments?: ImageAdjustments };
+type ProductVariant = {
+  name: string;
+  size?: string;
+  image: string;
+  stock?: number;
+  adjustments?: ImageAdjustments;
+};
 type ProductImageAdjustments = {
   image?: ImageAdjustments;
   hoverImage?: ImageAdjustments;
@@ -102,17 +139,65 @@ type StorefrontPageHistoryState = {
   search: string;
   scrollY: number;
 };
-type DeliveryCharge = { enabled: boolean; amount: number; freeAboveEnabled: boolean; freeAbove: number };
+type DeliveryCharge = {
+  enabled: boolean;
+  amount: number;
+  freeAboveEnabled: boolean;
+  freeAbove: number;
+};
 type PickupHub = { id: string; name: string; place: string };
 type FulfillmentMethod = "delivery" | "pickup";
 type PaymentMethod = "online" | "cod";
-type PaymentSettings = { online: boolean; cod: boolean; provider: string; codCharge: number };
+type PaymentSettings = {
+  online: boolean;
+  cod: boolean;
+  provider: string;
+  codCharge: number;
+};
 type RefundRequestStatus = "Requested" | "Approved" | "Rejected" | "Refunded";
-type RefundRequest = { id: string; orderId: string; userId: string; customerName: string; phone: string; amount: string; status: RefundRequestStatus; reason: string; createdAt: string; updatedAt?: string };
-type MarketingRecord = { kind: "Campaign" | "Coupon" | "Newsletter"; name: string; detail: string; status: "Active" | "Scheduled" | "Draft"; code?: string; discount?: string; offerType?: "bogo"; buyQuantity?: number; getQuantity?: number; eligibleProductIds?: string[] };
-type PromotionCartLine = { groupId: string; offerId: string; role: "paid" | "free" | "bundle"; label: string; regularPrice: number; linePrice: number };
-type DelhiveryScan = { status: string; date?: string; location?: string; instructions?: string };
-type OrderStatus = "Processing" | "Packed" | "Shipped" | "Delivered" | "Cancelled";
+type RequestedReturnItem = { orderItemId: string; quantity: number };
+type RefundRequest = {
+  id: string;
+  orderId: string;
+  userId: string;
+  customerName: string;
+  phone: string;
+  amount: string;
+  status: RefundRequestStatus;
+  reason: string;
+  createdAt: string;
+  updatedAt?: string;
+  requestedItemIds?: string[];
+  requestedItems?: RequestedReturnItem[];
+};
+type MarketingRecord = {
+  kind: "Campaign" | "Coupon" | "Newsletter";
+  name: string;
+  detail: string;
+  status: "Active" | "Scheduled" | "Draft";
+  code?: string;
+  discount?: string;
+  offerType?: "bogo";
+  buyQuantity?: number;
+  getQuantity?: number;
+  eligibleProductIds?: string[];
+};
+type PromotionCartLine = {
+  groupId: string;
+  offerId: string;
+  role: "paid" | "free" | "bundle";
+  label: string;
+  regularPrice: number;
+  linePrice: number;
+};
+type DelhiveryScan = {
+  status: string;
+  date?: string;
+  location?: string;
+  instructions?: string;
+};
+type OrderStatus =
+  "Processing" | "Packed" | "Shipped" | "Delivered" | "Cancelled";
 type CustomerOrder = {
   id: string;
   userId: string;
@@ -136,6 +221,7 @@ type CustomerOrder = {
   shippingTotal?: number;
   paymentStatus?: "pending" | "paid" | "cod_pending" | "cod_collected";
   paymentMethod?: PaymentMethod;
+  returnStatus?: "Returned" | "Partially returned" | "Refunded";
   codCharge?: number;
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
@@ -143,12 +229,25 @@ type CustomerOrder = {
   inventoryReservedAt?: string;
   inventoryReleased?: boolean;
   inventoryAdjusted?: boolean;
+  cancelledAt?: string;
+  cancelledBy?: "customer" | "admin";
+  cancellationReason?: CustomerCancellationReason;
+  cancellationDescription?: string;
+  cancellationRecords?: CustomerCancellationRecord[];
+  refundStatus?: "Not applicable" | "Pending" | "Completed" | "Refunded";
+  refundReference?: string;
   delhiveryAwb?: string;
   delhiveryTrackingUrl?: string;
-  delhiveryShipmentStatus?: "pending" | "created" | "failed" | "skipped";
+  delhiveryShipmentStatus?:
+    | "awaiting_weight"
+    | "pending"
+    | "created"
+    | "failed"
+    | "skipped";
   delhiveryShipmentError?: string;
   delhiveryShipmentCreatedAt?: string;
-  delhiveryPickupRequestStatus?: "pending" | "created" | "covered" | "failed" | "skipped";
+  delhiveryPickupRequestStatus?:
+    "pending" | "created" | "covered" | "failed" | "skipped";
   delhiveryPickupRequestId?: string;
   delhiveryPickupRequestDate?: string;
   delhiveryPickupRequestTime?: string;
@@ -159,9 +258,31 @@ type CustomerOrder = {
   delhiveryLiveLocation?: string;
   delhiveryLastTrackedAt?: string;
   delhiveryScans?: DelhiveryScan[];
-  items?: Array<{ name: string; productName?: string; quantity: number; price: string; regularPrice?: number; productId?: string; image?: string; variantName?: string; variantImage?: string; size?: string; hsnCode?: string; supplierName?: string; vendorId?: string | null; vendorName?: string; vendorSlug?: string; promotion?: PromotionCartLine }>;
+  items?: Array<{
+    name: string;
+    productName?: string;
+    quantity: number;
+    price: string;
+    regularPrice?: number;
+    productId?: string;
+    image?: string;
+    variantName?: string;
+    variantImage?: string;
+    size?: string;
+    hsnCode?: string;
+    supplierName?: string;
+    vendorId?: string | null;
+    vendorName?: string;
+    vendorSlug?: string;
+    cancelled?: boolean;
+    promotion?: PromotionCartLine;
+  }>;
 };
-type AssistantMessage = { role: "user" | "assistant"; text: string; productIds?: string[] };
+type AssistantMessage = {
+  role: "user" | "assistant";
+  text: string;
+  productIds?: string[];
+};
 type RazorpayCheckoutResponse = {
   razorpay_order_id: string;
   razorpay_payment_id: string;
@@ -184,36 +305,74 @@ type RazorpayCheckout = { open: () => void };
 
 const readOverlayProduct = (): Product | null => {
   if (typeof window === "undefined") return null;
-  const productId = new URLSearchParams(window.location.search).get("fanzzy-product");
+  const productId = new URLSearchParams(window.location.search).get(
+    "fanzzy-product",
+  );
   if (!productId) return null;
   try {
     const stored = window.sessionStorage.getItem("fanzzy-overlay-product");
-    const product = stored ? normalizeStoredProduct(JSON.parse(stored), 0) : null;
-    const normalize = (value?: string) => String(value || "").trim().replace(/[^a-z0-9]/gi, "").toLowerCase();
-    return product && [product.id, product.sku].some((key) => normalize(key) === normalize(productId)) ? product : null;
+    const product = stored
+      ? normalizeStoredProduct(JSON.parse(stored), 0)
+      : null;
+    const normalize = (value?: string) =>
+      String(value || "")
+        .trim()
+        .replace(/[^a-z0-9]/gi, "")
+        .toLowerCase();
+    return product &&
+      [product.id, product.sku].some(
+        (key) => normalize(key) === normalize(productId),
+      )
+      ? product
+      : null;
   } catch {
     return null;
   }
 };
 const defaultProducts: Product[] = [];
-type StorefrontCategory = { name: string; count: string; image: string; section: CatalogCategorySection };
+type StorefrontCategory = {
+  name: string;
+  count: string;
+  image: string;
+  section: CatalogCategorySection;
+};
 const defaultCategories: StorefrontCategory[] = [];
 const categoryImageFallbacks: Record<string, string> = {
-  anklet: "https://images.unsplash.com/photo-1611652022419-a9419f74343d?auto=format&fit=crop&w=900&q=85",
-  anklets: "https://images.unsplash.com/photo-1611652022419-a9419f74343d?auto=format&fit=crop&w=900&q=85",
-  bracelet: "https://images.unsplash.com/photo-1611652022419-a9419f74343d?auto=format&fit=crop&w=900&q=85",
-  bracelets: "https://images.unsplash.com/photo-1611652022419-a9419f74343d?auto=format&fit=crop&w=900&q=85",
-  earring: "https://images.unsplash.com/photo-1635767798638-3e25273a8236?auto=format&fit=crop&w=900&q=85",
-  earrings: "https://images.unsplash.com/photo-1635767798638-3e25273a8236?auto=format&fit=crop&w=900&q=85",
-  necklace: "https://images.unsplash.com/photo-1617038220319-276d3cfab638?auto=format&fit=crop&w=900&q=85",
-  necklaces: "https://images.unsplash.com/photo-1617038220319-276d3cfab638?auto=format&fit=crop&w=900&q=85",
+  anklet:
+    "https://images.unsplash.com/photo-1611652022419-a9419f74343d?auto=format&fit=crop&w=900&q=85",
+  anklets:
+    "https://images.unsplash.com/photo-1611652022419-a9419f74343d?auto=format&fit=crop&w=900&q=85",
+  bracelet:
+    "https://images.unsplash.com/photo-1611652022419-a9419f74343d?auto=format&fit=crop&w=900&q=85",
+  bracelets:
+    "https://images.unsplash.com/photo-1611652022419-a9419f74343d?auto=format&fit=crop&w=900&q=85",
+  earring:
+    "https://images.unsplash.com/photo-1635767798638-3e25273a8236?auto=format&fit=crop&w=900&q=85",
+  earrings:
+    "https://images.unsplash.com/photo-1635767798638-3e25273a8236?auto=format&fit=crop&w=900&q=85",
+  necklace:
+    "https://images.unsplash.com/photo-1617038220319-276d3cfab638?auto=format&fit=crop&w=900&q=85",
+  necklaces:
+    "https://images.unsplash.com/photo-1617038220319-276d3cfab638?auto=format&fit=crop&w=900&q=85",
   ring: "https://images.unsplash.com/photo-1605100804763-247f67b3557e?auto=format&fit=crop&w=900&q=85",
-  rings: "https://images.unsplash.com/photo-1605100804763-247f67b3557e?auto=format&fit=crop&w=900&q=85",
+  rings:
+    "https://images.unsplash.com/photo-1605100804763-247f67b3557e?auto=format&fit=crop&w=900&q=85",
 };
 const categoryImageFallback = (name: string, index: number) =>
-  categoryImageFallbacks[name.trim().toLowerCase()] || Object.values(categoryImageFallbacks)[index % 4];
-const categoryFilterKey = (name: string) => name.replace(/\s*·\s*lx\s*$/i, "").trim().toLowerCase().replace(/\b(luxury|luxurious|premium)\b/g, "").replace(/[^a-z0-9]+/g, " ").trim();
-const categoryIdentityKey = (category: Pick<StorefrontCategory, "name" | "section">) => `${categoryFilterKey(category.name) || category.name.trim().toLowerCase()}::${category.section}`;
+  categoryImageFallbacks[name.trim().toLowerCase()] ||
+  Object.values(categoryImageFallbacks)[index % 4];
+const categoryFilterKey = (name: string) =>
+  name
+    .replace(/\s*·\s*lx\s*$/i, "")
+    .trim()
+    .toLowerCase()
+    .replace(/\b(luxury|luxurious|premium)\b/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+const categoryIdentityKey = (
+  category: Pick<StorefrontCategory, "name" | "section">,
+) =>
+  `${categoryFilterKey(category.name) || category.name.trim().toLowerCase()}::${category.section}`;
 const dedupeStorefrontCategories = (categories: StorefrontCategory[]) => {
   const seen = new Set<string>();
   return categories.filter((category) => {
@@ -228,17 +387,30 @@ const isRingsCategory = (name: string) => {
   const key = categoryFilterKey(name);
   return key === "ring" || key === "rings";
 };
-const isLuxuryProductCategory = (category: string) => /\s*·\s*lx\s*$/i.test(category.trim());
-const baseProductCategory = (category: string) => category.replace(/\s*·\s*lx\s*$/i, "").trim();
-const productCatalogSection = (productCategory: string, categories: StorefrontCategory[]) => {
+const isLuxuryProductCategory = (category: string) =>
+  /\s*·\s*lx\s*$/i.test(category.trim());
+const baseProductCategory = (category: string) =>
+  category.replace(/\s*·\s*lx\s*$/i, "").trim();
+const productCatalogSection = (
+  productCategory: string,
+  categories: StorefrontCategory[],
+) => {
   if (isLuxuryProductCategory(productCategory)) return "luxury" as const;
-  const categoryName = categoryFilterKey(productCategory) || baseProductCategory(productCategory).toLowerCase();
+  const categoryName =
+    categoryFilterKey(productCategory) ||
+    baseProductCategory(productCategory).toLowerCase();
   const matchingSections = new Set(
     categories
-      .filter((category) => (categoryFilterKey(category.name) || baseProductCategory(category.name).toLowerCase()) === categoryName)
+      .filter(
+        (category) =>
+          (categoryFilterKey(category.name) ||
+            baseProductCategory(category.name).toLowerCase()) === categoryName,
+      )
       .map((category) => category.section),
   );
-  return matchingSections.size === 1 && matchingSections.has("luxury") ? "luxury" as const : "normal" as const;
+  return matchingSections.size === 1 && matchingSections.has("luxury")
+    ? ("luxury" as const)
+    : ("normal" as const);
 };
 const mergeStorefrontCategoriesFromProducts = (
   categories: StorefrontCategory[],
@@ -248,16 +420,30 @@ const mergeStorefrontCategoriesFromProducts = (
   const vendorCategoryNameKeys = new Set(
     [
       ...vendorCategoryNames,
-      ...products.filter((product) => product.vendorId).map((product) => product.category),
+      ...products
+        .filter((product) => product.vendorId)
+        .map((product) => product.category),
     ]
       .map((name) => baseProductCategory(String(name || "")).toLowerCase())
       .filter(Boolean),
   );
   const nextCategories = dedupeStorefrontCategories(categories).filter(
-    (category) => !vendorCategoryNameKeys.has(baseProductCategory(category.name).toLowerCase()),
+    (category) =>
+      !vendorCategoryNameKeys.has(
+        baseProductCategory(category.name).toLowerCase(),
+      ) ||
+      products.some(
+        (product) =>
+          !product.vendorId &&
+          baseProductCategory(product.category).toLowerCase() ===
+            baseProductCategory(category.name).toLowerCase(),
+      ),
   );
   const categoryByIdentity = new Map(
-    nextCategories.map((category, index) => [categoryIdentityKey(category), index]),
+    nextCategories.map((category, index) => [
+      categoryIdentityKey(category),
+      index,
+    ]),
   );
   const productCounts = new Map<string, number>();
 
@@ -269,10 +455,8 @@ const mergeStorefrontCategoriesFromProducts = (
     const identity = categoryIdentityKey({ name, section });
     productCounts.set(identity, (productCounts.get(identity) || 0) + 1);
     if (categoryByIdentity.has(identity)) return;
-    // Vendor-defined categories belong to that vendor's storefront. Their
-    // products remain visible in All pieces, but the private category name
-    // must not become a filter in Fanzzy's main storefront catalog.
-    if (product.vendorId || vendorCategoryNameKeys.has(name.toLowerCase())) return;
+    // Vendor ownership decides visibility even when category names overlap.
+    if (product.vendorId) return;
     categoryByIdentity.set(identity, nextCategories.length);
     nextCategories.push({
       name,
@@ -284,7 +468,7 @@ const mergeStorefrontCategoriesFromProducts = (
 
   return nextCategories.map((category) => {
     const count = productCounts.get(categoryIdentityKey(category));
-    return count === undefined ? category : { ...category, count: `${count} pieces` };
+    return { ...category, count: `${count ?? 0} pieces` };
   });
 };
 const matchesCatalogCategory = (
@@ -293,9 +477,19 @@ const matchesCatalogCategory = (
   section: CatalogCategorySection | "all" = "all",
   categories: StorefrontCategory[] = [],
 ) => {
-  if (section !== "all" && productCatalogSection(productCategory, categories) !== section) return false;
-  if (isGenericLuxuryCategoryName(selectedCategory)) return productCatalogSection(productCategory, categories) === "luxury";
-  return (categoryFilterKey(productCategory) || baseProductCategory(productCategory).toLowerCase()) === (categoryFilterKey(selectedCategory) || baseProductCategory(selectedCategory).toLowerCase());
+  if (
+    section !== "all" &&
+    productCatalogSection(productCategory, categories) !== section
+  )
+    return false;
+  if (isGenericLuxuryCategoryName(selectedCategory))
+    return productCatalogSection(productCategory, categories) === "luxury";
+  return (
+    (categoryFilterKey(productCategory) ||
+      baseProductCategory(productCategory).toLowerCase()) ===
+    (categoryFilterKey(selectedCategory) ||
+      baseProductCategory(selectedCategory).toLowerCase())
+  );
 };
 const persistStorefrontProductCache = (catalog: Product[]) => {
   if (typeof window === "undefined") return;
@@ -307,15 +501,22 @@ const persistStorefrontProductCache = (catalog: Product[]) => {
     // the complete product list cached while dropping only those heavy blobs.
   }
   try {
-    window.localStorage.setItem("fanzzy-products", JSON.stringify(catalog.map((product) => ({
-      ...product,
-      image: product.image.startsWith("data:") ? "" : product.image,
-      hoverImage: product.hoverImage?.startsWith("data:") ? "" : product.hoverImage,
-      variants: product.variants?.map((variant) => ({
-        ...variant,
-        image: variant.image?.startsWith("data:") ? "" : variant.image,
-      })),
-    }))));
+    window.localStorage.setItem(
+      "fanzzy-products",
+      JSON.stringify(
+        catalog.map((product) => ({
+          ...product,
+          image: product.image.startsWith("data:") ? "" : product.image,
+          hoverImage: product.hoverImage?.startsWith("data:")
+            ? ""
+            : product.hoverImage,
+          variants: product.variants?.map((variant) => ({
+            ...variant,
+            image: variant.image?.startsWith("data:") ? "" : variant.image,
+          })),
+        })),
+      ),
+    );
   } catch {
     // Supabase remains the source of truth when browser storage is full.
   }
@@ -327,117 +528,290 @@ const demoProductNames = new Set([
   "orbital pearl ring",
 ]);
 const isDemoProduct = (product: { name?: string; sku?: string }) =>
-  demoProductNames.has(String(product.name ?? "").trim().toLowerCase()) ||
-  /^LST-(AUR|SOL|MUS|ORB)-\d+$/i.test(String(product.sku ?? ""));
-const isDemoOrder = (order: { id?: string }) => /^#FZ-104[4-8]$/.test(String(order.id ?? ""));
-const isPaidOrder = (order: Pick<CustomerOrder, "paymentStatus" | "razorpayPaymentId">) => order.paymentStatus === "paid" || order.paymentStatus === "cod_pending" || order.paymentStatus === "cod_collected" || Boolean(order.razorpayPaymentId);
-const normalizePhone = (value?: string) => String(value || "").replace(/\D/g, "").replace(/^0+/, "");
-const belongsToCustomer = (order: Pick<CustomerOrder, "userId" | "userPhone" | "phone">, customer: CustomerAuthUser) => {
+  demoProductNames.has(
+    String(product.name ?? "")
+      .trim()
+      .toLowerCase(),
+  ) || /^LST-(AUR|SOL|MUS|ORB)-\d+$/i.test(String(product.sku ?? ""));
+const isDemoOrder = (order: { id?: string }) =>
+  /^#FZ-104[4-8]$/.test(String(order.id ?? ""));
+const isPaidOrder = (
+  order: Pick<CustomerOrder, "paymentStatus" | "razorpayPaymentId">,
+) =>
+  order.paymentStatus === "paid" ||
+  order.paymentStatus === "cod_pending" ||
+  order.paymentStatus === "cod_collected" ||
+  Boolean(order.razorpayPaymentId);
+type CustomerCancellationEligibility = { eligible: boolean; message: string };
+const customerOrderCancellationWindowMs = 12 * 60 * 60 * 1000;
+const formatCancellationTimeLeft = (milliseconds: number) => {
+  const minutes = Math.max(1, Math.ceil(milliseconds / 60_000));
+  const hours = Math.floor(minutes / 60);
+  return hours ? `${hours}h ${minutes % 60}m` : `${minutes}m`;
+};
+const getCustomerCancellationEligibility = (
+  order: CustomerOrder,
+  now = Date.now(),
+): CustomerCancellationEligibility => {
+  if (order.status === "Cancelled")
+    return { eligible: false, message: "This order has been cancelled." };
+  if (order.status !== "Processing")
+    return {
+      eligible: false,
+      message: "Cancellation is unavailable after order processing starts.",
+    };
+  if (
+    order.delhiveryAwb ||
+    ["pending", "created"].includes(
+      order.delhiveryShipmentStatus || "",
+    )
+  )
+    return {
+      eligible: false,
+      message: "Cancellation is unavailable after shipment processing starts.",
+    };
+  const placedAt = Date.parse(order.createdAt || "");
+  if (!Number.isFinite(placedAt))
+    return {
+      eligible: false,
+      message: "Cancellation timing is unavailable for this order.",
+    };
+  const remaining = customerOrderCancellationWindowMs - (now - placedAt);
+  if (remaining <= 0)
+    return {
+      eligible: false,
+      message: "The 12-hour cancellation window has ended.",
+    };
+  return {
+    eligible: true,
+    message: `Cancel available for ${formatCancellationTimeLeft(remaining)}.`,
+  };
+};
+const normalizePhone = (value?: string) =>
+  String(value || "")
+    .replace(/\D/g, "")
+    .replace(/^0+/, "");
+const belongsToCustomer = (
+  order: Pick<CustomerOrder, "userId" | "userPhone" | "phone">,
+  customer: CustomerAuthUser,
+) => {
   if (order.userId === customer.id) return true;
-  const orderPhone = normalizePhone(order.userPhone) || normalizePhone(order.phone);
+  const orderPhone =
+    normalizePhone(order.userPhone) || normalizePhone(order.phone);
   return Boolean(orderPhone && orderPhone === normalizePhone(customer.phone));
 };
 const isCustomerOrder = (order: CustomerOrder, customer: CustomerAuthUser) =>
-  belongsToCustomer(order, customer) && !isDemoOrder(order) && (isPaidOrder(order) || order.paymentStatus == null);
+  belongsToCustomer(order, customer) &&
+  !isDemoOrder(order) &&
+  (isPaidOrder(order) || order.paymentStatus == null);
 const ordersHaveSameData = (current: CustomerOrder[], next: CustomerOrder[]) =>
-  current.length === next.length && current.every((order, index) => JSON.stringify(order) === JSON.stringify(next[index]));
+  current.length === next.length &&
+  current.every(
+    (order, index) => JSON.stringify(order) === JSON.stringify(next[index]),
+  );
 
-const formatINR = (value: number) => `₹${(Number.isFinite(value) ? value : 0).toLocaleString("en-IN")}`;
-const normalizeProductKey = (value?: string) => String(value || "").trim().replace(/[^a-z0-9]/gi, "").toLowerCase();
-const matchesProductKey = (product: Pick<Product, "id" | "sku">, value?: string) => {
+const formatINR = (value: number) =>
+  `₹${(Number.isFinite(value) ? value : 0).toLocaleString("en-IN")}`;
+const normalizeProductKey = (value?: string) =>
+  String(value || "")
+    .trim()
+    .replace(/[^a-z0-9]/gi, "")
+    .toLowerCase();
+const matchesProductKey = (
+  product: Pick<Product, "id" | "sku">,
+  value?: string,
+) => {
   const normalizedValue = normalizeProductKey(value);
-  return Boolean(normalizedValue) && (normalizedValue === normalizeProductKey(product.id) || normalizedValue === normalizeProductKey(product.sku));
+  return (
+    Boolean(normalizedValue) &&
+    (normalizedValue === normalizeProductKey(product.id) ||
+      normalizedValue === normalizeProductKey(product.sku))
+  );
 };
-const getProductSetting = <T,>(settings: Record<string, T>, ...keys: Array<string | undefined>) => {
+const getProductSetting = <T,>(
+  settings: Record<string, T>,
+  ...keys: Array<string | undefined>
+) => {
   for (const key of keys) {
     if (key && settings[key] !== undefined) return settings[key];
   }
   const normalizedKeys = new Set(keys.map(normalizeProductKey).filter(Boolean));
-  return Object.entries(settings).find(([key]) => normalizedKeys.has(normalizeProductKey(key)))?.[1];
+  return Object.entries(settings).find(([key]) =>
+    normalizedKeys.has(normalizeProductKey(key)),
+  )?.[1];
 };
 const getCustomerPrice = (product: Pick<Product, "price">) => product.price;
-const getProductDiscountPercent = (product: Pick<Product, "id" | "sku" | "price">) => {
+const getProductDiscountPercent = (
+  product: Pick<Product, "id" | "sku" | "price">,
+) => {
   const salePrice = Number(product.price);
   if (!Number.isFinite(salePrice) || salePrice <= 0) return 0;
   const key = normalizeProductKey(product.id || product.sku);
   const maxExclusive = salePrice < 100 ? 9 : 10;
-  const hash = Array.from(key).reduce((total, character) => (total * 31 + character.charCodeAt(0)) % maxExclusive, 0);
+  const hash = Array.from(key).reduce(
+    (total, character) => (total * 31 + character.charCodeAt(0)) % maxExclusive,
+    0,
+  );
   return (salePrice < 100 ? 68 : 51) + hash;
 };
 const getComparePrice = (product: Pick<Product, "id" | "sku" | "price">) => {
   const salePrice = Number(product.price);
   const discount = getProductDiscountPercent(product);
-  if (!Number.isFinite(salePrice) || salePrice <= 0 || discount <= 0) return salePrice;
-  const idealMrp = Math.max(salePrice + 1, Math.ceil(salePrice / (1 - discount / 100)));
-  for (let mrp = Math.max(salePrice + 1, idealMrp - 2); mrp <= idealMrp + 2; mrp += 1) {
+  if (!Number.isFinite(salePrice) || salePrice <= 0 || discount <= 0)
+    return salePrice;
+  const idealMrp = Math.max(
+    salePrice + 1,
+    Math.ceil(salePrice / (1 - discount / 100)),
+  );
+  for (
+    let mrp = Math.max(salePrice + 1, idealMrp - 2);
+    mrp <= idealMrp + 2;
+    mrp += 1
+  ) {
     if (Math.round(((mrp - salePrice) / mrp) * 100) === discount) return mrp;
   }
   return idealMrp;
 };
-const getProductVariantType = (product: Pick<Product, "variantType" | "sizes" | "sizeStock" | "variants">): ProductVariantType =>
-  product.variantType || (
-    product.sizes?.length || Object.keys(product.sizeStock || {}).length || product.variants?.some((variant) => Boolean(variant.size))
-      ? "size"
-      : "normal"
-  );
-const getProductSizes = (product: Pick<Product, "variantType" | "sizes" | "sizeStock" | "variants">) =>
+const getProductVariantType = (
+  product: Pick<Product, "variantType" | "sizes" | "sizeStock" | "variants">,
+): ProductVariantType =>
+  product.variantType ||
+  (product.sizes?.length ||
+  Object.keys(product.sizeStock || {}).length ||
+  product.variants?.some((variant) => Boolean(variant.size))
+    ? "size"
+    : "normal");
+const getProductSizes = (
+  product: Pick<Product, "variantType" | "sizes" | "sizeStock" | "variants">,
+) =>
   getProductVariantType(product) === "size" && product.variants?.length
-    ? product.variants.map((variant) => variant.size || variant.name).filter(Boolean)
+    ? product.variants
+        .map((variant) => variant.size || variant.name)
+        .filter(Boolean)
     : product.sizes || [];
-const getSizeVariant = (product: Pick<Product, "variantType" | "sizes" | "sizeStock" | "variants">, size?: string | null) =>
-  size ? product.variants?.find((variant) => getProductVariantType(product) === "size" && (variant.size || variant.name) === size) : undefined;
-type StockProduct = Pick<Product, "stock"> & Partial<Pick<Product, "sizeStock" | "variantType" | "sizes" | "variants">> & { size?: string | null };
+const getSizeVariant = (
+  product: Pick<Product, "variantType" | "sizes" | "sizeStock" | "variants">,
+  size?: string | null,
+) =>
+  size
+    ? product.variants?.find(
+        (variant) =>
+          getProductVariantType(product) === "size" &&
+          (variant.size || variant.name) === size,
+      )
+    : undefined;
+type StockProduct = Pick<Product, "stock"> &
+  Partial<Pick<Product, "sizeStock" | "variantType" | "sizes" | "variants">> & {
+    size?: string | null;
+  };
 const getSizeStock = (product: StockProduct, size?: string | null) => {
   if (!size) return product.stock;
-  const normalizedSize = String(size).trim().replace(/^size\s+/i, "").toLowerCase();
-  const sizeStockKey = Object.keys(product.sizeStock || {}).find((key) => key.trim().replace(/^size\s+/i, "").toLowerCase() === normalizedSize);
-  const savedSizeStock = sizeStockKey ? product.sizeStock?.[sizeStockKey] : undefined;
+  const normalizedSize = String(size)
+    .trim()
+    .replace(/^size\s+/i, "")
+    .toLowerCase();
+  const sizeStockKey = Object.keys(product.sizeStock || {}).find(
+    (key) =>
+      key
+        .trim()
+        .replace(/^size\s+/i, "")
+        .toLowerCase() === normalizedSize,
+  );
+  const savedSizeStock = sizeStockKey
+    ? product.sizeStock?.[sizeStockKey]
+    : undefined;
   // The dedicated size-stock record is shared inventory and therefore takes
   // priority over any cached variant value from an older browser session.
-  if (savedSizeStock !== undefined) return Math.max(0, Math.floor(Number(savedSizeStock) || 0));
-  const sizeVariant = product.variants?.find((variant) => String(variant.size || variant.name).trim().replace(/^size\s+/i, "").toLowerCase() === normalizedSize);
+  if (savedSizeStock !== undefined)
+    return Math.max(0, Math.floor(Number(savedSizeStock) || 0));
+  const sizeVariant = product.variants?.find(
+    (variant) =>
+      String(variant.size || variant.name)
+        .trim()
+        .replace(/^size\s+/i, "")
+        .toLowerCase() === normalizedSize,
+  );
   if (sizeVariant?.stock !== undefined && sizeVariant.stock !== null) {
     const variantStock = Number(sizeVariant.stock);
-    if (Number.isFinite(variantStock)) return Math.max(0, Math.floor(variantStock));
+    if (Number.isFinite(variantStock))
+      return Math.max(0, Math.floor(variantStock));
   }
   return product.stock;
 };
-const getVariantStock = (product: StockProduct, variant?: ProductVariant | null) => {
-  if (getProductVariantType(product) === "size" && product.size) return getSizeStock(product, product.size);
-  if (variant?.stock === undefined || variant.stock === null) return product.stock;
+const getVariantStock = (
+  product: StockProduct,
+  variant?: ProductVariant | null,
+) => {
+  if (getProductVariantType(product) === "size" && product.size)
+    return getSizeStock(product, product.size);
+  if (variant?.stock === undefined || variant.stock === null)
+    return product.stock;
   const stock = Number(variant.stock);
-  return Number.isFinite(stock) ? Math.max(0, Math.floor(stock)) : product.stock;
+  return Number.isFinite(stock)
+    ? Math.max(0, Math.floor(stock))
+    : product.stock;
 };
-const getSelectionStock = (product: Pick<Product, "stock" | "sizeStock" | "variantType" | "sizes" | "variants">, variant?: ProductVariant | null, size?: string | null) => {
-  if (getProductVariantType(product) === "size") return getSizeStock(product, size);
+const getSelectionStock = (
+  product: Pick<
+    Product,
+    "stock" | "sizeStock" | "variantType" | "sizes" | "variants"
+  >,
+  variant?: ProductVariant | null,
+  size?: string | null,
+) => {
+  if (getProductVariantType(product) === "size")
+    return getSizeStock(product, size);
   return variant ? getVariantStock(product, variant) : product.stock;
 };
-const loadRazorpayCheckout = () => new Promise<new (options: RazorpayCheckoutOptions) => RazorpayCheckout>((resolve, reject) => {
-  const existing = (window as Window & { Razorpay?: new (options: RazorpayCheckoutOptions) => RazorpayCheckout }).Razorpay;
-  if (existing) return resolve(existing);
-  const script = document.createElement("script");
-  script.src = "https://checkout.razorpay.com/v1/checkout.js";
-  script.async = true;
-  script.onload = () => {
-    const razorpay = (window as Window & { Razorpay?: new (options: RazorpayCheckoutOptions) => RazorpayCheckout }).Razorpay;
-    if (razorpay) resolve(razorpay);
-    else reject(new Error("Razorpay checkout did not load"));
-  };
-  script.onerror = () => reject(new Error("Razorpay checkout could not load"));
-  document.body.appendChild(script);
-});
+const loadRazorpayCheckout = () =>
+  new Promise<new (options: RazorpayCheckoutOptions) => RazorpayCheckout>(
+    (resolve, reject) => {
+      const existing = (
+        window as Window & {
+          Razorpay?: new (options: RazorpayCheckoutOptions) => RazorpayCheckout;
+        }
+      ).Razorpay;
+      if (existing) return resolve(existing);
+      const script = document.createElement("script");
+      script.src = "https://checkout.razorpay.com/v1/checkout.js";
+      script.async = true;
+      script.onload = () => {
+        const razorpay = (
+          window as Window & {
+            Razorpay?: new (
+              options: RazorpayCheckoutOptions,
+            ) => RazorpayCheckout;
+          }
+        ).Razorpay;
+        if (razorpay) resolve(razorpay);
+        else reject(new Error("Razorpay checkout did not load"));
+      };
+      script.onerror = () =>
+        reject(new Error("Razorpay checkout could not load"));
+      document.body.appendChild(script);
+    },
+  );
 
-const razorpayApiBaseUrl = (process.env.NEXT_PUBLIC_RAZORPAY_API_URL ?? "").replace(/\/$/, "");
-const razorpayApiUrl = (path: "order" | "verify" | "reserve-stock" | "release-stock") => razorpayApiBaseUrl
-  ? `${razorpayApiBaseUrl}/${path}`
-  : `/api/razorpay/${path}`;
+const razorpayApiBaseUrl = (
+  process.env.NEXT_PUBLIC_RAZORPAY_API_URL ?? ""
+).replace(/\/$/, "");
+const razorpayApiUrl = (
+  path: "order" | "verify" | "reserve-stock" | "release-stock",
+) =>
+  razorpayApiBaseUrl
+    ? `${razorpayApiBaseUrl}/${path}`
+    : `/api/razorpay/${path}`;
 
-const readRazorpayResponse = async <T extends Record<string, unknown>>(response: Response) => {
+const readRazorpayResponse = async <T extends Record<string, unknown>>(
+  response: Response,
+) => {
   const body = await response.text();
   try {
     return JSON.parse(body || "{}") as T;
   } catch {
-    throw new Error("Payment service is temporarily unavailable. Please try again.");
+    throw new Error(
+      "Payment service is temporarily unavailable. Please try again.",
+    );
   }
 };
 const overlayHistoryUrl = (layers: string[], productId?: string) => {
@@ -451,18 +825,40 @@ const overlayHistoryUrl = (layers: string[], productId?: string) => {
 const blockedHeroImage = "photo-1599643478518-a784e5dc4c8f";
 const initialHeroSlides: string[] = [];
 const defaultHeroSlideDuration = 5.2;
-const defaultDeliveryCharge: DeliveryCharge = { enabled: false, amount: 99, freeAboveEnabled: false, freeAbove: 999 };
-const defaultPaymentSettings: PaymentSettings = { online: true, cod: true, provider: "Razorpay", codCharge: 0 };
+const defaultDeliveryCharge: DeliveryCharge = {
+  enabled: false,
+  amount: 99,
+  freeAboveEnabled: false,
+  freeAbove: 999,
+};
+const defaultPaymentSettings: PaymentSettings = {
+  online: true,
+  cod: true,
+  provider: "Razorpay",
+  codCharge: 0,
+};
 const defaultPickupHubs: PickupHub[] = [];
-const parseDeliveryCharge = (value: string | null | undefined): DeliveryCharge => {
+const parseDeliveryCharge = (
+  value: string | null | undefined,
+): DeliveryCharge => {
   if (!value) return defaultDeliveryCharge;
   try {
     const parsed = JSON.parse(value) as Partial<DeliveryCharge>;
     return {
       enabled: parsed.enabled === true,
-      amount: Math.max(0, Number.isFinite(parsed.amount) ? Number(parsed.amount) : defaultDeliveryCharge.amount),
+      amount: Math.max(
+        0,
+        Number.isFinite(parsed.amount)
+          ? Number(parsed.amount)
+          : defaultDeliveryCharge.amount,
+      ),
       freeAboveEnabled: parsed.freeAboveEnabled === true,
-      freeAbove: Math.max(0, Number.isFinite(parsed.freeAbove) ? Number(parsed.freeAbove) : defaultDeliveryCharge.freeAbove),
+      freeAbove: Math.max(
+        0,
+        Number.isFinite(parsed.freeAbove)
+          ? Number(parsed.freeAbove)
+          : defaultDeliveryCharge.freeAbove,
+      ),
     };
   } catch {
     return defaultDeliveryCharge;
@@ -474,7 +870,9 @@ const parsePickupHubs = (value: string | null | undefined): PickupHub[] => {
     const parsed = JSON.parse(value) as unknown;
     if (!Array.isArray(parsed)) return defaultPickupHubs;
     return parsed
-      .filter((hub): hub is Partial<PickupHub> => Boolean(hub && typeof hub === "object"))
+      .filter((hub): hub is Partial<PickupHub> =>
+        Boolean(hub && typeof hub === "object"),
+      )
       .map((hub, index) => ({
         id: typeof hub.id === "string" && hub.id ? hub.id : `hub-${index + 1}`,
         name: typeof hub.name === "string" ? hub.name.trim() : "",
@@ -487,37 +885,81 @@ const parsePickupHubs = (value: string | null | undefined): PickupHub[] => {
 };
 const siteBasePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 const productTones = ["#d9c4bc", "#dad7ce", "#d0c2b0", "#e5ddd1"];
-const formatOrderDate = (value: string) => new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", year: "numeric" }).format(new Date(`${value}T00:00:00`));
-const formatOrderTime = (value?: string) => value ? new Intl.DateTimeFormat("en-IN", { hour: "2-digit", minute: "2-digit" }).format(new Date(value)) : "";
+const formatOrderDate = (value: string) =>
+  new Intl.DateTimeFormat("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  }).format(new Date(`${value}T00:00:00`));
+const formatOrderTime = (value?: string) =>
+  value
+    ? new Intl.DateTimeFormat("en-IN", {
+        hour: "2-digit",
+        minute: "2-digit",
+      }).format(new Date(value))
+    : "";
 const customerTrackingStages = [
-  { key: "ready", label: "Ready to ship", match: /manifest|ready|shipment created|confirmed/i },
-  { key: "pickup", label: "Scheduled for pickup", match: /pickup|schedule|booked/i },
-  { key: "transit", label: "In-transit", match: /transit|dispatched|picked|shipped|reached destination/i },
-  { key: "out-for-delivery", label: "Out for delivery", match: /out for delivery|out-for-delivery/i },
-  { key: "delivered", label: "Delivered", match: /delivered|successfully delivered/i },
+  {
+    key: "ready",
+    label: "Ready to ship",
+    match: /manifest|ready|shipment created|confirmed/i,
+  },
+  {
+    key: "pickup",
+    label: "Scheduled for pickup",
+    match: /pickup|schedule|booked/i,
+  },
+  {
+    key: "transit",
+    label: "In-transit",
+    match: /transit|dispatched|picked|shipped|reached destination/i,
+  },
+  {
+    key: "out-for-delivery",
+    label: "Out for delivery",
+    match: /out for delivery|out-for-delivery/i,
+  },
+  {
+    key: "delivered",
+    label: "Delivered",
+    match: /delivered|successfully delivered/i,
+  },
 ] as const;
 const customerTrackingStageIndex = (status: string) => {
   const normalized = status.toLowerCase();
   if (/delivered|successfully delivered/.test(normalized)) return 4;
   if (/out for delivery|out-for-delivery/.test(normalized)) return 3;
-  if (/transit|dispatched|picked|shipped|reached destination/.test(normalized)) return 2;
+  if (/transit|dispatched|picked|shipped|reached destination/.test(normalized))
+    return 2;
   if (/pickup|schedule|booked/.test(normalized)) return 1;
   return 0;
 };
 const formatTrackingDate = (value?: string) => {
   if (!value) return "";
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
+  return Number.isNaN(date.getTime())
+    ? value
+    : date.toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
 };
-const customerShipmentStatus = (status?: string) => /^manifested$/i.test(String(status || "").trim()) ? "Confirmed" : status || "Shipment created";
-const normalizeCouponCode = (value?: string) => String(value || "").trim().replace(/\s+/g, "").toUpperCase();
+const customerShipmentStatus = (status?: string) =>
+  /^manifested$/i.test(String(status || "").trim())
+    ? "Confirmed"
+    : status || "Shipment created";
+const normalizeCouponCode = (value?: string) =>
+  String(value || "")
+    .trim()
+    .replace(/\s+/g, "")
+    .toUpperCase();
 const parseAgentCoupons = (stored: string | null): MarketingRecord[] => {
   if (!stored) return [];
   try {
     const parsed = JSON.parse(stored) as Array<Partial<CatalogAgent>>;
     return Array.isArray(parsed)
       ? parsed
-          .filter((agent) => agent?.status !== "Paused" && agent?.name && agent?.couponCode)
+          .filter(
+            (agent) =>
+              agent?.status !== "Paused" && agent?.name && agent?.couponCode,
+          )
           .map((agent) => ({
             kind: "Coupon" as const,
             name: `${String(agent.name).trim()} agent coupon`,
@@ -531,15 +973,31 @@ const parseAgentCoupons = (stored: string | null): MarketingRecord[] => {
     return [];
   }
 };
-const parsePaymentSettings = (value: string | null | undefined): PaymentSettings => {
+const parsePaymentSettings = (
+  value: string | null | undefined,
+): PaymentSettings => {
   if (!value) return defaultPaymentSettings;
   try {
     const parsed = JSON.parse(value) as Partial<PaymentSettings>;
     return {
-      online: typeof parsed.online === "boolean" ? parsed.online : defaultPaymentSettings.online,
-      cod: typeof parsed.cod === "boolean" ? parsed.cod : defaultPaymentSettings.cod,
-      provider: typeof parsed.provider === "string" && parsed.provider.trim() ? parsed.provider.trim() : defaultPaymentSettings.provider,
-      codCharge: Math.max(0, Number.isFinite(parsed.codCharge) ? Number(parsed.codCharge) : defaultPaymentSettings.codCharge),
+      online:
+        typeof parsed.online === "boolean"
+          ? parsed.online
+          : defaultPaymentSettings.online,
+      cod:
+        typeof parsed.cod === "boolean"
+          ? parsed.cod
+          : defaultPaymentSettings.cod,
+      provider:
+        typeof parsed.provider === "string" && parsed.provider.trim()
+          ? parsed.provider.trim()
+          : defaultPaymentSettings.provider,
+      codCharge: Math.max(
+        0,
+        Number.isFinite(parsed.codCharge)
+          ? Number(parsed.codCharge)
+          : defaultPaymentSettings.codCharge,
+      ),
     };
   } catch {
     return defaultPaymentSettings;
@@ -547,7 +1005,9 @@ const parsePaymentSettings = (value: string | null | undefined): PaymentSettings
 };
 const getCouponDiscount = (coupon: MarketingRecord, subtotal: number) => {
   const base = Math.max(0, Number.isFinite(subtotal) ? subtotal : 0);
-  const discount = String(coupon.discount || "").replace(/,/g, "").trim();
+  const discount = String(coupon.discount || "")
+    .replace(/,/g, "")
+    .trim();
   const roundCurrency = (value: number) => Math.round(value * 100) / 100;
   if (!base || !discount) return 0;
 
@@ -557,10 +1017,17 @@ const getCouponDiscount = (coupon: MarketingRecord, subtotal: number) => {
     return roundCurrency(Math.min(base, (base * rate) / 100));
   }
 
-  const currencyAmount = discount.match(/(?:₹|rs\.?|inr)\s*(\d+(?:\.\d+)?)|\b(\d+(?:\.\d+)?)\s*(?:₹|rs\.?|inr)\b/i);
-  const plainAmount = discount.match(/^\s*(?:flat\s+)?(\d+(?:\.\d+)?)(?:\s*(?:off|discount))?\s*$/i);
-  const amount = Number(currencyAmount?.[1] || currencyAmount?.[2] || plainAmount?.[1] || 0);
-  if (Number.isFinite(amount) && amount > 0) return roundCurrency(Math.min(base, amount));
+  const currencyAmount = discount.match(
+    /(?:₹|rs\.?|inr)\s*(\d+(?:\.\d+)?)|\b(\d+(?:\.\d+)?)\s*(?:₹|rs\.?|inr)\b/i,
+  );
+  const plainAmount = discount.match(
+    /^\s*(?:flat\s+)?(\d+(?:\.\d+)?)(?:\s*(?:off|discount))?\s*$/i,
+  );
+  const amount = Number(
+    currencyAmount?.[1] || currencyAmount?.[2] || plainAmount?.[1] || 0,
+  );
+  if (Number.isFinite(amount) && amount > 0)
+    return roundCurrency(Math.min(base, amount));
   return 0;
 };
 const isBogoCampaign = (campaign: MarketingRecord | null) => {
@@ -582,12 +1049,23 @@ const localProductVariantsKey = "fanzzy-product-variants";
 const checkoutAfterAuthKey = "fanzzy-checkout-after-auth";
 const ordersAfterAuthKey = "fanzzy-orders-after-auth";
 const cartStorageKey = (userId: string) => `fanzzy-cart:${userId}`;
-const cartVariantsStorageKey = (userId: string) => `fanzzy-cart-variants:${userId}`;
-const defaultImageAdjustments: ImageAdjustments = { zoom: 1, x: 0, y: 0, rotate: 0 };
+const cartVariantsStorageKey = (userId: string) =>
+  `fanzzy-cart-variants:${userId}`;
+const defaultImageAdjustments: ImageAdjustments = {
+  zoom: 1,
+  x: 0,
+  y: 0,
+  rotate: 0,
+};
 const normalizeImageAdjustments = (value: unknown): ImageAdjustments => {
-  const source = value && typeof value === "object" ? value as Partial<ImageAdjustments> : {};
+  const source =
+    value && typeof value === "object"
+      ? (value as Partial<ImageAdjustments>)
+      : {};
   const numberOr = (candidate: unknown, fallback: number) =>
-    typeof candidate === "number" && Number.isFinite(candidate) ? candidate : fallback;
+    typeof candidate === "number" && Number.isFinite(candidate)
+      ? candidate
+      : fallback;
   return {
     zoom: Math.min(2, Math.max(1, numberOr(source.zoom, 1))),
     x: Math.min(50, Math.max(-50, numberOr(source.x, 0))),
@@ -610,50 +1088,102 @@ function normalizeStoredProduct(value: unknown, index: number): Product | null {
   const name = typeof raw.name === "string" ? raw.name.trim() : "";
   if (!name) return null;
   const rawPrice = raw.price;
-  const price = typeof rawPrice === "number" ? rawPrice : Number(String(rawPrice ?? "").replace(/[^0-9.]/g, ""));
+  const price =
+    typeof rawPrice === "number"
+      ? rawPrice
+      : Number(String(rawPrice ?? "").replace(/[^0-9.]/g, ""));
   const rawCompareAt = raw.compareAt;
-  const compareAt = typeof rawCompareAt === "number" ? rawCompareAt : Number(String(rawCompareAt ?? "").replace(/[^0-9.]/g, ""));
-  const stock = typeof raw.stock === "number" ? raw.stock : Number(raw.stock ?? 0);
+  const compareAt =
+    typeof rawCompareAt === "number"
+      ? rawCompareAt
+      : Number(String(rawCompareAt ?? "").replace(/[^0-9.]/g, ""));
+  const stock =
+    typeof raw.stock === "number" ? raw.stock : Number(raw.stock ?? 0);
   const image = typeof raw.image === "string" ? raw.image : "";
-  const sizes = Array.isArray(raw.sizes) ? raw.sizes.filter((size): size is string => typeof size === "string") : [];
+  const sizes = Array.isArray(raw.sizes)
+    ? raw.sizes.filter((size): size is string => typeof size === "string")
+    : [];
   const variants = Array.isArray(raw.variants)
     ? raw.variants
-        .filter((variant): variant is Record<string, unknown> => Boolean(variant && typeof variant === "object"))
+        .filter((variant): variant is Record<string, unknown> =>
+          Boolean(variant && typeof variant === "object"),
+        )
         .map((variant) => ({
           name: typeof variant.name === "string" ? variant.name.trim() : "",
-          size: typeof variant.size === "string" ? variant.size.trim() : undefined,
+          size:
+            typeof variant.size === "string" ? variant.size.trim() : undefined,
           image: typeof variant.image === "string" ? variant.image : "",
-          stock: variant.stock === undefined || variant.stock === null || variant.stock === "" ? undefined : Number.isFinite(Number(variant.stock)) ? Math.max(0, Math.floor(Number(variant.stock))) : undefined,
+          stock:
+            variant.stock === undefined ||
+            variant.stock === null ||
+            variant.stock === ""
+              ? undefined
+              : Number.isFinite(Number(variant.stock))
+                ? Math.max(0, Math.floor(Number(variant.stock)))
+                : undefined,
           adjustments: normalizeImageAdjustments(variant.adjustments),
         }))
         .filter((variant) => variant.name || variant.size || variant.image)
     : [];
   const inferredSizes = sizes.length
     ? sizes
-    : Array.from(new Set(variants.map((variant) => variant.size).filter((size): size is string => Boolean(size))));
-  const storedSizeStock = raw.sizeStock && typeof raw.sizeStock === "object" ? raw.sizeStock as Record<string, number> : {};
+    : Array.from(
+        new Set(
+          variants
+            .map((variant) => variant.size)
+            .filter((size): size is string => Boolean(size)),
+        ),
+      );
+  const storedSizeStock =
+    raw.sizeStock && typeof raw.sizeStock === "object"
+      ? (raw.sizeStock as Record<string, number>)
+      : {};
   const inferredSizeStock = Object.keys(storedSizeStock).length
     ? storedSizeStock
-    : Object.fromEntries(variants.filter((variant) => variant.size && variant.stock !== undefined).map((variant) => [variant.size!, variant.stock!]));
-  const idValue = typeof raw.id === "string" ? raw.id : typeof raw.sku === "string" ? raw.sku : `${name}-${index}`;
+    : Object.fromEntries(
+        variants
+          .filter((variant) => variant.size && variant.stock !== undefined)
+          .map((variant) => [variant.size!, variant.stock!]),
+      );
+  const idValue =
+    typeof raw.id === "string"
+      ? raw.id
+      : typeof raw.sku === "string"
+        ? raw.sku
+        : `${name}-${index}`;
   return {
     id: idValue.toLowerCase().replace(/[^a-z0-9]+/g, "-") || `product-${index}`,
     sku: typeof raw.sku === "string" && raw.sku ? raw.sku : idValue,
     name,
-    category: typeof raw.category === "string" && raw.category ? raw.category : "Uncategorised",
+    category:
+      typeof raw.category === "string" && raw.category
+        ? raw.category
+        : "Uncategorised",
     stock: Number.isFinite(stock) ? stock : 0,
     price: Number.isFinite(price) ? price : 0,
     compareAt: Number.isFinite(compareAt) ? compareAt : undefined,
     image,
-    hoverImage: typeof raw.hoverImage === "string" && raw.hoverImage ? raw.hoverImage : image,
+    hoverImage:
+      typeof raw.hoverImage === "string" && raw.hoverImage
+        ? raw.hoverImage
+        : image,
     tag: typeof raw.tag === "string" ? raw.tag : undefined,
-    tone: typeof raw.tone === "string" && raw.tone ? raw.tone : productTones[index % productTones.length],
+    tone:
+      typeof raw.tone === "string" && raw.tone
+        ? raw.tone
+        : productTones[index % productTones.length],
     variants,
     sizes: inferredSizes,
     sizeStock: inferredSizeStock,
-    variantType: raw.variantType === "size" || raw.variantType === "normal" ? raw.variantType : (inferredSizes.length ? "size" : "normal"),
+    variantType:
+      raw.variantType === "size" || raw.variantType === "normal"
+        ? raw.variantType
+        : inferredSizes.length
+          ? "size"
+          : "normal",
     billName: typeof raw.billName === "string" ? raw.billName.trim() : "",
-    supplierName: typeof raw.supplierName === "string" ? raw.supplierName.trim() : "",
+    supplierName:
+      typeof raw.supplierName === "string" ? raw.supplierName.trim() : "",
     imageAdjustments: normalizeImageAdjustments(raw.imageAdjustments),
     hoverImageAdjustments: normalizeImageAdjustments(raw.hoverImageAdjustments),
     vendorId: typeof raw.vendorId === "string" ? raw.vendorId : undefined,
@@ -662,82 +1192,271 @@ function normalizeStoredProduct(value: unknown, index: number): Product | null {
   };
 }
 
-const isProductOutOfStock = (product: Product) => getProductVariantType(product) === "normal" && product.variants?.length
-  ? product.variants.every((variant) => getVariantStock(product, variant) <= 0)
-  : getProductVariantType(product) === "size" && getProductSizes(product).length
-    ? getProductSizes(product).every((size) => getSizeStock(product, size) <= 0)
-    : product.stock <= 0;
+const isProductOutOfStock = (product: Product) =>
+  getProductVariantType(product) === "normal" && product.variants?.length
+    ? product.variants.every(
+        (variant) => getVariantStock(product, variant) <= 0,
+      )
+    : getProductVariantType(product) === "size" &&
+        getProductSizes(product).length
+      ? getProductSizes(product).every(
+          (size) => getSizeStock(product, size) <= 0,
+        )
+      : product.stock <= 0;
 
-const ProductCard = memo(function ProductCard({ product, wished, promotions, cartQuantity, isLuxury, onWishlist, onAdd, onDecrease, onIncrease, onQuickView, onImageZoom }: { product: Product; wished: boolean; promotions: PromotionOffer[]; cartQuantity: number; isLuxury?: boolean; onWishlist: () => void; onAdd: () => void; onDecrease: () => void; onIncrease: () => void; onQuickView: () => void; onImageZoom: () => void }) {
-  const isOutOfStock = isProductOutOfStock(product);
-  const discountPercent = getProductDiscountPercent(product);
-  const [touchImageRevealed, setTouchImageRevealed] = useState(false);
-  const suppressNextImageClick = useRef(false);
-  const handleImageSurfacePointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.pointerType !== "touch") return;
-    event.currentTarget.setPointerCapture(event.pointerId);
-    suppressNextImageClick.current = true;
-    setTouchImageRevealed(true);
-  }, []);
-  const handleImageSurfacePointerEnd = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.pointerType !== "touch") return;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    setTouchImageRevealed(false);
-  }, []);
-  const handleImageSurfaceClick = useCallback(() => {
-    if (suppressNextImageClick.current) {
-      suppressNextImageClick.current = false;
-      return;
-    }
-    onImageZoom();
-  }, [onImageZoom]);
-  return (
-    <article className={`product-card${isLuxury ? " luxury-product-card" : ""}`}>
-      <div className="product-media" style={{ backgroundColor: product.tone }}>
-        <div className={`product-image-surface ${touchImageRevealed ? "is-touch-revealed" : ""}`} onPointerDown={handleImageSurfacePointerDown} onPointerUp={handleImageSurfacePointerEnd} onPointerCancel={handleImageSurfacePointerEnd} onClick={handleImageSurfaceClick}>
-          <img className={`product-image product-image-zoom primary-image ${isOutOfStock ? "stock-out-image" : ""}`} loading="lazy" decoding="async" src={product.image} alt={product.name} style={imageAdjustmentStyle(product.imageAdjustments)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onImageZoom(); }} role="button" tabIndex={0} title="Click to zoom" />
-          <img className={`product-image product-image-zoom hover-image ${isOutOfStock ? "stock-out-image" : ""}`} loading="lazy" decoding="async" fetchPriority="low" src={product.hoverImage} alt="" aria-hidden="true" />
+const ProductCard = memo(
+  function ProductCard({
+    product,
+    wished,
+    promotions,
+    itemOffer,
+    cartQuantity,
+    isLuxury,
+    onWishlist,
+    onAdd,
+    onDecrease,
+    onIncrease,
+    onQuickView,
+    onImageZoom,
+  }: {
+    product: Product;
+    wished: boolean;
+    promotions: PromotionOffer[];
+    itemOffer: ReturnType<typeof websiteProductOffer>;
+    cartQuantity: number;
+    isLuxury?: boolean;
+    onWishlist: () => void;
+    onAdd: () => void;
+    onDecrease: () => void;
+    onIncrease: () => void;
+    onQuickView: () => void;
+    onImageZoom: () => void;
+  }) {
+    const isOutOfStock = isProductOutOfStock(product);
+    const discountPercent = itemOffer.name ? itemOffer.discountPercent : getProductDiscountPercent(product);
+    const [touchImageRevealed, setTouchImageRevealed] = useState(false);
+    const suppressNextImageClick = useRef(false);
+    const handleImageSurfacePointerDown = useCallback(
+      (event: ReactPointerEvent<HTMLDivElement>) => {
+        if (event.pointerType !== "touch") return;
+        event.currentTarget.setPointerCapture(event.pointerId);
+        suppressNextImageClick.current = true;
+        setTouchImageRevealed(true);
+      },
+      [],
+    );
+    const handleImageSurfacePointerEnd = useCallback(
+      (event: ReactPointerEvent<HTMLDivElement>) => {
+        if (event.pointerType !== "touch") return;
+        if (event.currentTarget.hasPointerCapture(event.pointerId))
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        setTouchImageRevealed(false);
+      },
+      [],
+    );
+    const handleImageSurfaceClick = useCallback(() => {
+      if (suppressNextImageClick.current) {
+        suppressNextImageClick.current = false;
+        return;
+      }
+      onImageZoom();
+    }, [onImageZoom]);
+    return (
+      <article
+        className={`product-card${isLuxury ? " luxury-product-card" : ""}`}
+      >
+        <div
+          className="product-media"
+          style={{ backgroundColor: product.tone }}
+        >
+          <div
+            className={`product-image-surface ${touchImageRevealed ? "is-touch-revealed" : ""}`}
+            onPointerDown={handleImageSurfacePointerDown}
+            onPointerUp={handleImageSurfacePointerEnd}
+            onPointerCancel={handleImageSurfacePointerEnd}
+            onClick={handleImageSurfaceClick}
+          >
+            <img
+              className={`product-image product-image-zoom primary-image ${isOutOfStock ? "stock-out-image" : ""}`}
+              loading="lazy"
+              decoding="async"
+              src={product.image}
+              alt={product.name}
+              style={imageAdjustmentStyle(product.imageAdjustments)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") onImageZoom();
+              }}
+              role="button"
+              tabIndex={0}
+              title="Click to zoom"
+            />
+            <img
+              className={`product-image product-image-zoom hover-image ${isOutOfStock ? "stock-out-image" : ""}`}
+              loading="lazy"
+              decoding="async"
+              fetchPriority="low"
+              src={product.hoverImage}
+              alt=""
+              aria-hidden="true"
+            />
+          </div>
+          <span className="product-discount-badge">{discountPercent}% off</span>
+          {isLuxury && (
+            <span className="luxury-product-label">Premium edit</span>
+          )}
+          {product.tag && (
+            <span className="product-tag with-discount">{product.tag}</span>
+          )}
+          {promotions.slice(0, 1).map((offer) => (
+            <span className="promotion-badge" key={offer.id}>
+              {offerTypeLabel(offer)}
+            </span>
+          ))}
+          {product.stock === 1 && (
+            <span
+              className={`low-stock-badge ${product.tag ? "with-tag" : ""} with-discount`}
+            >
+              Only 1 available
+            </span>
+          )}
+          {isOutOfStock && <span className="stock-out-overlay">Sold out</span>}
+          <button
+            className={`wishlist-button ${wished ? "is-wished" : ""}`}
+            onClick={onWishlist}
+            aria-label={
+              wished
+                ? `Remove ${product.name} from wishlist`
+                : `Add ${product.name} to wishlist`
+            }
+          >
+            {wished ? "♥" : "♡"}
+          </button>
+          <button className="quick-view" onClick={onQuickView}>
+            Quick view <span>↗</span>
+          </button>
         </div>
-        <span className="product-discount-badge">{discountPercent}% off</span>
-        {isLuxury && <span className="luxury-product-label">Premium edit</span>}
-        {product.tag && <span className="product-tag with-discount">{product.tag}</span>}
-        {promotions.slice(0, 1).map((offer) => <span className="promotion-badge" key={offer.id}>{offerTypeLabel(offer)}</span>)}
-        {product.stock === 1 && <span className={`low-stock-badge ${product.tag ? "with-tag" : ""} with-discount`}>Only 1 available</span>}
-        {isOutOfStock && <span className="stock-out-overlay">Sold out</span>}
-        <button className={`wishlist-button ${wished ? "is-wished" : ""}`} onClick={onWishlist} aria-label={wished ? `Remove ${product.name} from wishlist` : `Add ${product.name} to wishlist`}>{wished ? "♥" : "♡"}</button>
-        <button className="quick-view" onClick={onQuickView}>Quick view <span>↗</span></button>
-      </div>
-      <div className="product-meta">
-        <div>
-          <p className="eyebrow">{product.category}</p>
-          <h3>{product.name}</h3>
-          {product.vendorId && product.vendorName && <a className="product-sold-by" href={product.vendorSlug ? `/vendors/store/?slug=${encodeURIComponent(product.vendorSlug)}` : "/vendors"}>{product.vendorName}’S PRODUCT</a>}
+        <div className="product-meta">
+          <div>
+            <p className="eyebrow">{product.category}</p>
+            <h3>{product.name}</h3>
+            {product.vendorId && product.vendorName && (
+              <a
+                className="product-sold-by"
+                href={
+                  product.vendorSlug
+                    ? `/vendors/store/?slug=${encodeURIComponent(product.vendorSlug)}`
+                    : "/vendors"
+                }
+              >
+                {product.vendorName}’S PRODUCT
+              </a>
+            )}
+          </div>
+          {cartQuantity > 0 ? (
+            <div className="product-cart-control is-added">
+              <button
+                type="button"
+                onClick={onDecrease}
+                aria-label={`Decrease ${product.name} quantity`}
+              >
+                −
+              </button>
+              <span>{cartQuantity}</span>
+              <button
+                type="button"
+                onClick={onIncrease}
+                aria-label={`Increase ${product.name} quantity`}
+              >
+                +
+              </button>
+            </div>
+          ) : (
+            <button
+              className="add-to-cart-button"
+              type="button"
+              onClick={onAdd}
+              disabled={isOutOfStock}
+              aria-label={
+                isOutOfStock
+                  ? `${product.name} is sold out`
+                  : `Add ${product.name} to cart`
+              }
+            >
+              Add to cart
+            </button>
+          )}
         </div>
-        {cartQuantity > 0 ? <div className="product-cart-control is-added"><button type="button" onClick={onDecrease} aria-label={`Decrease ${product.name} quantity`}>−</button><span>{cartQuantity}</span><button type="button" onClick={onIncrease} aria-label={`Increase ${product.name} quantity`}>+</button></div> : <button className="add-to-cart-button" type="button" onClick={onAdd} disabled={isOutOfStock} aria-label={isOutOfStock ? `${product.name} is sold out` : `Add ${product.name} to cart`}>Add to cart</button>}
-      </div>
-      {getProductVariantType(product) === "normal" && product.variants?.length ? <button className="product-variants-preview" onClick={onQuickView} aria-label={`View ${product.name} variants`}><span>{product.variants.length} colour / model option{product.variants.length === 1 ? "" : "s"}</span><span className="product-variant-thumbs">{product.variants.slice(0, 4).map((variant) => <img loading="lazy" decoding="async" fetchPriority="low" key={`${product.id}-${variant.name}`} src={variant.image || product.image} alt={variant.name} style={imageAdjustmentStyle(variant.adjustments)} />)}</span><b>View ↗</b></button> : null}
-      <div className="price-row"><span>{formatINR(getCustomerPrice(product))}</span><del>{formatINR(getComparePrice(product))}</del></div>
-    </article>
-  );
-}, (previous, next) => previous.product === next.product
-  && previous.wished === next.wished
-  && previous.promotions === next.promotions
-  && previous.isLuxury === next.isLuxury
-  && previous.cartQuantity === next.cartQuantity);
+        {getProductVariantType(product) === "normal" &&
+        product.variants?.length ? (
+          <button
+            className="product-variants-preview"
+            onClick={onQuickView}
+            aria-label={`View ${product.name} variants`}
+          >
+            <span>
+              {product.variants.length} colour / model option
+              {product.variants.length === 1 ? "" : "s"}
+            </span>
+            <span className="product-variant-thumbs">
+              {product.variants.slice(0, 4).map((variant) => (
+                <img
+                  loading="lazy"
+                  decoding="async"
+                  fetchPriority="low"
+                  key={`${product.id}-${variant.name}`}
+                  src={variant.image || product.image}
+                  alt={variant.name}
+                  style={imageAdjustmentStyle(variant.adjustments)}
+                />
+              ))}
+            </span>
+            <b>View ↗</b>
+          </button>
+        ) : null}
+        <div className="price-row">
+          <span>{formatINR(itemOffer.price)}</span>
+          <del>{formatINR(itemOffer.name ? product.price : getComparePrice(product))}</del>
+        </div>
+        {itemOffer.name && <p className="coupon-success">{itemOffer.name} · Applied at checkout</p>}
+      </article>
+    );
+  },
+  (previous, next) =>
+    previous.product === next.product &&
+    previous.wished === next.wished &&
+    previous.promotions === next.promotions &&
+    previous.itemOffer.price === next.itemOffer.price &&
+    previous.itemOffer.name === next.itemOffer.name &&
+    previous.itemOffer.discountPercent === next.itemOffer.discountPercent &&
+    previous.isLuxury === next.isLuxury &&
+    previous.cartQuantity === next.cartQuantity,
+);
 
 export default function Home() {
-  const [products, setProducts] = useState<Product[]>(defaultProducts);
+  // Vendor products remain available to carts created in vendor storefronts.
+  const [catalogProducts, setProducts] = useState<Product[]>(defaultProducts);
+  const products = useMemo(
+    () => filterCatalogProducts(catalogProducts, "general"),
+    [catalogProducts],
+  );
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [categoryRecords, setCategories] = useState(defaultCategories);
   const [vendorCategoryNames, setVendorCategoryNames] = useState<string[]>([]);
   // Product counts can update later without holding up category images.
   const categories = useMemo(
-    () => mergeStorefrontCategoriesFromProducts(categoryRecords, products, vendorCategoryNames),
+    () =>
+      mergeStorefrontCategoriesFromProducts(
+        categoryRecords,
+        products,
+        vendorCategoryNames,
+      ),
     [categoryRecords, products, vendorCategoryNames],
   );
   const [vendors, setVendors] = useState<StorefrontVendor[]>([]);
   const [activeCategory, setActiveCategory] = useState("All pieces");
-  const [activeCategorySection, setActiveCategorySection] = useState<CatalogCategorySection | "all">("all");
+  const [activeCategorySection, setActiveCategorySection] = useState<
+    CatalogCategorySection | "all"
+  >("all");
   const [productSort, setProductSort] = useState("price-low");
   const [searchOpen, setSearchOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -745,10 +1464,15 @@ export default function Home() {
   const [wishlist, setWishlist] = useState<string[]>([]);
   const [savedOpen, setSavedOpen] = useState(false);
   const [cart, setCart] = useState<Record<string, number>>({});
-  const [cartVariants, setCartVariants] = useState<Record<string, ProductVariant | null>>({});
+  const [cartVariants, setCartVariants] = useState<
+    Record<string, ProductVariant | null>
+  >({});
   const [cartSizes, setCartSizes] = useState<Record<string, string | null>>({});
-  const [cartPromotionLines, setCartPromotionLines] = useState<Record<string, PromotionCartLine>>({});
+  const [cartPromotionLines, setCartPromotionLines] = useState<
+    Record<string, PromotionCartLine>
+  >({});
   const cartOwnerId = useRef<string | null>(null);
+  const localInventoryAdjustments = useRef(new Set<string>());
   const [cartReadyOwner, setCartReadyOwner] = useState<string | null>(null);
   const [cartOpen, setCartOpen] = useState(false);
   // The compact cart summary is a post-add confirmation, not a persistent
@@ -756,15 +1480,38 @@ export default function Home() {
   const [cartPreviewOpen, setCartPreviewOpen] = useState(false);
   const [ordersOpen, setOrdersOpen] = useState(false);
   const [orders, setOrders] = useState<CustomerOrder[]>([]);
-  const [customerTrackingOrder, setCustomerTrackingOrder] = useState<CustomerOrder | null>(null);
-  const [orderConfirmation, setOrderConfirmation] = useState<CustomerOrder | null>(null);
+  const [customerTrackingOrder, setCustomerTrackingOrder] =
+    useState<CustomerOrder | null>(null);
+  const [orderConfirmation, setOrderConfirmation] =
+    useState<CustomerOrder | null>(null);
   const [refundRequests, setRefundRequests] = useState<RefundRequest[]>([]);
-  const [refundSubmittingId, setRefundSubmittingId] = useState<string | null>(null);
-  const [printingBillId, setPrintingBillId] = useState<string | null>(null);
+  const [refundSubmittingId, setRefundSubmittingId] = useState<string | null>(
+    null,
+  );
+  const [returnSelectionOrder, setReturnSelectionOrder] =
+    useState<CustomerOrder | null>(null);
+  const [returnItemQuantities, setReturnItemQuantities] = useState<
+    Record<string, string>
+  >({});
+  const [cancellingOrderId, setCancellingOrderId] = useState<string | null>(
+    null,
+  );
+  const [cancelConfirmationOrder, setCancelConfirmationOrder] =
+    useState<CustomerOrder | null>(null);
+  const [cancellationReason, setCancellationReason] = useState<
+    CustomerCancellationReason | ""
+  >("");
+  const [cancellationDescription, setCancellationDescription] = useState("");
+  const [cancellationItemIndexes, setCancellationItemIndexes] = useState<number[]>([]);
   const [assistantOpen, setAssistantOpen] = useState(false);
   const [assistantInput, setAssistantInput] = useState("");
-  const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([
-    { role: "assistant", text: "Hi, I’m Fanzzy Assistant. I can help you find a piece, choose a gift, check an order, or answer care questions." },
+  const [assistantMessages, setAssistantMessages] = useState<
+    AssistantMessage[]
+  >([
+    {
+      role: "assistant",
+      text: "Hi, I’m Fanzzy Assistant. I can help you find a piece, choose a gift, check an order, or answer care questions.",
+    },
   ]);
   const [checkoutOpen, setCheckoutOpen] = useState(false);
   const [isPaying, setIsPaying] = useState(false);
@@ -780,7 +1527,14 @@ export default function Home() {
   // Browser storage is restored after hydration so the server and the first
   // client render produce identical markup.
   const [authUser, setAuthUser] = useState<CustomerAuthUser | null>(null);
-  const [checkoutForm, setCheckoutForm] = useState({ name: "", phone: "", email: "", address: "", pincode: "", landmark: "" });
+  const [checkoutForm, setCheckoutForm] = useState({
+    name: "",
+    phone: "",
+    email: "",
+    address: "",
+    pincode: "",
+    landmark: "",
+  });
   const [checkoutErrors, setCheckoutErrors] = useState<CheckoutErrors>({});
   const checkoutNameRef = useRef<HTMLInputElement>(null);
   const checkoutPhoneRef = useRef<HTMLInputElement>(null);
@@ -789,28 +1543,70 @@ export default function Home() {
   const checkoutPincodeRef = useRef<HTMLInputElement>(null);
   const checkoutPickupHubRef = useRef<HTMLSelectElement>(null);
   const [couponInput, setCouponInput] = useState("");
-  const [appliedCoupon, setAppliedCoupon] = useState<MarketingRecord | null>(null);
-  const [marketingRecords, setMarketingRecords] = useState<MarketingRecord[]>([]);
+  const [onlineSalesPromotions, setOnlineSalesPromotions] = useState<SalesPromotion[]>([]);
+  const [salesCouponCode, setSalesCouponCode] = useState("");
+  const [firstPurchaseEligible, setFirstPurchaseEligible] = useState(false);
+  const [onlineOffersReady, setOnlineOffersReady] = useState(false);
+  const [onlineOfferTime, setOnlineOfferTime] = useState(() => new Date());
+  const [appliedCoupon, setAppliedCoupon] = useState<MarketingRecord | null>(
+    null,
+  );
+  const [marketingRecords, setMarketingRecords] = useState<MarketingRecord[]>(
+    [],
+  );
   const [agentCoupons, setAgentCoupons] = useState<MarketingRecord[]>([]);
-  const [promotionalOffers, setPromotionalOffers] = useState<PromotionOffer[]>([]);
-  const [quickProduct, setQuickProduct] = useState<Product | null>(() => readOverlayProduct());
-  const [quickProductImageOverride, setQuickProductImageOverride] = useState<string | null>(null);
+  const [promotionalOffers, setPromotionalOffers] = useState<PromotionOffer[]>(
+    [],
+  );
+  const [quickProduct, setQuickProduct] = useState<Product | null>(() =>
+    readOverlayProduct(),
+  );
+  const [quickProductImageOverride, setQuickProductImageOverride] = useState<
+    string | null
+  >(null);
   const overlayHistoryStack = useRef<string[]>([]);
-  const overlayPageState = useRef<StorefrontPageHistoryState>({ activeCategory: "All pieces", search: "", scrollY: 0 });
+  const overlayPageState = useRef<StorefrontPageHistoryState>({
+    activeCategory: "All pieces",
+    search: "",
+    scrollY: 0,
+  });
   const overlayScrollY = useRef<number | null>(null);
   const overlayHistoryCleanup = useRef(false);
   const overlayClosedFromBack = useRef(false);
   const overlayLastBackUrl = useRef<string | null>(null);
   const quickProductCloseRequested = useRef(false);
-  const requestedProductSelection = useRef<{ variantName?: string; size?: string } | null>(null);
-  const cartActionFromUrl = useRef<string | null>(typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("fanzzy-cart-action") : null);
-  const overlayRestoredFromUrl = useRef(Boolean(typeof window !== "undefined" && new URLSearchParams(window.location.search).get("fanzzy-product")));
-  const [zoomedImage, setZoomedImage] = useState<{ src: string; alt: string; adjustments?: ImageAdjustments } | null>(null);
-  const [selectedVariant, setSelectedVariant] = useState<ProductVariant | null>(null);
+  const requestedProductSelection = useRef<{
+    variantName?: string;
+    size?: string;
+  } | null>(null);
+  const cartActionFromUrl = useRef<string | null>(
+    typeof window !== "undefined"
+      ? new URLSearchParams(window.location.search).get("fanzzy-cart-action")
+      : null,
+  );
+  const overlayRestoredFromUrl = useRef(
+    Boolean(
+      typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).get("fanzzy-product"),
+    ),
+  );
+  const [zoomedImage, setZoomedImage] = useState<{
+    src: string;
+    alt: string;
+    adjustments?: ImageAdjustments;
+  } | null>(null);
+  const [selectedVariant, setSelectedVariant] = useState<ProductVariant | null>(
+    null,
+  );
   const [selectedSize, setSelectedSize] = useState<string | null>(null);
-  const [selectedPromotion, setSelectedPromotion] = useState<PromotionOffer | null>(null);
-  const [selectedFreeSelections, setSelectedFreeSelections] = useState<PromotionSelection[]>([]);
-  const [selectedBundleSelections, setSelectedBundleSelections] = useState<PromotionSelection[]>([]);
+  const [selectedPromotion, setSelectedPromotion] =
+    useState<PromotionOffer | null>(null);
+  const [selectedFreeSelections, setSelectedFreeSelections] = useState<
+    PromotionSelection[]
+  >([]);
+  const [selectedBundleSelections, setSelectedBundleSelections] = useState<
+    PromotionSelection[]
+  >([]);
   const [toast, setToast] = useState("");
   const [email, setEmail] = useState("");
   const [subscribed, setSubscribed] = useState(false);
@@ -818,31 +1614,48 @@ export default function Home() {
   const [termsOpen, setTermsOpen] = useState(false);
   const [returnPolicyOpen, setReturnPolicyOpen] = useState(false);
   const [privacyOpen, setPrivacyOpen] = useState(false);
-  const [announcementText, setAnnouncementText] = useState("Complimentary shipping on orders above ₹500");
-  const [deliveryCharge, setDeliveryCharge] = useState<DeliveryCharge>(defaultDeliveryCharge);
-  const [paymentSettings, setPaymentSettings] = useState<PaymentSettings>(defaultPaymentSettings);
+  const [announcementText, setAnnouncementText] = useState(
+    "Complimentary shipping on orders above ₹500",
+  );
+  const [deliveryCharge, setDeliveryCharge] = useState<DeliveryCharge>(
+    defaultDeliveryCharge,
+  );
+  const [paymentSettings, setPaymentSettings] = useState<PaymentSettings>(
+    defaultPaymentSettings,
+  );
   const [pickupHubs, setPickupHubs] = useState<PickupHub[]>(defaultPickupHubs);
-  const [fulfillmentMethod, setFulfillmentMethod] = useState<FulfillmentMethod>("delivery");
+  const [fulfillmentMethod, setFulfillmentMethod] =
+    useState<FulfillmentMethod>("delivery");
   const [selectedPickupHubId, setSelectedPickupHubId] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("online");
-  const [activeCampaign, setActiveCampaign] = useState<MarketingRecord | null>(null);
+  const [activeCampaign, setActiveCampaign] = useState<MarketingRecord | null>(
+    null,
+  );
   const [heroSlides, setHeroSlides] = useState(initialHeroSlides);
   const [heroSlideIndex, setHeroSlideIndex] = useState(0);
-  const [heroSlideDuration, setHeroSlideDuration] = useState(defaultHeroSlideDuration);
+  const [heroSlideDuration, setHeroSlideDuration] = useState(
+    defaultHeroSlideDuration,
+  );
   const profileName = authUser?.phone || "Fanzzy customer";
-  const openQuickProduct = useCallback((product: Product, selection?: { variantName?: string; size?: string; image?: string }) => {
-    // Quick view replaces a temporary source drawer (search, saved pieces,
-    // orders, or the assistant). This leaves exactly one Back step: product
-    // view → the actual page underneath, without briefly showing that drawer.
-    quickProductCloseRequested.current = false;
-    setSearchOpen(false);
-    setAssistantOpen(false);
-    setSavedOpen(false);
-    setOrdersOpen(false);
-    requestedProductSelection.current = selection || null;
-    setQuickProductImageOverride(selection?.image || null);
-    setQuickProduct(product);
-  }, []);
+  const openQuickProduct = useCallback(
+    (
+      product: Product,
+      selection?: { variantName?: string; size?: string; image?: string },
+    ) => {
+      // Quick view replaces a temporary source drawer (search, saved pieces,
+      // orders, or the assistant). This leaves exactly one Back step: product
+      // view → the actual page underneath, without briefly showing that drawer.
+      quickProductCloseRequested.current = false;
+      setSearchOpen(false);
+      setAssistantOpen(false);
+      setSavedOpen(false);
+      setOrdersOpen(false);
+      requestedProductSelection.current = selection || null;
+      setQuickProductImageOverride(selection?.image || null);
+      setQuickProduct(product);
+    },
+    [],
+  );
   const closeQuickProduct = useCallback(() => {
     quickProductCloseRequested.current = true;
     setQuickProductImageOverride(null);
@@ -888,37 +1701,51 @@ export default function Home() {
 
     setCartOpen(true);
   }, [activeCategory, cartOpen, search]);
-  const selectCategory = useCallback((category: string, section: CatalogCategorySection | "all" = "all") => {
-    setActiveCategory(category);
-    setActiveCategorySection(section);
-    overlayPageState.current = {
-      ...overlayPageState.current,
-      activeCategory: category,
-      scrollY: Math.round(window.scrollY),
-    };
-  }, []);
-  const openCategoryProducts = useCallback((category: string, section: CatalogCategorySection) => {
-    setSearch("");
-    selectCategory(category, section);
-    // Only the category card navigates to the list. Filter buttons and popup
-    // dismissal continue to keep the customer's current browsing position.
-    window.requestAnimationFrame(() => {
-      document.getElementById("shop")?.scrollIntoView({ behavior: "smooth", block: "start" });
-    });
-  }, [selectCategory]);
-  const selectCategorySection = useCallback((section: CatalogCategorySection) => {
-    setActiveCategory("All pieces");
-    setActiveCategorySection(section);
-    overlayPageState.current = {
-      ...overlayPageState.current,
-      activeCategory: "All pieces",
-      scrollY: Math.round(window.scrollY),
-    };
-  }, []);
+  const selectCategory = useCallback(
+    (category: string, section: CatalogCategorySection | "all" = "all") => {
+      setActiveCategory(category);
+      setActiveCategorySection(section);
+      overlayPageState.current = {
+        ...overlayPageState.current,
+        activeCategory: category,
+        scrollY: Math.round(window.scrollY),
+      };
+    },
+    [],
+  );
+  const openCategoryProducts = useCallback(
+    (category: string, section: CatalogCategorySection) => {
+      setSearch("");
+      selectCategory(category, section);
+      // Only the category card navigates to the list. Filter buttons and popup
+      // dismissal continue to keep the customer's current browsing position.
+      window.requestAnimationFrame(() => {
+        document
+          .getElementById("shop")
+          ?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    },
+    [selectCategory],
+  );
+  const selectCategorySection = useCallback(
+    (section: CatalogCategorySection) => {
+      setActiveCategory("All pieces");
+      setActiveCategorySection(section);
+      overlayPageState.current = {
+        ...overlayPageState.current,
+        activeCategory: "All pieces",
+        scrollY: Math.round(window.scrollY),
+      };
+    },
+    [],
+  );
 
   useEffect(() => {
     if (otpCooldown <= 0) return;
-    const timer = window.setInterval(() => setOtpCooldown((current) => Math.max(0, current - 1)), 1000);
+    const timer = window.setInterval(
+      () => setOtpCooldown((current) => Math.max(0, current - 1)),
+      1000,
+    );
     return () => window.clearInterval(timer);
   }, [otpCooldown]);
 
@@ -926,33 +1753,49 @@ export default function Home() {
     let active = true;
     const loadDeliveryCharge = async () => {
       const remote = await fetchStoreSetting("deliveryCharge");
-      const stored = remote.value || window.localStorage.getItem("fanzzy-delivery-charge");
+      const stored =
+        remote.value || window.localStorage.getItem("fanzzy-delivery-charge");
       if (active) setDeliveryCharge(parseDeliveryCharge(stored));
     };
     const refreshDeliveryCharge = () => {
-      setDeliveryCharge(parseDeliveryCharge(window.localStorage.getItem("fanzzy-delivery-charge")));
+      setDeliveryCharge(
+        parseDeliveryCharge(
+          window.localStorage.getItem("fanzzy-delivery-charge"),
+        ),
+      );
       void loadDeliveryCharge().catch(() => undefined);
     };
     void loadDeliveryCharge().catch(() => undefined);
-    window.addEventListener("fanzzy-delivery-charge-updated", refreshDeliveryCharge);
+    window.addEventListener(
+      "fanzzy-delivery-charge-updated",
+      refreshDeliveryCharge,
+    );
     window.addEventListener("storage", refreshDeliveryCharge);
     return () => {
       active = false;
-      window.removeEventListener("fanzzy-delivery-charge-updated", refreshDeliveryCharge);
+      window.removeEventListener(
+        "fanzzy-delivery-charge-updated",
+        refreshDeliveryCharge,
+      );
       window.removeEventListener("storage", refreshDeliveryCharge);
     };
   }, []);
 
   useEffect(() => {
-    const productId = new URLSearchParams(window.location.search).get("fanzzy-product");
+    const productId = new URLSearchParams(window.location.search).get(
+      "fanzzy-product",
+    );
     if (!productId) {
       quickProductCloseRequested.current = false;
       return;
     }
     if (quickProduct || quickProductCloseRequested.current) return;
     const storedProduct = readOverlayProduct();
-    const product = products.find((candidate) => matchesProductKey(candidate, productId))
-      || (storedProduct && matchesProductKey(storedProduct, productId) ? storedProduct : null);
+    const product =
+      products.find((candidate) => matchesProductKey(candidate, productId)) ||
+      (storedProduct && matchesProductKey(storedProduct, productId)
+        ? storedProduct
+        : null);
     if (product) {
       overlayRestoredFromUrl.current = true;
       setQuickProduct(product);
@@ -961,8 +1804,13 @@ export default function Home() {
 
   useEffect(() => {
     if (!quickProduct) return;
-    const latestProduct = products.find((product) => matchesProductKey(product, quickProduct.id) || matchesProductKey(product, quickProduct.sku));
-    if (latestProduct && latestProduct !== quickProduct) setQuickProduct(latestProduct);
+    const latestProduct = products.find(
+      (product) =>
+        matchesProductKey(product, quickProduct.id) ||
+        matchesProductKey(product, quickProduct.sku),
+    );
+    if (latestProduct && latestProduct !== quickProduct)
+      setQuickProduct(latestProduct);
   }, [products, quickProduct]);
 
   useEffect(() => {
@@ -970,11 +1818,15 @@ export default function Home() {
     const loadPickupHubs = async () => {
       const remote = await fetchStoreSetting("pickupHubs");
       const remoteHubs = parsePickupHubs(remote.value);
-      const localHubs = parsePickupHubs(window.localStorage.getItem("fanzzy-pickup-hubs"));
+      const localHubs = parsePickupHubs(
+        window.localStorage.getItem("fanzzy-pickup-hubs"),
+      );
       if (active) setPickupHubs(remoteHubs.length ? remoteHubs : localHubs);
     };
     const refreshPickupHubs = () => {
-      setPickupHubs(parsePickupHubs(window.localStorage.getItem("fanzzy-pickup-hubs")));
+      setPickupHubs(
+        parsePickupHubs(window.localStorage.getItem("fanzzy-pickup-hubs")),
+      );
       void loadPickupHubs().catch(() => undefined);
     };
     void loadPickupHubs().catch(() => undefined);
@@ -982,7 +1834,10 @@ export default function Home() {
     window.addEventListener("storage", refreshPickupHubs);
     return () => {
       active = false;
-      window.removeEventListener("fanzzy-pickup-hubs-updated", refreshPickupHubs);
+      window.removeEventListener(
+        "fanzzy-pickup-hubs-updated",
+        refreshPickupHubs,
+      );
       window.removeEventListener("storage", refreshPickupHubs);
     };
   }, []);
@@ -994,8 +1849,16 @@ export default function Home() {
       // these requests ran one by one, leaving an old cached list on screen
       // while the storefront waited for every product setting to finish.
       const [remote, settings] = await Promise.all([
-        fetchCatalogProducts(),
-        fetchStoreSettings(["productVariants", "productVariantType", "productSizes", "productSizeStock", "productImageAdjustments", "productBillNames", "productSupplierNames"]),
+        fetchCatalogProducts("public"),
+        fetchStoreSettings([
+          "productVariants",
+          "productVariantType",
+          "productSizes",
+          "productSizeStock",
+          "productImageAdjustments",
+          "productBillNames",
+          "productSupplierNames",
+        ]),
       ]);
       const {
         productVariants: variantsRemote,
@@ -1016,7 +1879,10 @@ export default function Home() {
       let supplierNameMap: Record<string, string> = {};
       if (variantsRemote.value) {
         try {
-          const parsed = JSON.parse(variantsRemote.value) as Record<string, ProductVariant[]>;
+          const parsed = JSON.parse(variantsRemote.value) as Record<
+            string,
+            ProductVariant[]
+          >;
           if (parsed && typeof parsed === "object") variantsMap = parsed;
         } catch {
           variantsMap = {};
@@ -1024,10 +1890,16 @@ export default function Home() {
       }
       if (variantTypeRemote.value) {
         try {
-          const parsed = JSON.parse(variantTypeRemote.value) as Record<string, unknown>;
+          const parsed = JSON.parse(variantTypeRemote.value) as Record<
+            string,
+            unknown
+          >;
           if (parsed && typeof parsed === "object") {
             variantTypeMap = Object.fromEntries(
-              Object.entries(parsed).filter((entry): entry is [string, ProductVariantType] => entry[1] === "normal" || entry[1] === "size"),
+              Object.entries(parsed).filter(
+                (entry): entry is [string, ProductVariantType] =>
+                  entry[1] === "normal" || entry[1] === "size",
+              ),
             );
           }
         } catch {
@@ -1035,25 +1907,51 @@ export default function Home() {
         }
       }
       if (sizesRemote.value) {
-        try { const parsed = JSON.parse(sizesRemote.value) as Record<string, string[]>; if (parsed && typeof parsed === "object") sizesMap = parsed; } catch { sizesMap = {}; }
+        try {
+          const parsed = JSON.parse(sizesRemote.value) as Record<
+            string,
+            string[]
+          >;
+          if (parsed && typeof parsed === "object") sizesMap = parsed;
+        } catch {
+          sizesMap = {};
+        }
       }
       if (sizeStockRemote.value) {
-        try { const parsed = JSON.parse(sizeStockRemote.value) as Record<string, Record<string, number>>; if (parsed && typeof parsed === "object") sizeStockMap = parsed; } catch { sizeStockMap = {}; }
+        try {
+          const parsed = JSON.parse(sizeStockRemote.value) as Record<
+            string,
+            Record<string, number>
+          >;
+          if (parsed && typeof parsed === "object") sizeStockMap = parsed;
+        } catch {
+          sizeStockMap = {};
+        }
       }
       if (imageAdjustmentsRemote.value) {
         try {
-          const parsed = JSON.parse(imageAdjustmentsRemote.value) as Record<string, ProductImageAdjustments>;
-          if (parsed && typeof parsed === "object") imageAdjustmentsMap = parsed;
+          const parsed = JSON.parse(imageAdjustmentsRemote.value) as Record<
+            string,
+            ProductImageAdjustments
+          >;
+          if (parsed && typeof parsed === "object")
+            imageAdjustmentsMap = parsed;
         } catch {
           imageAdjustmentsMap = {};
         }
       }
       if (billNameRemote.value) {
         try {
-          const parsed = JSON.parse(billNameRemote.value) as Record<string, unknown>;
+          const parsed = JSON.parse(billNameRemote.value) as Record<
+            string,
+            unknown
+          >;
           if (parsed && typeof parsed === "object") {
             billNameMap = Object.fromEntries(
-              Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+              Object.entries(parsed).filter(
+                (entry): entry is [string, string] =>
+                  typeof entry[1] === "string",
+              ),
             );
           }
         } catch {
@@ -1062,10 +1960,16 @@ export default function Home() {
       }
       if (supplierNameRemote.value) {
         try {
-          const parsed = JSON.parse(supplierNameRemote.value) as Record<string, unknown>;
+          const parsed = JSON.parse(supplierNameRemote.value) as Record<
+            string,
+            unknown
+          >;
           if (parsed && typeof parsed === "object") {
             supplierNameMap = Object.fromEntries(
-              Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+              Object.entries(parsed).filter(
+                (entry): entry is [string, string] =>
+                  typeof entry[1] === "string",
+              ),
             );
           }
         } catch {
@@ -1073,13 +1977,19 @@ export default function Home() {
         }
       }
       const localVariantsMap: Record<string, ProductVariant[]> = {};
-      const storedVariantCache = window.localStorage.getItem(localProductVariantsKey);
+      const storedVariantCache = window.localStorage.getItem(
+        localProductVariantsKey,
+      );
       if (storedVariantCache) {
         try {
-          const parsed = JSON.parse(storedVariantCache) as Record<string, ProductVariant[]>;
+          const parsed = JSON.parse(storedVariantCache) as Record<
+            string,
+            ProductVariant[]
+          >;
           if (parsed && typeof parsed === "object") {
             Object.entries(parsed).forEach(([key, variants]) => {
-              if (Array.isArray(variants) && variants.length) localVariantsMap[key] = variants;
+              if (Array.isArray(variants) && variants.length)
+                localVariantsMap[key] = variants;
             });
           }
         } catch {
@@ -1092,72 +2002,159 @@ export default function Home() {
         try {
           const parsed: unknown = JSON.parse(stored);
           if (Array.isArray(parsed)) {
-            localProducts = parsed.filter((product) => !isDemoProduct(product as { name?: string; sku?: string })).map(normalizeStoredProduct).filter((product): product is Product => product !== null).map((product) => {
-              const savedVariants = getProductSetting(variantsMap, product.sku, product.id);
-              const savedSizes = getProductSetting(sizesMap, product.sku, product.id);
-              const savedSizeStock = getProductSetting(sizeStockMap, product.sku, product.id);
-              const savedVariantType = getProductSetting(variantTypeMap, product.sku, product.id);
-              return {
-                ...product,
-                variants: savedVariants?.length ? savedVariants : product.variants?.length ? product.variants : getProductSetting(localVariantsMap, product.sku, product.id) || [],
-                sizes: savedSizes?.length ? savedSizes : product.sizes?.length ? product.sizes : [],
-                sizeStock: savedSizeStock && Object.keys(savedSizeStock).length ? savedSizeStock : product.sizeStock || {},
-                variantType: savedVariantType || (savedSizes?.length ? "size" : product.variantType || (product.sizes?.length ? "size" : "normal")),
-                supplierName: getProductSetting(supplierNameMap, product.sku, product.id) || product.supplierName || "",
-              };
-            });
+            localProducts = filterCatalogProducts(parsed, "general")
+              .filter(
+                (product) =>
+                  !isDemoProduct(product as { name?: string; sku?: string }),
+              )
+              .map(normalizeStoredProduct)
+              .filter((product): product is Product => product !== null)
+              .map((product) => {
+                const savedVariants = getProductSetting(
+                  variantsMap,
+                  product.sku,
+                  product.id,
+                );
+                const savedSizes = getProductSetting(
+                  sizesMap,
+                  product.sku,
+                  product.id,
+                );
+                const savedSizeStock = getProductSetting(
+                  sizeStockMap,
+                  product.sku,
+                  product.id,
+                );
+                const savedVariantType = getProductSetting(
+                  variantTypeMap,
+                  product.sku,
+                  product.id,
+                );
+                return {
+                  ...product,
+                  variants: savedVariants?.length
+                    ? savedVariants
+                    : product.variants?.length
+                      ? product.variants
+                      : getProductSetting(
+                          localVariantsMap,
+                          product.sku,
+                          product.id,
+                        ) || [],
+                  sizes: savedSizes?.length
+                    ? savedSizes
+                    : product.sizes?.length
+                      ? product.sizes
+                      : [],
+                  sizeStock:
+                    savedSizeStock && Object.keys(savedSizeStock).length
+                      ? savedSizeStock
+                      : product.sizeStock || {},
+                  variantType:
+                    savedVariantType ||
+                    (savedSizes?.length
+                      ? "size"
+                      : product.variantType ||
+                        (product.sizes?.length ? "size" : "normal")),
+                  supplierName:
+                    getProductSetting(
+                      supplierNameMap,
+                      product.sku,
+                      product.id,
+                    ) ||
+                    product.supplierName ||
+                    "",
+                };
+              });
           }
         } catch {
           window.localStorage.removeItem("fanzzy-products");
         }
       }
       if (!remote.error && remote.data !== null) {
-        const remoteProducts = remote.data.filter((product) => !isDemoProduct(product)).map((product, index) => {
-          const savedAdjustments = getProductSetting(imageAdjustmentsMap, product.sku);
-          const savedVariants = getProductSetting(variantsMap, product.sku);
-          const variants = (savedVariants?.length ? savedVariants : getProductSetting(localVariantsMap, product.sku) || product.variants) as ProductVariant[] | undefined;
-          const savedSizes = getProductSetting(sizesMap, product.sku);
-          const inferredSizes = savedSizes?.length
-            ? savedSizes
-            : Array.from(new Set((variants || []).map((variant) => variant.size).filter((size): size is string => Boolean(size))));
-          const savedSizeStock = getProductSetting(sizeStockMap, product.sku) || {};
-          const inferredSizeStock = Object.keys(savedSizeStock).length
-            ? savedSizeStock
-            : Object.fromEntries((variants || []).filter((variant) => variant.size && variant.stock !== undefined).map((variant) => [variant.size!, variant.stock!]));
-          return normalizeStoredProduct({
-          id: product.sku,
-          sku: product.sku,
-          name: product.name,
-          category: product.category,
-          stock: product.stock,
-          price: product.price,
-          image: product.image,
-          hoverImage: product.hoverImage || product.image,
-          tag: product.tag,
-          tone: product.tone,
-          compareAt: product.compareAt,
-          variants: variants?.map((variant, variantIndex) => ({
-            ...variant,
-            name: variant.name || `Option ${variantIndex + 1}`,
-            adjustments: normalizeImageAdjustments(savedAdjustments?.variants?.[variantIndex] || variant.adjustments),
-          })),
-          sizes: inferredSizes,
-          sizeStock: inferredSizeStock,
-          variantType: getProductSetting(variantTypeMap, product.sku) || (inferredSizes.length ? "size" : "normal"),
-          imageAdjustments: savedAdjustments?.image,
-          hoverImageAdjustments: savedAdjustments?.hoverImage,
-          billName: getProductSetting(billNameMap, product.sku) || "",
-          supplierName: getProductSetting(supplierNameMap, product.sku) || "",
-          vendorId: product.vendorId,
-          vendorName: product.vendorName,
-          vendorSlug: product.vendorSlug,
-        }, index);
-        }).filter((product): product is Product => product !== null);
+        const remoteProducts = remote.data
+          .filter((product) => !isDemoProduct(product))
+          .map((product, index) => {
+            const savedAdjustments = getProductSetting(
+              imageAdjustmentsMap,
+              product.sku,
+            );
+            const savedVariants = getProductSetting(variantsMap, product.sku);
+            const variants = (
+              savedVariants?.length
+                ? savedVariants
+                : getProductSetting(localVariantsMap, product.sku) ||
+                  product.variants
+            ) as ProductVariant[] | undefined;
+            const savedSizes = getProductSetting(sizesMap, product.sku);
+            const inferredSizes = savedSizes?.length
+              ? savedSizes
+              : Array.from(
+                  new Set(
+                    (variants || [])
+                      .map((variant) => variant.size)
+                      .filter((size): size is string => Boolean(size)),
+                  ),
+                );
+            const savedSizeStock =
+              getProductSetting(sizeStockMap, product.sku) || {};
+            const inferredSizeStock = Object.keys(savedSizeStock).length
+              ? savedSizeStock
+              : Object.fromEntries(
+                  (variants || [])
+                    .filter(
+                      (variant) => variant.size && variant.stock !== undefined,
+                    )
+                    .map((variant) => [variant.size!, variant.stock!]),
+                );
+            return normalizeStoredProduct(
+              {
+                id: product.sku,
+                sku: product.sku,
+                name: product.name,
+                category: product.category,
+                stock: product.stock,
+                price: product.price,
+                image: product.image,
+                hoverImage: product.hoverImage || product.image,
+                tag: product.tag,
+                tone: product.tone,
+                compareAt: product.compareAt,
+                variants: variants?.map((variant, variantIndex) => ({
+                  ...variant,
+                  name: variant.name || `Option ${variantIndex + 1}`,
+                  adjustments: normalizeImageAdjustments(
+                    savedAdjustments?.variants?.[variantIndex] ||
+                      variant.adjustments,
+                  ),
+                })),
+                sizes: inferredSizes,
+                sizeStock: inferredSizeStock,
+                variantType:
+                  getProductSetting(variantTypeMap, product.sku) ||
+                  (inferredSizes.length ? "size" : "normal"),
+                imageAdjustments: savedAdjustments?.image,
+                hoverImageAdjustments: savedAdjustments?.hoverImage,
+                billName: getProductSetting(billNameMap, product.sku) || "",
+                supplierName:
+                  getProductSetting(supplierNameMap, product.sku) || "",
+                vendorId: product.vendorId,
+                vendorName: product.vendorName,
+                vendorSlug: product.vendorSlug,
+              },
+              index,
+            );
+          })
+          .filter((product): product is Product => product !== null);
         const remoteWithLocalVariants = remoteProducts.map((product) => ({
           ...product,
           variants: product.variants?.length
             ? product.variants
-            : localProducts.find((localProduct) => localProduct.id === product.id)?.variants || localVariantsMap[product.id] || [],
+            : localProducts.find(
+                (localProduct) => localProduct.id === product.id,
+              )?.variants ||
+              localVariantsMap[product.id] ||
+              [],
         }));
         // Supabase is the shared catalog. Local storage is only a fallback for
         // devices that are offline or when Supabase has not been configured.
@@ -1166,7 +2163,8 @@ export default function Home() {
         setCatalogLoading(false);
         return;
       }
-      if (localProducts.length) setProducts(localProducts);
+      if (localProducts.length)
+        setProducts(filterCatalogProducts(localProducts, "general"));
       else setProducts(defaultProducts);
       setCatalogLoading(false);
     };
@@ -1179,13 +2177,43 @@ export default function Home() {
     };
     runSyncProducts();
     const onProductsStorage = (event: StorageEvent) => {
-      if (!event.key || ["fanzzy-products", localProductVariantsKey, "fanzzy-product-variant-type", "fanzzy-product-sizes", "fanzzy-product-size-stock", "fanzzy-product-image-adjustments", "fanzzy-product-bill-names", "fanzzy-product-supplier-names"].includes(event.key)) runSyncProducts();
+      if (
+        !event.key ||
+        [
+          "fanzzy-products",
+          localProductVariantsKey,
+          "fanzzy-product-variant-type",
+          "fanzzy-product-sizes",
+          "fanzzy-product-size-stock",
+          "fanzzy-product-image-adjustments",
+          "fanzzy-product-bill-names",
+          "fanzzy-product-supplier-names",
+        ].includes(event.key)
+      )
+        runSyncProducts();
     };
-    const onProductsUpdated = () => { runSyncProducts(); };
-    const unsubscribeFromCatalogProducts = subscribeToCatalogProducts(runSyncProducts);
-    const refreshProductsOnFocus = () => { runSyncProducts(); };
-    const unsubscribeFromProductSettings = (['productVariants', 'productVariantType', 'productSizes', 'productSizeStock', 'productBillNames', 'productSupplierNames'] as const)
-      .map((key) => subscribeToStoreSetting(key, () => { void syncProducts().catch(() => undefined); }));
+    const onProductsUpdated = () => {
+      runSyncProducts();
+    };
+    const unsubscribeFromCatalogProducts =
+      subscribeToCatalogProducts(runSyncProducts);
+    const refreshProductsOnFocus = () => {
+      runSyncProducts();
+    };
+    const unsubscribeFromProductSettings = (
+      [
+        "productVariants",
+        "productVariantType",
+        "productSizes",
+        "productSizeStock",
+        "productBillNames",
+        "productSupplierNames",
+      ] as const
+    ).map((key) =>
+      subscribeToStoreSetting(key, () => {
+        void syncProducts().catch(() => undefined);
+      }),
+    );
     window.addEventListener("focus", refreshProductsOnFocus);
     window.addEventListener("storage", onProductsStorage);
     window.addEventListener("fanzzy-products-updated", onProductsUpdated);
@@ -1202,22 +2230,58 @@ export default function Home() {
   useEffect(() => {
     const requestedSelection = requestedProductSelection.current;
     requestedProductSelection.current = null;
-    const requestedVariantName = requestedSelection?.variantName?.trim().toLowerCase();
-    const requestedVariant = quickProduct && requestedVariantName && getProductVariantType(quickProduct) === "normal"
-      ? quickProduct.variants?.find((variant, index) => (variant.name || `Option ${index + 1}`).trim().toLowerCase() === requestedVariantName)
-      : undefined;
-    const availableVariant = quickProduct && getProductVariantType(quickProduct) === "normal"
-      ? quickProduct.variants?.find((variant) => getVariantStock(quickProduct, variant) > 0)
-      : undefined;
-    setSelectedVariant(requestedVariant ?? availableVariant ?? (quickProduct && getProductVariantType(quickProduct) === "normal" ? quickProduct.variants?.[0] : null) ?? null);
-    const requestedSizeName = requestedSelection?.size?.trim().replace(/^size\s+/i, "").toLowerCase();
-    const requestedSize = quickProduct && requestedSizeName && getProductVariantType(quickProduct) === "size"
-      ? getProductSizes(quickProduct).find((size) => size.trim().replace(/^size\s+/i, "").toLowerCase() === requestedSizeName)
-      : undefined;
-    const availableSize = quickProduct && getProductVariantType(quickProduct) === "size"
-      ? getProductSizes(quickProduct).find((size) => getSelectionStock(quickProduct, null, size) > 0)
-      : undefined;
-    setSelectedSize(requestedSize ?? availableSize ?? quickProduct?.sizes?.[0] ?? null);
+    const requestedVariantName = requestedSelection?.variantName
+      ?.trim()
+      .toLowerCase();
+    const requestedVariant =
+      quickProduct &&
+      requestedVariantName &&
+      getProductVariantType(quickProduct) === "normal"
+        ? quickProduct.variants?.find(
+            (variant, index) =>
+              (variant.name || `Option ${index + 1}`).trim().toLowerCase() ===
+              requestedVariantName,
+          )
+        : undefined;
+    const availableVariant =
+      quickProduct && getProductVariantType(quickProduct) === "normal"
+        ? quickProduct.variants?.find(
+            (variant) => getVariantStock(quickProduct, variant) > 0,
+          )
+        : undefined;
+    setSelectedVariant(
+      requestedVariant ??
+        availableVariant ??
+        (quickProduct && getProductVariantType(quickProduct) === "normal"
+          ? quickProduct.variants?.[0]
+          : null) ??
+        null,
+    );
+    const requestedSizeName = requestedSelection?.size
+      ?.trim()
+      .replace(/^size\s+/i, "")
+      .toLowerCase();
+    const requestedSize =
+      quickProduct &&
+      requestedSizeName &&
+      getProductVariantType(quickProduct) === "size"
+        ? getProductSizes(quickProduct).find(
+            (size) =>
+              size
+                .trim()
+                .replace(/^size\s+/i, "")
+                .toLowerCase() === requestedSizeName,
+          )
+        : undefined;
+    const availableSize =
+      quickProduct && getProductVariantType(quickProduct) === "size"
+        ? getProductSizes(quickProduct).find(
+            (size) => getSelectionStock(quickProduct, null, size) > 0,
+          )
+        : undefined;
+    setSelectedSize(
+      requestedSize ?? availableSize ?? quickProduct?.sizes?.[0] ?? null,
+    );
     setSelectedPromotion(null);
     setSelectedFreeSelections([]);
     setSelectedBundleSelections([]);
@@ -1230,69 +2294,129 @@ export default function Home() {
       let localCategories: StorefrontCategory[] = [];
       if (stored) {
         try {
-          const parsed = JSON.parse(stored) as Array<{ name?: string; pieces?: number; image?: string; section?: CatalogCategorySection }>;
-          localCategories = parsed.filter((category) => category.name).map((category, index) => ({
-            name: category.name!,
-            count: `${category.pieces ?? 0} pieces`,
-            image: category.image || categoryImageFallback(category.name!, index),
-            section: category.section || "normal",
-          }));
+          const parsed = JSON.parse(stored) as Array<{
+            name?: string;
+            pieces?: number;
+            image?: string;
+            section?: CatalogCategorySection;
+          }>;
+          localCategories = parsed
+            .filter((category) => category.name)
+            .map((category, index) => ({
+              name: category.name!,
+              count: `${category.pieces ?? 0} pieces`,
+              image:
+                category.image || categoryImageFallback(category.name!, index),
+              section: category.section || "normal",
+            }));
         } catch {
           window.localStorage.removeItem("fanzzy-categories");
         }
       }
-      if (active && localCategories.length) setCategories(dedupeStorefrontCategories(localCategories));
+      if (active && localCategories.length)
+        setCategories(dedupeStorefrontCategories(localCategories));
       const [remote, shared, vendorCategories] = await Promise.all([
         fetchCatalogCategories(),
         fetchStoreSetting("categoryCatalog"),
         fetchVendorCategoryNames(),
       ]);
-      if (active && !vendorCategories.error) setVendorCategoryNames(vendorCategories.data);
+      if (active && !vendorCategories.error)
+        setVendorCategoryNames(vendorCategories.data);
       let sharedCategories: StorefrontCategory[] = [];
       if (shared.value) {
         try {
-          const parsed = JSON.parse(shared.value) as Array<{ name?: string; pieces?: number; image?: string; section?: CatalogCategorySection }>;
+          const parsed = JSON.parse(shared.value) as Array<{
+            name?: string;
+            pieces?: number;
+            image?: string;
+            section?: CatalogCategorySection;
+          }>;
           if (Array.isArray(parsed)) {
-            sharedCategories = parsed.filter((category) => category.name).map((category, index) => ({
-              name: category.name!,
-              count: `${category.pieces ?? 0} pieces`,
-              image: category.image || categoryImageFallback(category.name!, index),
-              section: category.section || "normal",
-            }));
+            sharedCategories = parsed
+              .filter((category) => category.name)
+              .map((category, index) => ({
+                name: category.name!,
+                count: `${category.pieces ?? 0} pieces`,
+                image:
+                  category.image ||
+                  categoryImageFallback(category.name!, index),
+                section: category.section || "normal",
+              }));
           }
         } catch {
           // Ignore an invalid shared category snapshot and use the catalog table.
         }
       }
       if (active && !remote.error && remote.data && remote.data.length) {
-        const categoryIdentity = (name: string, section: CatalogCategorySection = "normal") => `${name.trim()}::${section}`;
+        const categoryIdentity = (
+          name: string,
+          section: CatalogCategorySection = "normal",
+        ) => `${name.trim()}::${section}`;
         const knownCategories = [...sharedCategories, ...localCategories];
-        const localCategoryByIdentity = new Map(knownCategories.map((category) => [categoryIdentity(category.name, category.section), category]));
-        const categoryByExactName = new Map<string, StorefrontCategory | null>();
+        const localCategoryByIdentity = new Map(
+          knownCategories.map((category) => [
+            categoryIdentity(category.name, category.section),
+            category,
+          ]),
+        );
+        const categoryByExactName = new Map<
+          string,
+          StorefrontCategory | null
+        >();
         knownCategories.forEach((category) => {
           const key = category.name.trim();
           const previous = categoryByExactName.get(key);
-          categoryByExactName.set(key, previous && previous.section !== category.section ? null : category);
+          categoryByExactName.set(
+            key,
+            previous && previous.section !== category.section ? null : category,
+          );
         });
         const remoteCategories = remote.data.map((category, index) => ({
           name: category.name,
           count: `${category.pieces} pieces`,
           image: category.image || categoryImageFallback(category.name, index),
-          section: localCategoryByIdentity.get(categoryIdentity(category.name, category.section || "normal"))?.section || categoryByExactName.get(category.name.trim())?.section || category.section || "normal",
+          section:
+            localCategoryByIdentity.get(
+              categoryIdentity(category.name, category.section || "normal"),
+            )?.section ||
+            categoryByExactName.get(category.name.trim())?.section ||
+            category.section ||
+            "normal",
         }));
-        const remoteIdentities = new Set(remoteCategories.map((category) => categoryIdentity(category.name, category.section)));
-        const localOnlyCategories = knownCategories.filter((category) => !remoteIdentities.has(categoryIdentity(category.name, category.section)));
-        setCategories(dedupeStorefrontCategories(inferLegacyCategorySections([...remoteCategories, ...localOnlyCategories])));
+        const remoteIdentities = new Set(
+          remoteCategories.map((category) =>
+            categoryIdentity(category.name, category.section),
+          ),
+        );
+        const localOnlyCategories = knownCategories.filter(
+          (category) =>
+            !remoteIdentities.has(
+              categoryIdentity(category.name, category.section),
+            ),
+        );
+        setCategories(
+          dedupeStorefrontCategories(
+            inferLegacyCategorySections([
+              ...remoteCategories,
+              ...localOnlyCategories,
+            ]),
+          ),
+        );
         return;
       }
       if (active && (sharedCategories.length || localCategories.length)) {
         const merged = [...sharedCategories, ...localCategories];
-        setCategories(dedupeStorefrontCategories(inferLegacyCategorySections(merged)));
+        setCategories(
+          dedupeStorefrontCategories(inferLegacyCategorySections(merged)),
+        );
       }
     };
-    const runSyncCategories = () => { void syncCategories().catch(() => undefined); };
+    const runSyncCategories = () => {
+      void syncCategories().catch(() => undefined);
+    };
     runSyncCategories();
-    const unsubscribeFromVendorCategories = subscribeToVendorCategories(runSyncCategories);
+    const unsubscribeFromVendorCategories =
+      subscribeToVendorCategories(runSyncCategories);
     window.addEventListener("storage", runSyncCategories);
     window.addEventListener("fanzzy-categories-updated", runSyncCategories);
     window.addEventListener("focus", runSyncCategories);
@@ -1300,7 +2424,10 @@ export default function Home() {
       active = false;
       unsubscribeFromVendorCategories();
       window.removeEventListener("storage", runSyncCategories);
-      window.removeEventListener("fanzzy-categories-updated", runSyncCategories);
+      window.removeEventListener(
+        "fanzzy-categories-updated",
+        runSyncCategories,
+      );
       window.removeEventListener("focus", runSyncCategories);
     };
   }, []);
@@ -1312,18 +2439,59 @@ export default function Home() {
       try {
         const parsed = JSON.parse(value) as unknown;
         if (!Array.isArray(parsed)) return [] as RefundRequest[];
-        return parsed.filter((request): request is Partial<RefundRequest> => Boolean(request && typeof request === "object"))
+        return parsed
+          .filter((request): request is Partial<RefundRequest> =>
+            Boolean(request && typeof request === "object"),
+          )
           .map((request, index) => ({
-            id: typeof request.id === "string" && request.id ? request.id : `refund-${index + 1}`,
+            id:
+              typeof request.id === "string" && request.id
+                ? request.id
+                : `refund-${index + 1}`,
             orderId: typeof request.orderId === "string" ? request.orderId : "",
             userId: typeof request.userId === "string" ? request.userId : "",
-            customerName: typeof request.customerName === "string" ? request.customerName : "Customer",
+            customerName:
+              typeof request.customerName === "string"
+                ? request.customerName
+                : "Customer",
             phone: typeof request.phone === "string" ? request.phone : "",
             amount: typeof request.amount === "string" ? request.amount : "₹0",
-            status: (request.status === "Approved" || request.status === "Rejected" || request.status === "Refunded" ? request.status : "Requested") as RefundRequestStatus,
-            reason: typeof request.reason === "string" ? request.reason : "Customer requested a refund",
-            createdAt: typeof request.createdAt === "string" ? request.createdAt : new Date().toISOString(),
-            updatedAt: typeof request.updatedAt === "string" ? request.updatedAt : undefined,
+            status: (request.status === "Approved" ||
+            request.status === "Rejected" ||
+            request.status === "Refunded"
+              ? request.status
+              : "Requested") as RefundRequestStatus,
+            reason:
+              typeof request.reason === "string"
+                ? request.reason
+                : "Customer requested a refund",
+            createdAt:
+              typeof request.createdAt === "string"
+                ? request.createdAt
+                : new Date().toISOString(),
+            updatedAt:
+              typeof request.updatedAt === "string"
+                ? request.updatedAt
+                : undefined,
+            requestedItemIds: Array.isArray(request.requestedItemIds)
+              ? request.requestedItemIds.filter(
+                  (itemId): itemId is string =>
+                    typeof itemId === "string" && itemId.trim().length > 0,
+                )
+              : undefined,
+            requestedItems: Array.isArray(request.requestedItems)
+              ? request.requestedItems.filter(
+                  (item): item is RequestedReturnItem =>
+                    Boolean(
+                      item &&
+                        typeof item === "object" &&
+                        typeof item.orderItemId === "string" &&
+                        item.orderItemId.trim() &&
+                        Number.isInteger(item.quantity) &&
+                        item.quantity > 0,
+                    ),
+                )
+              : undefined,
           }))
           .filter((request) => request.orderId && request.userId);
       } catch {
@@ -1332,19 +2500,34 @@ export default function Home() {
     };
     const loadRefundRequests = async () => {
       const remote = await fetchStoreSetting("refundRequests");
-      const stored = remote.value || window.localStorage.getItem("fanzzy-refund-requests");
+      const stored =
+        remote.error
+          ? window.localStorage.getItem("fanzzy-refund-requests")
+          : remote.value;
       if (active) setRefundRequests(parseRequests(stored));
     };
     const refreshRefundRequests = () => {
-      setRefundRequests(parseRequests(window.localStorage.getItem("fanzzy-refund-requests")));
+      setRefundRequests(
+        parseRequests(window.localStorage.getItem("fanzzy-refund-requests")),
+      );
       void loadRefundRequests().catch(() => undefined);
     };
     void loadRefundRequests().catch(() => undefined);
-    window.addEventListener("fanzzy-refund-requests-updated", refreshRefundRequests);
+    window.addEventListener(
+      "fanzzy-refund-requests-updated",
+      refreshRefundRequests,
+    );
     window.addEventListener("storage", refreshRefundRequests);
+    const timer = window.setInterval(() => {
+      void loadRefundRequests().catch(() => undefined);
+    }, 1000);
     return () => {
       active = false;
-      window.removeEventListener("fanzzy-refund-requests-updated", refreshRefundRequests);
+      window.clearInterval(timer);
+      window.removeEventListener(
+        "fanzzy-refund-requests-updated",
+        refreshRefundRequests,
+      );
       window.removeEventListener("storage", refreshRefundRequests);
     };
   }, []);
@@ -1353,36 +2536,63 @@ export default function Home() {
     let active = true;
     const loadPaymentSettings = async () => {
       const remote = await fetchStoreSetting("paymentMethods");
-      const stored = remote.value || window.localStorage.getItem("fanzzy-payment-methods");
+      const stored =
+        remote.value || window.localStorage.getItem("fanzzy-payment-methods");
       if (active && stored) setPaymentSettings(parsePaymentSettings(stored));
     };
     const refreshPaymentSettings = () => {
-      setPaymentSettings(parsePaymentSettings(window.localStorage.getItem("fanzzy-payment-methods")));
+      setPaymentSettings(
+        parsePaymentSettings(
+          window.localStorage.getItem("fanzzy-payment-methods"),
+        ),
+      );
       void loadPaymentSettings().catch(() => undefined);
     };
     void loadPaymentSettings().catch(() => undefined);
-    window.addEventListener("fanzzy-payment-methods-updated", refreshPaymentSettings);
+    window.addEventListener(
+      "fanzzy-payment-methods-updated",
+      refreshPaymentSettings,
+    );
     window.addEventListener("storage", refreshPaymentSettings);
     return () => {
       active = false;
-      window.removeEventListener("fanzzy-payment-methods-updated", refreshPaymentSettings);
+      window.removeEventListener(
+        "fanzzy-payment-methods-updated",
+        refreshPaymentSettings,
+      );
       window.removeEventListener("storage", refreshPaymentSettings);
     };
   }, []);
 
   useEffect(() => {
-    if (paymentMethod === "cod" && !paymentSettings.cod && paymentSettings.online) setPaymentMethod("online");
-    if (paymentMethod === "online" && !paymentSettings.online && paymentSettings.cod) setPaymentMethod("cod");
+    if (
+      paymentMethod === "cod" &&
+      !paymentSettings.cod &&
+      paymentSettings.online
+    )
+      setPaymentMethod("online");
+    if (
+      paymentMethod === "online" &&
+      !paymentSettings.online &&
+      paymentSettings.cod
+    )
+      setPaymentMethod("cod");
   }, [paymentMethod, paymentSettings.cod, paymentSettings.online]);
 
   useEffect(() => {
     const syncAgentCoupons = async () => {
       const remote = await fetchStoreSetting("agents");
-      const stored = remote.value || window.localStorage.getItem("fanzzy-agents");
+      const stored =
+        remote.value || window.localStorage.getItem("fanzzy-agents");
       setAgentCoupons(parseAgentCoupons(stored));
     };
-    const runSyncAgentCoupons = () => { void syncAgentCoupons().catch(() => setAgentCoupons([])); };
-    const unsubscribeFromAgentCoupons = subscribeToStoreSetting("agents", runSyncAgentCoupons);
+    const runSyncAgentCoupons = () => {
+      void syncAgentCoupons().catch(() => setAgentCoupons([]));
+    };
+    const unsubscribeFromAgentCoupons = subscribeToStoreSetting(
+      "agents",
+      runSyncAgentCoupons,
+    );
     runSyncAgentCoupons();
     window.addEventListener("storage", runSyncAgentCoupons);
     window.addEventListener("fanzzy-agents-updated", runSyncAgentCoupons);
@@ -1395,12 +2605,18 @@ export default function Home() {
 
   useEffect(() => {
     let active = true;
-    siteApiFetch("/vendors", { cache: "no-store" }).then(async (response) => {
-      if (!response.ok) return;
-      const body = await response.json() as { vendors?: StorefrontVendor[] };
-      if (active) setVendors(body.vendors || []);
-    }).catch(() => undefined);
-    return () => { active = false; };
+    siteApiFetch("/vendors", { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) return;
+        const body = (await response.json()) as {
+          vendors?: StorefrontVendor[];
+        };
+        if (active) setVendors(body.vendors || []);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -1408,33 +2624,56 @@ export default function Home() {
     const requestedCategory = urlParams.get("category")?.trim().toLowerCase();
     const requestedSection = urlParams.get("section");
     if (!categories.length) return;
-    if (!requestedCategory && (requestedSection === "normal" || requestedSection === "luxury")) {
+    if (
+      !requestedCategory &&
+      (requestedSection === "normal" || requestedSection === "luxury")
+    ) {
       setActiveCategory("All pieces");
       setActiveCategorySection(requestedSection);
-      overlayPageState.current = { ...overlayPageState.current, activeCategory: "All pieces" };
+      overlayPageState.current = {
+        ...overlayPageState.current,
+        activeCategory: "All pieces",
+      };
       return;
     }
     if (!requestedCategory) return;
-    if ((requestedSection === "luxury" || !requestedSection) && isGenericLuxuryCategoryName(requestedCategory)) {
+    if (
+      (requestedSection === "luxury" || !requestedSection) &&
+      isGenericLuxuryCategoryName(requestedCategory)
+    ) {
       setActiveCategory("All pieces");
       setActiveCategorySection("luxury");
-      overlayPageState.current = { ...overlayPageState.current, activeCategory: "All pieces" };
+      overlayPageState.current = {
+        ...overlayPageState.current,
+        activeCategory: "All pieces",
+      };
       return;
     }
-    const matchingCategory = categories.find((category) =>
-      (category.name.trim().toLowerCase() === requestedCategory || categoryFilterKey(category.name) === categoryFilterKey(requestedCategory))
-      && (requestedSection !== "normal" && requestedSection !== "luxury" || category.section === requestedSection),
+    const matchingCategory = categories.find(
+      (category) =>
+        (category.name.trim().toLowerCase() === requestedCategory ||
+          categoryFilterKey(category.name) ===
+            categoryFilterKey(requestedCategory)) &&
+        ((requestedSection !== "normal" && requestedSection !== "luxury") ||
+          category.section === requestedSection),
     );
     if (!matchingCategory) return;
     setActiveCategory(matchingCategory.name);
     setActiveCategorySection(matchingCategory.section);
-    overlayPageState.current = { ...overlayPageState.current, activeCategory: matchingCategory.name };
+    overlayPageState.current = {
+      ...overlayPageState.current,
+      activeCategory: matchingCategory.name,
+    };
   }, [categories]);
 
   useEffect(() => {
+    let active = true;
     let syncInFlight = false;
     const updateOrdersIfChanged = (next: CustomerOrder[]) => {
-      setOrders((current) => ordersHaveSameData(current, next) ? current : next);
+      if (active)
+        setOrders((current) =>
+          ordersHaveSameData(current, next) ? current : next,
+        );
     };
     const syncOrders = async (recoverCapturedPayments = false) => {
       if (syncInFlight) return;
@@ -1446,70 +2685,48 @@ export default function Home() {
         return;
       }
       try {
-        const localOnlyOrders: CustomerOrder[] = [];
-        const cachedOrders = new Map<string, CustomerOrder>();
-        const addCachedOrders = (value: unknown) => {
-          if (!Array.isArray(value)) return;
-          value.forEach((order) => {
-            if (order?.id && isCustomerOrder(order as CustomerOrder, authUser) && !cachedOrders.has(order.id)) {
-              const localOrder = order as CustomerOrder;
-              cachedOrders.set(localOrder.id, localOrder);
-              localOnlyOrders.push(localOrder);
-            }
-          });
-        };
-        try {
-          addCachedOrders(JSON.parse(window.localStorage.getItem(`fanzzy-orders:${userId}`) || "[]"));
-          addCachedOrders(JSON.parse(window.localStorage.getItem("fanzzy-orders") || "[]"));
-        } catch {
-          window.localStorage.removeItem(`fanzzy-orders:${userId}`);
-        }
-        if (cachedOrders.size) updateOrdersIfChanged(Array.from(cachedOrders.values()));
-
         // Recover captured payments on the initial load in the background so it
         // cannot delay the customer’s already available order list.
         if (recoverCapturedPayments) {
-          void siteApiFetch("/razorpay/sync-payments", { method: "POST" }).catch(() => undefined);
+          void siteApiFetch("/razorpay/sync-payments", {
+            method: "POST",
+          }).catch(() => undefined);
         }
 
-        const remote = await fetchStoreOrders<CustomerOrder>();
-        const merged = new Map<string, CustomerOrder>();
-        remote.data?.forEach((order) => {
-          if (order?.id && isCustomerOrder(order, authUser)) {
-            merged.set(order.id, order);
-          }
-        });
-        cachedOrders.forEach((order) => {
-          if (!merged.has(order.id)) merged.set(order.id, order);
-        });
-        // A completed payment can be preserved locally while the shared order
-        // store is offline. As soon as it comes back, add only the missing
-        // customer records to the full remote collection without overwriting
-        // orders from other customers.
-        if (!remote.error && localOnlyOrders.length) {
-          const allOrders = new Map<string, CustomerOrder>();
-          remote.data?.forEach((order) => { if (order?.id) allOrders.set(order.id, order); });
-          localOnlyOrders.forEach((order) => allOrders.set(order.id, order));
-          if (allOrders.size > (remote.data?.length || 0)) {
-            void saveStoreOrders(Array.from(allOrders.values())).catch(() => undefined);
-          }
+        const remote = await fetchCustomerOrders<CustomerOrder>();
+        if (!remote.error && remote.data) {
+          updateOrdersIfChanged(
+            remote.data.filter(
+              (order) => order?.id && isCustomerOrder(order, authUser),
+            ),
+          );
         }
-        updateOrdersIfChanged(Array.from(merged.values()));
       } finally {
         syncInFlight = false;
       }
     };
-    const runSyncOrders = (recoverCapturedPayments = false) => { void syncOrders(recoverCapturedPayments).catch(() => undefined); };
+    const runSyncOrders = (recoverCapturedPayments = false) => {
+      void syncOrders(recoverCapturedPayments).catch(() => undefined);
+    };
     runSyncOrders(true);
     // Realtime is the fast path; this short polling fallback also works when
     // Supabase replication is delayed or unavailable.
-    const liveOrderTimer = window.setInterval(() => { runSyncOrders(false); }, 5000);
-    const unsubscribeFromLiveOrders = subscribeToStoreSetting("orders", () => { runSyncOrders(false); });
-    const onStorageOrdersUpdated = () => { runSyncOrders(false); };
-    const onLocalOrdersUpdated = () => { runSyncOrders(false); };
+    const liveOrderTimer = window.setInterval(() => {
+      runSyncOrders(false);
+    }, 5000);
+    const unsubscribeFromLiveOrders = subscribeToStoreSetting("orders", () => {
+      runSyncOrders(false);
+    });
+    const onStorageOrdersUpdated = () => {
+      runSyncOrders(false);
+    };
+    const onLocalOrdersUpdated = () => {
+      runSyncOrders(false);
+    };
     window.addEventListener("storage", onStorageOrdersUpdated);
     window.addEventListener("fanzzy-orders-updated", onLocalOrdersUpdated);
     return () => {
+      active = false;
       window.clearInterval(liveOrderTimer);
       unsubscribeFromLiveOrders();
       window.removeEventListener("storage", onStorageOrdersUpdated);
@@ -1517,7 +2734,15 @@ export default function Home() {
     };
   }, [authUser?.id]);
 
-  const delhiveryOrderKey = useMemo(() => orders.filter((order) => order.delhiveryAwb).map((order) => `${order.id}::${order.delhiveryAwb}`).sort().join("|"), [orders]);
+  const delhiveryOrderKey = useMemo(
+    () =>
+      orders
+        .filter((order) => order.delhiveryAwb)
+        .map((order) => `${order.id}::${order.delhiveryAwb}`)
+        .sort()
+        .join("|"),
+    [orders],
+  );
 
   useEffect(() => {
     if (!authUser?.id || !delhiveryOrderKey) return;
@@ -1527,28 +2752,66 @@ export default function Home() {
       return { id, waybill };
     });
     const refreshTracking = async () => {
-      const updates = await Promise.all(orderWaybills.map(async ({ id, waybill }) => {
-        try {
-          const response = await siteApiFetch("/delhivery/track", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ orderId: id, waybill }), cache: "no-store" });
-          if (!response.ok) return null;
-          const body = await response.json() as { tracking?: { status?: string; statusType?: string; statusDate?: string; location?: string; scans?: DelhiveryScan[] } };
-          return body.tracking ? { id, tracking: body.tracking } : null;
-        } catch {
-          return null;
-        }
-      }));
+      const updates = await Promise.all(
+        orderWaybills.map(async ({ id, waybill }) => {
+          try {
+            const response = await siteApiFetch("/delhivery/track", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ orderId: id, waybill }),
+              cache: "no-store",
+            });
+            if (!response.ok) return null;
+            const body = (await response.json()) as {
+              tracking?: {
+                status?: string;
+                statusType?: string;
+                statusDate?: string;
+                location?: string;
+                scans?: DelhiveryScan[];
+              };
+            };
+            return body.tracking ? { id, tracking: body.tracking } : null;
+          } catch {
+            return null;
+          }
+        }),
+      );
       if (!active) return;
-      const byOrder = new Map(updates.filter((update): update is NonNullable<typeof update> => Boolean(update)).map((update) => [update.id, update.tracking]));
+      const byOrder = new Map(
+        updates
+          .filter((update): update is NonNullable<typeof update> =>
+            Boolean(update),
+          )
+          .map((update) => [update.id, update.tracking]),
+      );
       if (!byOrder.size) return;
       const trackedAt = new Date().toISOString();
-      setOrders((current) => current.map((order) => {
-        const tracking = byOrder.get(order.id);
-        if (!tracking) return order;
-        return { ...order, delhiveryLiveStatus: tracking.status || order.delhiveryLiveStatus, delhiveryLiveStatusType: tracking.statusType || order.delhiveryLiveStatusType, delhiveryLiveStatusDate: tracking.statusDate || order.delhiveryLiveStatusDate, delhiveryLiveLocation: tracking.location || order.delhiveryLiveLocation, delhiveryScans: tracking.scans?.length ? tracking.scans : order.delhiveryScans, delhiveryLastTrackedAt: trackedAt };
-      }));
+      setOrders((current) =>
+        current.map((order) => {
+          const tracking = byOrder.get(order.id);
+          if (!tracking) return order;
+          return {
+            ...order,
+            delhiveryLiveStatus: tracking.status || order.delhiveryLiveStatus,
+            delhiveryLiveStatusType:
+              tracking.statusType || order.delhiveryLiveStatusType,
+            delhiveryLiveStatusDate:
+              tracking.statusDate || order.delhiveryLiveStatusDate,
+            delhiveryLiveLocation:
+              tracking.location || order.delhiveryLiveLocation,
+            delhiveryScans: tracking.scans?.length
+              ? tracking.scans
+              : order.delhiveryScans,
+            delhiveryLastTrackedAt: trackedAt,
+          };
+        }),
+      );
     };
     void refreshTracking();
-    const trackingTimer = window.setInterval(() => { void refreshTracking(); }, 60_000);
+    const trackingTimer = window.setInterval(() => {
+      void refreshTracking();
+    }, 60_000);
     return () => {
       active = false;
       window.clearInterval(trackingTimer);
@@ -1559,10 +2822,22 @@ export default function Home() {
     const query = search.trim().toLowerCase();
     return products
       .filter((product) => {
-        const categoryMatch = activeCategory === "All pieces"
-          ? activeCategorySection === "all" || productCatalogSection(product.category, categories) === activeCategorySection
-          : matchesCatalogCategory(product.category, activeCategory, activeCategorySection, categories);
-        const searchMatch = !query || `${product.name} ${product.category} ${product.vendorName || ""}`.toLowerCase().includes(query);
+        const categoryMatch =
+          activeCategory === "All pieces"
+            ? activeCategorySection === "all" ||
+              productCatalogSection(product.category, categories) ===
+                activeCategorySection
+            : matchesCatalogCategory(
+                product.category,
+                activeCategory,
+                activeCategorySection,
+                categories,
+              );
+        const searchMatch =
+          !query ||
+          `${product.name} ${product.category} ${product.vendorName || ""}`
+            .toLowerCase()
+            .includes(query);
         return categoryMatch && searchMatch;
       })
       .sort((left, right) => {
@@ -1581,21 +2856,39 @@ export default function Home() {
             return getCustomerPrice(left) - getCustomerPrice(right);
         }
       });
-  }, [activeCategory, activeCategorySection, categories, productSort, products, search]);
+  }, [
+    activeCategory,
+    activeCategorySection,
+    categories,
+    productSort,
+    products,
+    search,
+  ]);
 
-  const storefrontCategories = useMemo(
-    () => categories,
-    [categories],
+  const storefrontCategories = useMemo(() => categories, [categories]);
+  const filterCategories = useMemo(
+    () => ({
+      normal: dedupeStorefrontCategories(
+        storefrontCategories.filter(
+          (category) => category.section !== "luxury",
+        ),
+      ),
+      luxury: dedupeStorefrontCategories(
+        storefrontCategories.filter(
+          (category) => category.section === "luxury",
+        ),
+      ),
+    }),
+    [storefrontCategories],
   );
-  const filterCategories = useMemo(() => ({
-    normal: dedupeStorefrontCategories(storefrontCategories.filter((category) => category.section !== "luxury")),
-    luxury: dedupeStorefrontCategories(storefrontCategories.filter((category) => category.section === "luxury")),
-  }), [storefrontCategories]);
   useEffect(() => {
     if (activeCategory === "All pieces") return;
-    const matchingCategory = storefrontCategories.find((category) =>
-      categoryFilterKey(category.name) === categoryFilterKey(activeCategory)
-      && (activeCategorySection === "all" || category.section === activeCategorySection),
+    const matchingCategory = storefrontCategories.find(
+      (category) =>
+        categoryFilterKey(category.name) ===
+          categoryFilterKey(activeCategory) &&
+        (activeCategorySection === "all" ||
+          category.section === activeCategorySection),
     );
     if (!matchingCategory) {
       setActiveCategory("All pieces");
@@ -1609,22 +2902,47 @@ export default function Home() {
     storefrontCategories.forEach((category) => {
       const key = categoryFilterKey(category.name);
       if (!key) return;
-      const sections = sectionsByCategory.get(key) || new Set<CatalogCategorySection>();
+      const sections =
+        sectionsByCategory.get(key) || new Set<CatalogCategorySection>();
       sections.add(category.section);
       sectionsByCategory.set(key, sections);
     });
-    return new Set(Array.from(sectionsByCategory.entries()).filter(([, sections]) => sections.size > 1).map(([key]) => key));
+    return new Set(
+      Array.from(sectionsByCategory.entries())
+        .filter(([, sections]) => sections.size > 1)
+        .map(([key]) => key),
+    );
   }, [storefrontCategories]);
 
-  const offersForProduct = useCallback((product: Product) => promotionalOffers.filter((offer) => {
-    const paidScope = offer.eligiblePaid;
-    if (!paidScope.length) return true;
-    return paidScope.some((selection) => selection.productId === product.id || selection.productId === product.sku || selection.productId === product.name.toLowerCase().replace(/[^a-z0-9]+/g, "-"));
-  }), [promotionalOffers]);
-  const promotionsByProductId = useMemo(() => new Map(
-    products.map((product) => [product.id, offersForProduct(product)] as const),
-  ), [offersForProduct, products]);
-  const makePromotionSelection = (product: Product, variant?: ProductVariant | null, size?: string | null): PromotionSelection => ({
+  const offersForProduct = useCallback(
+    (product: Product) =>
+      promotionalOffers.filter((offer) => {
+        const paidScope = offer.eligiblePaid;
+        if (!paidScope.length) return true;
+        return paidScope.some(
+          (selection) =>
+            selection.productId === product.id ||
+            selection.productId === product.sku ||
+            selection.productId ===
+              product.name.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+        );
+      }),
+    [promotionalOffers],
+  );
+  const promotionsByProductId = useMemo(
+    () =>
+      new Map(
+        products.map(
+          (product) => [product.id, offersForProduct(product)] as const,
+        ),
+      ),
+    [offersForProduct, products],
+  );
+  const makePromotionSelection = (
+    product: Product,
+    variant?: ProductVariant | null,
+    size?: string | null,
+  ): PromotionSelection => ({
     productId: product.id,
     sku: product.sku,
     variantName: variant?.name,
@@ -1635,11 +2953,26 @@ export default function Home() {
 
   const cartItems = Object.entries(cart).flatMap(([cartKey, quantity]) => {
     const productId = cartKey.split("::", 1)[0];
-    const product = products.find((item) => matchesProductKey(item, productId));
-    return product ? [{ ...product, cartKey, quantity, variant: cartVariants[cartKey] ?? null, size: cartSizes[cartKey] ?? null, promotion: cartPromotionLines[cartKey] ?? null }] : [];
+    const product = catalogProducts.find((item) =>
+      matchesProductKey(item, productId),
+    );
+    return product
+      ? [
+          {
+            ...product,
+            cartKey,
+            quantity,
+            variant: cartVariants[cartKey] ?? null,
+            size: cartSizes[cartKey] ?? null,
+            promotion: cartPromotionLines[cartKey] ?? null,
+          },
+        ]
+      : [];
   });
-  const getProductCartLines = (product: Product) => cartItems.filter((item) => item.id === product.id && !item.promotion);
-  const getProductCartQuantity = (product: Product) => getProductCartLines(product).reduce((sum, item) => sum + item.quantity, 0);
+  const getProductCartLines = (product: Product) =>
+    cartItems.filter((item) => item.id === product.id && !item.promotion);
+  const getProductCartQuantity = (product: Product) =>
+    getProductCartLines(product).reduce((sum, item) => sum + item.quantity, 0);
   const increaseProductCart = (product: Product) => {
     const line = getProductCartLines(product)[0];
     if (line) updateQuantity(line.cartKey, 1);
@@ -1649,17 +2982,31 @@ export default function Home() {
     if (line) updateQuantity(line.cartKey, -1);
   };
   const cartStockIssues = cartItems.filter((product) => {
-    const availableStock = getSelectionStock(product, product.variant, product.size);
+    const availableStock = getSelectionStock(
+      product,
+      product.variant,
+      product.size,
+    );
     return availableStock <= 0 || product.quantity > availableStock;
   });
-  const cartHasSoldOutItems = cartStockIssues.some((product) => getSelectionStock(product, product.variant, product.size) <= 0);
+  const cartHasSoldOutItems = cartStockIssues.some(
+    (product) => getSelectionStock(product, product.variant, product.size) <= 0,
+  );
   // Keep the badge and the drawer in sync when an old cart line no longer
   // resolves to a product in the current catalog.
   const cartCount = cartItems.reduce((sum, item) => sum + item.quantity, 0);
-  const getCartLinePrice = (product: (typeof cartItems)[number]) => product.promotion?.linePrice ?? getCustomerPrice(product);
-  const subtotal = cartItems.reduce((sum, product) => sum + getCartLinePrice(product) * product.quantity, 0);
-  const selectedVariantStock = quickProduct ? getSelectionStock(quickProduct, selectedVariant, selectedSize) : 0;
-  const couponDiscount = appliedCoupon ? getCouponDiscount(appliedCoupon, subtotal) : 0;
+  const getCartLinePrice = (product: (typeof cartItems)[number]) =>
+    product.promotion?.linePrice ?? getCustomerPrice(product);
+  const subtotal = cartItems.reduce(
+    (sum, product) => sum + getCartLinePrice(product) * product.quantity,
+    0,
+  );
+  const selectedVariantStock = quickProduct
+    ? getSelectionStock(quickProduct, selectedVariant, selectedSize)
+    : 0;
+  const legacyCouponDiscount = appliedCoupon
+    ? getCouponDiscount(appliedCoupon, subtotal)
+    : 0;
   const bogoCampaign = isBogoCampaign(activeCampaign) ? activeCampaign : null;
   const bogoQuantities = getBogoQuantities(bogoCampaign);
   const bogoOfferLabel = getBogoOfferLabel(bogoCampaign);
@@ -1667,21 +3014,65 @@ export default function Home() {
     ? new Set(bogoCampaign.eligibleProductIds.map((id) => id.toLowerCase()))
     : null;
   const bogoPrices = bogoCampaign
-    ? cartItems.flatMap((product) => {
-        if (bogoEligibleIds && !bogoEligibleIds.has(product.id.toLowerCase())) return [];
-        return Array.from({ length: product.quantity }, () => getCustomerPrice(product));
-      }).sort((a, b) => a - b)
+    ? cartItems
+        .flatMap((product) => {
+          if (bogoEligibleIds && !bogoEligibleIds.has(product.id.toLowerCase()))
+            return [];
+          return Array.from({ length: product.quantity }, () =>
+            getCustomerPrice(product),
+          );
+        })
+        .sort((a, b) => a - b)
     : [];
-  const bogoFreeCount = Math.floor(bogoPrices.length / (bogoQuantities.buy + bogoQuantities.get)) * bogoQuantities.get;
-  const bogoDiscount = bogoPrices
+  const bogoFreeCount =
+    Math.floor(bogoPrices.length / (bogoQuantities.buy + bogoQuantities.get)) *
+    bogoQuantities.get;
+  const legacyBogoDiscount = bogoPrices
     .slice(0, bogoFreeCount)
     .reduce((sum, price) => sum + price, 0);
-  const discountedSubtotal = Math.max(0, subtotal - couponDiscount - bogoDiscount);
-  const thresholdReached = deliveryCharge.freeAboveEnabled && discountedSubtotal >= deliveryCharge.freeAbove;
-  const selectedPickupHub = pickupHubs.find((hub) => hub.id === selectedPickupHubId) || null;
-  const deliveryTotal = fulfillmentMethod === "pickup" ? 0 : deliveryCharge.enabled && !thresholdReached ? deliveryCharge.amount : 0;
+  const onlinePromotionLines = cartItems.map((product) => ({ productId: product.sku || product.id, category: product.category, price: getCartLinePrice(product), quantity: product.quantity }));
+  const onlineCustomerContext = { couponCode: salesCouponCode || appliedCoupon?.code, customerPhone: authUser?.phone, historyAvailable: Boolean(authUser && firstPurchaseEligible), previousCustomerPhones: [], now: onlineOfferTime };
+  const onlineOffer = calculateWebsiteSalesPromotion({ promotions: onlineSalesPromotions, lines: onlinePromotionLines, context: onlineCustomerContext, legacyCoupon: legacyCouponDiscount, legacyPromotion: legacyBogoDiscount, hasGroupedPromotion: cartItems.some((product) => Boolean(product.promotion)), delivery: deliveryCharge, pickup: fulfillmentMethod === "pickup" });
+  const couponDiscount = onlineOffer.couponDiscount;
+  const bogoDiscount = onlineOffer.promotionDiscount;
+  const selectedPickupHub =
+    pickupHubs.find((hub) => hub.id === selectedPickupHubId) || null;
+  const deliveryTotal = onlineOffer.shippingTotal;
   const codTotal = paymentMethod === "cod" ? paymentSettings.codCharge : 0;
-  const orderTotal = Math.max(0, subtotal - couponDiscount - bogoDiscount + deliveryTotal + codTotal);
+  const orderTotal = Math.max(
+    0,
+    subtotal - couponDiscount - bogoDiscount + deliveryTotal + codTotal,
+  );
+
+  useEffect(() => {
+    if (isPaying) return;
+    let alive = true;
+    const sync = async () => {
+      try {
+        const response = await customerApiFetch(`/offers${salesCouponCode ? `?coupon=${encodeURIComponent(salesCouponCode)}` : ""}`, { cache: "no-store", credentials: "include" });
+        const body = await response.json() as { promotions?: unknown; firstPurchaseEligible?: boolean };
+        if (!response.ok || !Array.isArray(body.promotions)) throw new Error("Offers unavailable");
+        if (alive) { setOnlineSalesPromotions(parseSalesPromotions(JSON.stringify(body.promotions))); setFirstPurchaseEligible(body.firstPurchaseEligible === true); setOnlineOffersReady(true); setOnlineOfferTime(new Date()); }
+      } catch {
+        if (alive) {
+          // Local previews can share the admin's device cache. Live checkout
+          // accepts only offers loaded from the authoritative server.
+          if (process.env.NEXT_PUBLIC_FANZZY_ENV === "local-test") { let cachedOffers: string | null = null; try { cachedOffers = window.localStorage.getItem("fanzzy-sales-promotions"); } catch { /* Browser storage is optional. */ } setOnlineSalesPromotions(parseSalesPromotions(cachedOffers)); setOnlineOffersReady(true); setOnlineOfferTime(new Date()); }
+          else { setOnlineSalesPromotions([]); setOnlineOffersReady(false); }
+          setFirstPurchaseEligible(false);
+        }
+      }
+    };
+    setFirstPurchaseEligible(false);
+    setOnlineOffersReady(false);
+    void sync();
+    const refresh = () => { void sync(); };
+    const timer = window.setInterval(refresh, 30000);
+    window.addEventListener("fanzzy-sales-promotions-updated", refresh);
+    window.addEventListener("storage", refresh);
+    window.addEventListener("focus", refresh);
+    return () => { alive = false; window.clearInterval(timer); window.removeEventListener("fanzzy-sales-promotions-updated", refresh); window.removeEventListener("storage", refresh); window.removeEventListener("focus", refresh); };
+  }, [authUser?.id, isPaying, salesCouponCode]);
 
   useEffect(() => {
     const userId = authUser?.id;
@@ -1689,7 +3080,7 @@ export default function Home() {
     const readCart = <T,>(key: string): T => {
       try {
         const parsed = JSON.parse(window.localStorage.getItem(key) || "{}");
-        return parsed && typeof parsed === "object" ? parsed as T : {} as T;
+        return parsed && typeof parsed === "object" ? (parsed as T) : ({} as T);
       } catch {
         return {} as T;
       }
@@ -1698,8 +3089,14 @@ export default function Home() {
     setCartReadyOwner(null);
     if (!userId) {
       setCart(readCart<Record<string, number>>(cartStorageKey(ownerId)));
-      setCartVariants(readCart<Record<string, ProductVariant | null>>(cartVariantsStorageKey(ownerId)));
-      setCartSizes(readCart<Record<string, string | null>>(`fanzzy-cart-sizes:${ownerId}`));
+      setCartVariants(
+        readCart<Record<string, ProductVariant | null>>(
+          cartVariantsStorageKey(ownerId),
+        ),
+      );
+      setCartSizes(
+        readCart<Record<string, string | null>>(`fanzzy-cart-sizes:${ownerId}`),
+      );
       cartOwnerId.current = ownerId;
       setCartReadyOwner(ownerId);
       return;
@@ -1707,10 +3104,18 @@ export default function Home() {
 
     const guestCart = readCart<Record<string, number>>(cartStorageKey("guest"));
     const userCart = readCart<Record<string, number>>(cartStorageKey(userId));
-    const guestVariants = readCart<Record<string, ProductVariant | null>>(cartVariantsStorageKey("guest"));
-    const userVariants = readCart<Record<string, ProductVariant | null>>(cartVariantsStorageKey(userId));
-    const guestSizes = readCart<Record<string, string | null>>(`fanzzy-cart-sizes:guest`);
-    const userSizes = readCart<Record<string, string | null>>(`fanzzy-cart-sizes:${userId}`);
+    const guestVariants = readCart<Record<string, ProductVariant | null>>(
+      cartVariantsStorageKey("guest"),
+    );
+    const userVariants = readCart<Record<string, ProductVariant | null>>(
+      cartVariantsStorageKey(userId),
+    );
+    const guestSizes = readCart<Record<string, string | null>>(
+      `fanzzy-cart-sizes:guest`,
+    );
+    const userSizes = readCart<Record<string, string | null>>(
+      `fanzzy-cart-sizes:${userId}`,
+    );
     const mergedCart = { ...userCart };
     Object.entries(guestCart).forEach(([cartKey, quantity]) => {
       mergedCart[cartKey] = (mergedCart[cartKey] ?? 0) + quantity;
@@ -1718,9 +3123,9 @@ export default function Home() {
     setCart(mergedCart);
     setCartVariants({ ...guestVariants, ...userVariants });
     setCartSizes({ ...guestSizes, ...userSizes });
-    window.localStorage.removeItem(cartStorageKey("guest"));
-    window.localStorage.removeItem(cartVariantsStorageKey("guest"));
-    window.localStorage.removeItem("fanzzy-cart-sizes:guest");
+    removeOptionalBrowserCache(cartStorageKey("guest"));
+    removeOptionalBrowserCache(cartVariantsStorageKey("guest"));
+    removeOptionalBrowserCache("fanzzy-cart-sizes:guest");
     cartOwnerId.current = ownerId;
     setCartReadyOwner(ownerId);
   }, [authUser?.id]);
@@ -1728,9 +3133,9 @@ export default function Home() {
   useEffect(() => {
     const ownerId = authUser?.id || "guest";
     if (cartReadyOwner !== ownerId || cartOwnerId.current !== ownerId) return;
-    window.localStorage.setItem(cartStorageKey(ownerId), JSON.stringify(cart));
-    window.localStorage.setItem(cartVariantsStorageKey(ownerId), JSON.stringify(cartVariants));
-    window.localStorage.setItem(`fanzzy-cart-sizes:${ownerId}`, JSON.stringify(cartSizes));
+    writeOptionalBrowserCache(cartStorageKey(ownerId), cart);
+    writeOptionalBrowserCache(cartVariantsStorageKey(ownerId), cartVariants);
+    writeOptionalBrowserCache(`fanzzy-cart-sizes:${ownerId}`, cartSizes);
   }, [authUser?.id, cartReadyOwner, cart, cartVariants, cartSizes]);
 
   useEffect(() => {
@@ -1738,15 +3143,22 @@ export default function Home() {
     const storedUser = readStoredCustomerAuthUser();
     const loadCustomerSession = async () => {
       try {
-        const response = await customerAuthRequest("session", { cache: "no-store" });
+        const response = await customerAuthRequest("session", {
+          cache: "no-store",
+        });
         if (!response.ok) {
           if (active && storedUser) {
             setAuthUser(storedUser);
-            setCheckoutForm((current) => ({ ...current, phone: current.phone || storedUser.phone }));
+            setCheckoutForm((current) => ({
+              ...current,
+              phone: current.phone || storedUser.phone,
+            }));
           }
           return;
         }
-        const result = await response.json() as { user?: CustomerAuthUser | null };
+        const result = (await response.json()) as {
+          user?: CustomerAuthUser | null;
+        };
         if (!active) return;
         const user = result.user || null;
         if (!user) {
@@ -1755,7 +3167,10 @@ export default function Home() {
           // empty response during checkout or another network transition.
           if (storedUser) {
             setAuthUser(storedUser);
-            setCheckoutForm((current) => ({ ...current, phone: current.phone || storedUser.phone }));
+            setCheckoutForm((current) => ({
+              ...current,
+              phone: current.phone || storedUser.phone,
+            }));
             return;
           }
           setAuthUser(null);
@@ -1763,7 +3178,11 @@ export default function Home() {
         }
         setAuthUser(user);
         saveCustomerAuthUser(user);
-        if (user) setCheckoutForm((current) => ({ ...current, phone: current.phone || user.phone }));
+        if (user)
+          setCheckoutForm((current) => ({
+            ...current,
+            phone: current.phone || user.phone,
+          }));
       } catch {
         // Keep a locally restorable session through temporary network/CORS failures.
         // The next successful session check will still validate the token server-side.
@@ -1778,22 +3197,28 @@ export default function Home() {
 
   useEffect(() => {
     if (!authUser) return;
-    const timeout = window.setTimeout(() => {
-      if (authJustVerified) {
-        setAuthJustVerified(false);
-        setAuthOpen(false);
-      }
-      if (window.localStorage.getItem(checkoutAfterAuthKey) === "1" && cartItems.length) {
-        window.localStorage.removeItem(checkoutAfterAuthKey);
-        setAuthOpen(false);
-        setCheckoutOpen(true);
-      }
-      if (window.localStorage.getItem(ordersAfterAuthKey) === "1") {
-        window.localStorage.removeItem(ordersAfterAuthKey);
-        setAuthOpen(false);
-        setOrdersOpen(true);
-      }
-    }, authJustVerified ? 1400 : 0);
+    const timeout = window.setTimeout(
+      () => {
+        if (authJustVerified) {
+          setAuthJustVerified(false);
+          setAuthOpen(false);
+        }
+        if (
+          window.localStorage.getItem(checkoutAfterAuthKey) === "1" &&
+          cartItems.length
+        ) {
+          window.localStorage.removeItem(checkoutAfterAuthKey);
+          setAuthOpen(false);
+          setCheckoutOpen(true);
+        }
+        if (window.localStorage.getItem(ordersAfterAuthKey) === "1") {
+          window.localStorage.removeItem(ordersAfterAuthKey);
+          setAuthOpen(false);
+          setOrdersOpen(true);
+        }
+      },
+      authJustVerified ? 1400 : 0,
+    );
     return () => window.clearTimeout(timeout);
   }, [authUser, authJustVerified, cartItems.length]);
 
@@ -1814,20 +3239,26 @@ export default function Home() {
       const stored = window.localStorage.getItem("fanzzy-announcement");
       if (stored !== null) setAnnouncementText(stored);
     };
-    const runSyncAnnouncement = () => { void syncAnnouncement().catch(() => undefined); };
+    const runSyncAnnouncement = () => {
+      void syncAnnouncement().catch(() => undefined);
+    };
     runSyncAnnouncement();
     window.addEventListener("storage", runSyncAnnouncement);
     window.addEventListener("fanzzy-announcement-updated", runSyncAnnouncement);
     return () => {
       window.removeEventListener("storage", runSyncAnnouncement);
-      window.removeEventListener("fanzzy-announcement-updated", runSyncAnnouncement);
+      window.removeEventListener(
+        "fanzzy-announcement-updated",
+        runSyncAnnouncement,
+      );
     };
   }, []);
 
   useEffect(() => {
     const syncMarketing = async () => {
       const remote = await fetchStoreSetting("marketingRecords");
-      const stored = remote.value || window.localStorage.getItem("fanzzy-marketing-records");
+      const stored =
+        remote.value || window.localStorage.getItem("fanzzy-marketing-records");
       if (!stored) {
         setMarketingRecords([]);
         setActiveCampaign(null);
@@ -1835,16 +3266,22 @@ export default function Home() {
       }
       try {
         const parsed = JSON.parse(stored) as MarketingRecord[];
-        const valid = Array.isArray(parsed) ? parsed.filter((record) => record?.name) : [];
+        const valid = Array.isArray(parsed)
+          ? parsed.filter((record) => record?.name)
+          : [];
         setMarketingRecords(valid);
-        const active = valid.find((record) => record?.status === "Active" && record?.name);
+        const active = valid.find(
+          (record) => record?.status === "Active" && record?.name,
+        );
         setActiveCampaign(active ?? null);
       } catch {
         setMarketingRecords([]);
         setActiveCampaign(null);
       }
     };
-    const runSyncMarketing = () => { void syncMarketing().catch(() => undefined); };
+    const runSyncMarketing = () => {
+      void syncMarketing().catch(() => undefined);
+    };
     runSyncMarketing();
     window.addEventListener("storage", runSyncMarketing);
     window.addEventListener("fanzzy-marketing-updated", runSyncMarketing);
@@ -1857,31 +3294,59 @@ export default function Home() {
   useEffect(() => {
     const syncPromotions = async () => {
       const remote = await fetchStoreSetting("promotionalOffers");
-      const stored = remote.value || window.localStorage.getItem(promotionStorageKey);
-      if (!stored) { setPromotionalOffers([]); return; }
+      const stored =
+        remote.value || window.localStorage.getItem(promotionStorageKey);
+      if (!stored) {
+        setPromotionalOffers([]);
+        return;
+      }
       try {
         const parsed = JSON.parse(stored) as unknown[];
-        setPromotionalOffers(parsed.map(normalizePromotionOffer).filter((offer): offer is PromotionOffer => Boolean(offer && isPromotionLive(offer))));
-      } catch { setPromotionalOffers([]); }
+        setPromotionalOffers(
+          parsed
+            .map(normalizePromotionOffer)
+            .filter((offer): offer is PromotionOffer =>
+              Boolean(offer && isPromotionLive(offer)),
+            ),
+        );
+      } catch {
+        setPromotionalOffers([]);
+      }
     };
-    const runSyncPromotions = () => { void syncPromotions().catch(() => undefined); };
+    const runSyncPromotions = () => {
+      void syncPromotions().catch(() => undefined);
+    };
     runSyncPromotions();
     window.addEventListener("storage", runSyncPromotions);
     window.addEventListener("fanzzy-promotions-updated", runSyncPromotions);
     return () => {
       window.removeEventListener("storage", runSyncPromotions);
-      window.removeEventListener("fanzzy-promotions-updated", runSyncPromotions);
+      window.removeEventListener(
+        "fanzzy-promotions-updated",
+        runSyncPromotions,
+      );
     };
   }, []);
 
   useEffect(() => {
     const syncHeroSlides = async () => {
-      const remoteSlides = await fetchStoreSetting("heroSlides");
-      const storedSlides = remoteSlides.value || window.localStorage.getItem("fanzzy-hero-slides");
+      const settings = await fetchHomepageSettings();
+      const remoteSlides = settings.heroSlides;
+      const storedSlides =
+        remoteSlides.value || window.localStorage.getItem("fanzzy-hero-slides");
       if (storedSlides) {
         try {
           const parsed = JSON.parse(storedSlides);
-          const allowedSlides = Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string" && value.trim().length > 0 && !value.includes(blockedHeroImage)).slice(0, 4) : [];
+          const allowedSlides = Array.isArray(parsed)
+            ? parsed
+                .filter(
+                  (value): value is string =>
+                    typeof value === "string" &&
+                    value.trim().length > 0 &&
+                    !value.includes(blockedHeroImage),
+                )
+                .slice(0, 4)
+            : [];
           if (allowedSlides.length) {
             setHeroSlides(allowedSlides);
             return;
@@ -1890,11 +3355,15 @@ export default function Home() {
           window.localStorage.removeItem("fanzzy-hero-slides");
         }
       }
-      const legacy = await fetchStoreSetting("heroImage");
-      const storedLegacy = legacy.value || window.localStorage.getItem("fanzzy-hero-image");
-      if (storedLegacy && !storedLegacy.includes(blockedHeroImage)) setHeroSlides([storedLegacy]);
+      const legacy = settings.heroImage;
+      const storedLegacy =
+        legacy.value || window.localStorage.getItem("fanzzy-hero-image");
+      if (storedLegacy && !storedLegacy.includes(blockedHeroImage))
+        setHeroSlides([storedLegacy]);
     };
-    const runSyncHeroSlides = () => { void syncHeroSlides().catch(() => undefined); };
+    const runSyncHeroSlides = () => {
+      void syncHeroSlides().catch(() => undefined);
+    };
     runSyncHeroSlides();
     window.addEventListener("storage", runSyncHeroSlides);
     window.addEventListener("fanzzy-hero-updated", runSyncHeroSlides);
@@ -1902,7 +3371,10 @@ export default function Home() {
     return () => {
       window.removeEventListener("storage", runSyncHeroSlides);
       window.removeEventListener("fanzzy-hero-updated", runSyncHeroSlides);
-      window.removeEventListener("fanzzy-hero-slides-updated", runSyncHeroSlides);
+      window.removeEventListener(
+        "fanzzy-hero-slides-updated",
+        runSyncHeroSlides,
+      );
     };
   }, []);
 
@@ -1917,18 +3389,29 @@ export default function Home() {
 
   useEffect(() => {
     const syncHeroSlideDuration = async () => {
-      const remote = await fetchStoreSetting("heroSlideDuration");
-      const stored = remote.value || window.localStorage.getItem("fanzzy-hero-slide-duration");
+      const remote = (await fetchHomepageSettings()).heroSlideDuration;
+      const stored =
+        remote.value ||
+        window.localStorage.getItem("fanzzy-hero-slide-duration");
       const parsed = Number(stored);
-      if (Number.isFinite(parsed)) setHeroSlideDuration(Math.min(30, Math.max(2, parsed)));
+      if (Number.isFinite(parsed))
+        setHeroSlideDuration(Math.min(30, Math.max(2, parsed)));
     };
-    const runSyncHeroSlideDuration = () => { void syncHeroSlideDuration().catch(() => undefined); };
+    const runSyncHeroSlideDuration = () => {
+      void syncHeroSlideDuration().catch(() => undefined);
+    };
     runSyncHeroSlideDuration();
     window.addEventListener("storage", runSyncHeroSlideDuration);
-    window.addEventListener("fanzzy-hero-slides-updated", runSyncHeroSlideDuration);
+    window.addEventListener(
+      "fanzzy-hero-slides-updated",
+      runSyncHeroSlideDuration,
+    );
     return () => {
       window.removeEventListener("storage", runSyncHeroSlideDuration);
-      window.removeEventListener("fanzzy-hero-slides-updated", runSyncHeroSlideDuration);
+      window.removeEventListener(
+        "fanzzy-hero-slides-updated",
+        runSyncHeroSlideDuration,
+      );
     };
   }, []);
 
@@ -1951,12 +3434,15 @@ export default function Home() {
       try {
         const parsed = JSON.parse(remote.value) as unknown;
         if (Array.isArray(parsed))
-          subscribers = parsed.filter((item): item is string => typeof item === "string");
+          subscribers = parsed.filter(
+            (item): item is string => typeof item === "string",
+          );
       } catch {
         subscribers = [];
       }
     }
-    if (!subscribers.includes(normalizedEmail)) subscribers.push(normalizedEmail);
+    if (!subscribers.includes(normalizedEmail))
+      subscribers.push(normalizedEmail);
     const saveError = await saveStoreSetting(
       "newsletterSubscribers",
       JSON.stringify(subscribers),
@@ -1970,23 +3456,51 @@ export default function Home() {
     setNewsletterMessage("You’re on the list. Welcome to Fanzzy.");
   };
   const toggleWishlist = (id: string) => {
-    setWishlist((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
-    announce(wishlist.includes(id) ? "Removed from wishlist" : "Saved to wishlist");
+    setWishlist((current) =>
+      current.includes(id)
+        ? current.filter((item) => item !== id)
+        : [...current, id],
+    );
+    announce(
+      wishlist.includes(id) ? "Removed from wishlist" : "Saved to wishlist",
+    );
   };
-  const addToCart = (product: Product, variant: ProductVariant | null = null, size: string | null = null) => {
-    if (getProductVariantType(product) === "normal" && product.variants?.length && !variant) {
+  const addToCart = (
+    product: Product,
+    variant: ProductVariant | null = null,
+    size: string | null = null,
+  ) => {
+    if (
+      getProductVariantType(product) === "normal" &&
+      product.variants?.length &&
+      !variant
+    ) {
       openQuickProduct(product);
       return;
     }
-    if (getProductVariantType(product) === "size" && getProductSizes(product).length && !size) {
+    if (
+      getProductVariantType(product) === "size" &&
+      getProductSizes(product).length &&
+      !size
+    ) {
       openQuickProduct(product);
       return;
     }
-    if (getSelectionStock(product, variant, size) <= 0) return announce(`${product.name}${size ? ` · Size ${size}` : ""}${variant?.name ? ` · ${variant.name}` : ""} is sold out`);
-    const cartKey = [product.id, variant ? (variant.name || variant.image) : "", size || ""].filter(Boolean).join("::");
+    if (getSelectionStock(product, variant, size) <= 0)
+      return announce(
+        `${product.name}${size ? ` · Size ${size}` : ""}${variant?.name ? ` · ${variant.name}` : ""} is sold out`,
+      );
+    const cartKey = [
+      product.id,
+      variant ? variant.name || variant.image : "",
+      size || "",
+    ]
+      .filter(Boolean)
+      .join("::");
     setCart((current) => ({ ...current, [cartKey]: 1 }));
     setCartPreviewOpen(true);
-    if (variant) setCartVariants((current) => ({ ...current, [cartKey]: variant }));
+    if (variant)
+      setCartVariants((current) => ({ ...current, [cartKey]: variant }));
     if (size) setCartSizes((current) => ({ ...current, [cartKey]: size }));
     // Keep the customer on the collection after adding. The compact cart
     // summary below provides the next actions without opening the full drawer.
@@ -1997,54 +3511,122 @@ export default function Home() {
   };
   const addPromotionToCart = (offer: PromotionOffer) => {
     if (!quickProduct) return;
-    const paidSelection = makePromotionSelection(quickProduct, selectedVariant, selectedSize);
-    const paid = Array.from({ length: offer.type === "bundle" ? 0 : offer.buyQuantity }, () => paidSelection);
+    const paidSelection = makePromotionSelection(
+      quickProduct,
+      selectedVariant,
+      selectedSize,
+    );
+    const paid = Array.from(
+      { length: offer.type === "bundle" ? 0 : offer.buyQuantity },
+      () => paidSelection,
+    );
     const free = offer.type === "bundle" ? [] : selectedFreeSelections;
     const bundle = offer.type === "bundle" ? selectedBundleSelections : [];
-    const error = validatePromotionSelection(offer, offer.type === "bundle" ? bundle : paid, free);
+    const error = validatePromotionSelection(
+      offer,
+      offer.type === "bundle" ? bundle : paid,
+      free,
+    );
     if (error) return announce(error);
     const chosen = offer.type === "bundle" ? bundle : [...paid, ...free];
-    if (chosen.some((selection) => (selection.stock || 0) <= 0)) return announce("One of the selected variants is out of stock");
+    if (chosen.some((selection) => (selection.stock || 0) <= 0))
+      return announce("One of the selected variants is out of stock");
     const selectedQuantities = new Map<string, number>();
-    chosen.forEach((selection) => selectedQuantities.set(selectionKey(selection), (selectedQuantities.get(selectionKey(selection)) || 0) + 1));
-    if (Array.from(selectedQuantities.entries()).some(([key, quantity]) => {
-      const selection = chosen.find((item) => selectionKey(item) === key);
-      return Boolean(selection && quantity > (selection.stock || 0));
-    })) return announce("There is not enough stock for one of the selected variants or sizes");
+    chosen.forEach((selection) =>
+      selectedQuantities.set(
+        selectionKey(selection),
+        (selectedQuantities.get(selectionKey(selection)) || 0) + 1,
+      ),
+    );
+    if (
+      Array.from(selectedQuantities.entries()).some(([key, quantity]) => {
+        const selection = chosen.find((item) => selectionKey(item) === key);
+        return Boolean(selection && quantity > (selection.stock || 0));
+      })
+    )
+      return announce(
+        "There is not enough stock for one of the selected variants or sizes",
+      );
     const groupId = `${offer.id}-${Date.now()}`;
-    const prices = offer.type === "bundle" ? allocateBundlePrices(bundle, offer.fixedBundlePrice) : paid.map(() => 0).concat(free.map(() => 0));
-    const promotionLines: Array<{ cartKey: string; variant: ProductVariant | null; size: string | null; line: PromotionCartLine }> = [];
-    const addLine = (selection: PromotionSelection, index: number, role: PromotionCartLine["role"], linePrice: number) => {
-      const product = products.find((item) => item.id === selection.productId || item.sku === selection.sku) || quickProduct;
-      const variant = product.variants?.find((item) => item.name === selection.variantName) || null;
+    const prices =
+      offer.type === "bundle"
+        ? allocateBundlePrices(bundle, offer.fixedBundlePrice)
+        : paid.map(() => 0).concat(free.map(() => 0));
+    const promotionLines: Array<{
+      cartKey: string;
+      variant: ProductVariant | null;
+      size: string | null;
+      line: PromotionCartLine;
+    }> = [];
+    const addLine = (
+      selection: PromotionSelection,
+      index: number,
+      role: PromotionCartLine["role"],
+      linePrice: number,
+    ) => {
+      const product =
+        products.find(
+          (item) =>
+            item.id === selection.productId || item.sku === selection.sku,
+        ) || quickProduct;
+      const variant =
+        product.variants?.find((item) => item.name === selection.variantName) ||
+        null;
       const size = selection.size || null;
       const cartKey = `${product.id}::${variant?.name || ""}::${size || ""}::offer-${groupId}-${index}`;
-      promotionLines.push({ cartKey, variant, size, line: { groupId, offerId: offer.id, role, label: offerTypeLabel(offer), regularPrice: selection.price || product.price, linePrice } });
+      promotionLines.push({
+        cartKey,
+        variant,
+        size,
+        line: {
+          groupId,
+          offerId: offer.id,
+          role,
+          label: offerTypeLabel(offer),
+          regularPrice: selection.price || product.price,
+          linePrice,
+        },
+      });
     };
-    if (offer.type === "bundle") bundle.forEach((selection, index) => addLine(selection, index, "bundle", prices[index] || 0));
+    if (offer.type === "bundle")
+      bundle.forEach((selection, index) =>
+        addLine(selection, index, "bundle", prices[index] || 0),
+      );
     else {
-      paid.forEach((selection, index) => addLine(selection, index, "paid", selection.price || 0));
-      free.forEach((selection, index) => addLine(selection, paid.length + index, "free", 0));
+      paid.forEach((selection, index) =>
+        addLine(selection, index, "paid", selection.price || 0),
+      );
+      free.forEach((selection, index) =>
+        addLine(selection, paid.length + index, "free", 0),
+      );
     }
     setCart((current) => {
       const next = { ...current };
-      promotionLines.forEach(({ cartKey }) => { next[cartKey] = 1; });
+      promotionLines.forEach(({ cartKey }) => {
+        next[cartKey] = 1;
+      });
       return next;
     });
     setCartPreviewOpen(true);
     setCartVariants((current) => {
       const next = { ...current };
-      promotionLines.forEach(({ cartKey, variant }) => { if (variant) next[cartKey] = variant; });
+      promotionLines.forEach(({ cartKey, variant }) => {
+        if (variant) next[cartKey] = variant;
+      });
       return next;
     });
     setCartSizes((current) => {
       const next = { ...current };
-      promotionLines.forEach(({ cartKey, size }) => { if (size) next[cartKey] = size; });
+      promotionLines.forEach(({ cartKey, size }) => {
+        if (size) next[cartKey] = size;
+      });
       return next;
     });
     setCartPromotionLines((current) => {
       const next = { ...current };
-      promotionLines.forEach(({ cartKey, line }) => { next[cartKey] = line; });
+      promotionLines.forEach(({ cartKey, line }) => {
+        next[cartKey] = line;
+      });
       return next;
     });
     quickProductCloseRequested.current = true;
@@ -2052,14 +3634,22 @@ export default function Home() {
   };
   const updateQuantity = (cartKey: string, delta: number) => {
     const productId = cartKey.split("::", 1)[0];
-    const product = products.find((item) => item.id === productId);
+    const product = catalogProducts.find((item) => item.id === productId);
     const variant = cartVariants[cartKey];
     const size = cartSizes[cartKey];
-    if (delta > 0 && product && getSelectionStock(product, variant, size) <= (cart[cartKey] ?? 0)) return announce(`${product.name}${size ? ` · Size ${size}` : ""} has no more stock available`);
+    if (
+      delta > 0 &&
+      product &&
+      getSelectionStock(product, variant, size) <= (cart[cartKey] ?? 0)
+    )
+      return announce(
+        `${product.name}${size ? ` · Size ${size}` : ""} has no more stock available`,
+      );
     setCart((current) => {
       const next = Math.max(0, (current[cartKey] ?? 0) + delta);
       const updated = { ...current };
-      if (next === 0) delete updated[cartKey]; else updated[cartKey] = next;
+      if (next === 0) delete updated[cartKey];
+      else updated[cartKey] = next;
       return updated;
     });
     if ((cart[cartKey] ?? 0) + delta <= 0) {
@@ -2068,8 +3658,16 @@ export default function Home() {
         delete updated[cartKey];
         return updated;
       });
-      setCartSizes((current) => { const updated = { ...current }; delete updated[cartKey]; return updated; });
-      setCartPromotionLines((current) => { const updated = { ...current }; delete updated[cartKey]; return updated; });
+      setCartSizes((current) => {
+        const updated = { ...current };
+        delete updated[cartKey];
+        return updated;
+      });
+      setCartPromotionLines((current) => {
+        const updated = { ...current };
+        delete updated[cartKey];
+        return updated;
+      });
     }
   };
   const removeFromCart = (cartKey: string) => {
@@ -2083,8 +3681,16 @@ export default function Home() {
       delete updated[cartKey];
       return updated;
     });
-    setCartSizes((current) => { const updated = { ...current }; delete updated[cartKey]; return updated; });
-    setCartPromotionLines((current) => { const updated = { ...current }; delete updated[cartKey]; return updated; });
+    setCartSizes((current) => {
+      const updated = { ...current };
+      delete updated[cartKey];
+      return updated;
+    });
+    setCartPromotionLines((current) => {
+      const updated = { ...current };
+      delete updated[cartKey];
+      return updated;
+    });
     announce("Item removed from cart");
   };
   const closeAuth = useCallback(() => {
@@ -2097,41 +3703,47 @@ export default function Home() {
     setOtpCooldown(0);
     setAuthJustVerified(false);
   }, []);
-  const activeOverlayLayers = useMemo(() => [
-    mobileNavOpen && "mobileNav",
-    searchOpen && "search",
-    privacyOpen && "privacy",
-    returnPolicyOpen && "returnPolicy",
-    termsOpen && "terms",
-    assistantOpen && "assistant",
-    profileOpen && "profile",
-    savedOpen && "saved",
-    ordersOpen && "orders",
-    customerTrackingOrder && "customerTracking",
-    quickProduct && "quickProduct",
-    cartOpen && "cart",
-    authOpen && "auth",
-    checkoutOpen && "checkout",
-    orderConfirmation && "orderConfirmation",
-    zoomedImage && "zoomedImage",
-  ].filter((layer): layer is string => Boolean(layer)), [
-    mobileNavOpen,
-    searchOpen,
-    privacyOpen,
-    returnPolicyOpen,
-    termsOpen,
-    assistantOpen,
-    profileOpen,
-    savedOpen,
-    ordersOpen,
-    customerTrackingOrder,
-    cartOpen,
-    authOpen,
-    checkoutOpen,
-    orderConfirmation,
-    quickProduct,
-    zoomedImage,
-  ]);
+  const activeOverlayLayers = useMemo(
+    () =>
+      [
+        mobileNavOpen && "mobileNav",
+        searchOpen && "search",
+        privacyOpen && "privacy",
+        returnPolicyOpen && "returnPolicy",
+        termsOpen && "terms",
+        assistantOpen && "assistant",
+        profileOpen && "profile",
+        savedOpen && "saved",
+        ordersOpen && "orders",
+        customerTrackingOrder && "customerTracking",
+        cancelConfirmationOrder && "cancelConfirmation",
+        quickProduct && "quickProduct",
+        cartOpen && "cart",
+        authOpen && "auth",
+        checkoutOpen && "checkout",
+        orderConfirmation && "orderConfirmation",
+        zoomedImage && "zoomedImage",
+      ].filter((layer): layer is string => Boolean(layer)),
+    [
+      mobileNavOpen,
+      searchOpen,
+      privacyOpen,
+      returnPolicyOpen,
+      termsOpen,
+      assistantOpen,
+      profileOpen,
+      savedOpen,
+      ordersOpen,
+      customerTrackingOrder,
+      cancelConfirmationOrder,
+      cartOpen,
+      authOpen,
+      checkoutOpen,
+      orderConfirmation,
+      quickProduct,
+      zoomedImage,
+    ],
+  );
   const activeOverlayKey = activeOverlayLayers.join("|");
   const quickViewOpen = Boolean(quickProduct);
 
@@ -2172,18 +3784,28 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    const savedPageState = window.history.state?.fanzzyPage as Partial<StorefrontPageHistoryState> | undefined;
+    const savedPageState = window.history.state?.fanzzyPage as
+      Partial<StorefrontPageHistoryState> | undefined;
     const urlParams = new URLSearchParams(window.location.search);
-    const restoringOverlay = Boolean(window.history.state?.fanzzyOverlay || urlParams.get("fanzzy-overlay") || urlParams.get("fanzzy-product"));
+    const restoringOverlay = Boolean(
+      window.history.state?.fanzzyOverlay ||
+      urlParams.get("fanzzy-overlay") ||
+      urlParams.get("fanzzy-product"),
+    );
     if (!savedPageState || !restoringOverlay) return;
     const restoredPageState: StorefrontPageHistoryState = {
       activeCategory: savedPageState.activeCategory || "All pieces",
-      search: typeof savedPageState.search === "string" ? savedPageState.search : "",
-      scrollY: Number.isFinite(Number(savedPageState.scrollY)) ? Number(savedPageState.scrollY) : 0,
+      search:
+        typeof savedPageState.search === "string" ? savedPageState.search : "",
+      scrollY: Number.isFinite(Number(savedPageState.scrollY))
+        ? Number(savedPageState.scrollY)
+        : 0,
     };
     overlayPageState.current = restoredPageState;
-    if (savedPageState.activeCategory) setActiveCategory(restoredPageState.activeCategory);
-    if (typeof savedPageState.search === "string") setSearch(restoredPageState.search);
+    if (savedPageState.activeCategory)
+      setActiveCategory(restoredPageState.activeCategory);
+    if (typeof savedPageState.search === "string")
+      setSearch(restoredPageState.search);
   }, []);
 
   useLayoutEffect(() => {
@@ -2191,7 +3813,8 @@ export default function Home() {
 
     // Product data may arrive after the first client commit. Keep a direct
     // quick-view URL intact until the product can be restored into state.
-    if (overlayRestoredFromUrl.current && activeOverlayLayers.length === 0) return;
+    if (overlayRestoredFromUrl.current && activeOverlayLayers.length === 0)
+      return;
 
     if (overlayRestoredFromUrl.current) {
       overlayRestoredFromUrl.current = false;
@@ -2223,7 +3846,10 @@ export default function Home() {
             fanzzyOverlayScrollY: restoredScrollY,
           },
           "",
-          overlayHistoryUrl(activeOverlayLayers.slice(0, index + 1), quickProduct?.id),
+          overlayHistoryUrl(
+            activeOverlayLayers.slice(0, index + 1),
+            quickProduct?.id,
+          ),
         );
       }
       overlayScrollY.current = restoredScrollY;
@@ -2246,7 +3872,10 @@ export default function Home() {
       (layer, index) => previousLayers[index] === layer,
     );
 
-    if (activeOverlayLayers.length > previousLayers.length && previousIsCurrentPrefix) {
+    if (
+      activeOverlayLayers.length > previousLayers.length &&
+      previousIsCurrentPrefix
+    ) {
       // Opening a new layer (for example product popup, then photo zoom) gets
       // exactly one same-page history entry per layer.
       overlayLastBackUrl.current = null;
@@ -2278,16 +3907,36 @@ export default function Home() {
           window.location.href,
         );
       }
-      if (quickProduct) window.sessionStorage.setItem("fanzzy-overlay-product", JSON.stringify(quickProduct));
-      for (let index = previousLayers.length; index < activeOverlayLayers.length; index += 1) {
+      if (quickProduct)
+        window.sessionStorage.setItem(
+          "fanzzy-overlay-product",
+          JSON.stringify(quickProduct),
+        );
+      for (
+        let index = previousLayers.length;
+        index < activeOverlayLayers.length;
+        index += 1
+      ) {
         window.history.pushState(
-          { ...window.history.state, fanzzyOverlay: activeOverlayLayers[index] },
+          {
+            ...window.history.state,
+            fanzzyOverlay: activeOverlayLayers[index],
+          },
           "",
-          overlayHistoryUrl(activeOverlayLayers.slice(0, index + 1), quickProduct?.id),
+          overlayHistoryUrl(
+            activeOverlayLayers.slice(0, index + 1),
+            quickProduct?.id,
+          ),
         );
       }
-    } else if (activeOverlayLayers.length < previousLayers.length && currentIsPreviousPrefix) {
-      if (previousLayers.includes("quickProduct") && !activeOverlayLayers.includes("quickProduct")) {
+    } else if (
+      activeOverlayLayers.length < previousLayers.length &&
+      currentIsPreviousPrefix
+    ) {
+      if (
+        previousLayers.includes("quickProduct") &&
+        !activeOverlayLayers.includes("quickProduct")
+      ) {
         // Closing a product box is a state change, not a page traversal.
         // A native history.go can restore #shop after the box has disappeared.
         // Replace the popup URL in place so there is no delayed navigation.
@@ -2308,7 +3957,8 @@ export default function Home() {
       }
       // An on-screen close button already removed the layer. Consume its
       // same-page history entry without closing the next layer underneath it.
-      const removedLayerCount = previousLayers.length - activeOverlayLayers.length;
+      const removedLayerCount =
+        previousLayers.length - activeOverlayLayers.length;
       overlayHistoryStack.current = activeOverlayLayers;
       overlayHistoryCleanup.current = true;
       if (activeOverlayLayers.length === 0) {
@@ -2316,7 +3966,10 @@ export default function Home() {
       }
       window.history.go(-removedLayerCount);
       return;
-    } else if (activeOverlayKey !== previousLayers.join("|") && activeOverlayLayers.length) {
+    } else if (
+      activeOverlayKey !== previousLayers.join("|") &&
+      activeOverlayLayers.length
+    ) {
       // Replacing one drawer with another (cart -> login, profile -> orders)
       // reuses the current entry instead of adding a misleading extra Back step.
       const pageHistoryState: StorefrontPageHistoryState = {
@@ -2365,7 +4018,10 @@ export default function Home() {
       // URL's #shop anchor, losing the customer's position further down the
       // product list. Real route navigation must still reach the router.
       if (window.location.pathname !== listingPath) return;
-      if (overlayHistoryCleanup.current || (activeOverlayLayers.length > 0 && event.state?.fanzzyPage)) {
+      if (
+        overlayHistoryCleanup.current ||
+        (activeOverlayLayers.length > 0 && event.state?.fanzzyPage)
+      ) {
         event.stopImmediatePropagation();
       }
       if (overlayHistoryCleanup.current) {
@@ -2384,33 +4040,77 @@ export default function Home() {
       overlayClosedFromBack.current = true;
       overlayHistoryStack.current = activeOverlayLayers.slice(0, -1);
 
-      if (pageHistoryState?.activeCategory) setActiveCategory(pageHistoryState.activeCategory);
-      if (typeof pageHistoryState?.search === "string") setSearch(pageHistoryState.search);
+      if (pageHistoryState?.activeCategory)
+        setActiveCategory(pageHistoryState.activeCategory);
+      if (typeof pageHistoryState?.search === "string")
+        setSearch(pageHistoryState.search);
 
       switch (topLayer) {
-        case "zoomedImage": setZoomedImage(null); break;
-        case "quickProduct": closeQuickProduct(); break;
-        case "orderConfirmation": setOrderConfirmation(null); break;
-        case "checkout": setCheckoutOpen(false); break;
-        case "auth": closeAuth(); break;
-        case "cart": setCartOpen(false); break;
-        case "customerTracking": setCustomerTrackingOrder(null); break;
-        case "orders": setOrdersOpen(false); break;
-        case "saved": setSavedOpen(false); break;
-        case "profile": setProfileOpen(false); break;
-        case "assistant": setAssistantOpen(false); break;
-        case "search": setSearchOpen(false); break;
-        case "terms": setTermsOpen(false); break;
-        case "returnPolicy": setReturnPolicyOpen(false); break;
-        case "privacy": setPrivacyOpen(false); break;
-        case "mobileNav": setMobileNavOpen(false); break;
+        case "zoomedImage":
+          setZoomedImage(null);
+          break;
+        case "quickProduct":
+          closeQuickProduct();
+          break;
+        case "orderConfirmation":
+          setOrderConfirmation(null);
+          break;
+        case "checkout":
+          setCheckoutOpen(false);
+          break;
+        case "auth":
+          closeAuth();
+          break;
+        case "cart":
+          setCartOpen(false);
+          break;
+        case "customerTracking":
+          setCustomerTrackingOrder(null);
+          break;
+        case "cancelConfirmation":
+          if (!cancellingOrderId) setCancelConfirmationOrder(null);
+          break;
+        case "orders":
+          setOrdersOpen(false);
+          break;
+        case "saved":
+          setSavedOpen(false);
+          break;
+        case "profile":
+          setProfileOpen(false);
+          break;
+        case "assistant":
+          setAssistantOpen(false);
+          break;
+        case "search":
+          setSearchOpen(false);
+          break;
+        case "terms":
+          setTermsOpen(false);
+          break;
+        case "returnPolicy":
+          setReturnPolicyOpen(false);
+          break;
+        case "privacy":
+          setPrivacyOpen(false);
+          break;
+        case "mobileNav":
+          setMobileNavOpen(false);
+          break;
       }
     };
 
     // Capture runs before router listeners, even if they registered first.
     window.addEventListener("popstate", closeOverlayFromBack, true);
-    return () => window.removeEventListener("popstate", closeOverlayFromBack, true);
-  }, [activeOverlayKey, activeOverlayLayers, closeAuth, closeQuickProduct]);
+    return () =>
+      window.removeEventListener("popstate", closeOverlayFromBack, true);
+  }, [
+    activeOverlayKey,
+    activeOverlayLayers,
+    cancellingOrderId,
+    closeAuth,
+    closeQuickProduct,
+  ]);
   const signOut = async () => {
     await customerAuthRequest("sign-out", { method: "POST" });
     clearCustomerAuthTokens();
@@ -2425,7 +4125,9 @@ export default function Home() {
       return;
     }
     if (otpCooldown > 0) {
-      setAuthMessage(`Please wait ${otpCooldown} seconds before requesting another OTP.`);
+      setAuthMessage(
+        `Please wait ${otpCooldown} seconds before requesting another OTP.`,
+      );
       return;
     }
     setAuthLoading(true);
@@ -2447,8 +4149,8 @@ export default function Home() {
       }
       if (!response.ok) {
         setAuthMessage(
-          result.error
-            || (response.status === 404 || response.status === 405
+          result.error ||
+            (response.status === 404 || response.status === 405
               ? "SMS login is unavailable on this deployment. Please try again later."
               : response.status >= 500
                 ? "The SMS OTP service is temporarily unavailable. Please try again in a moment."
@@ -2461,7 +4163,9 @@ export default function Home() {
       setOtpCooldown(60);
       setAuthMessage("OTP sent successfully by SMS");
     } catch {
-      setAuthMessage("Could not connect to the SMS OTP service. Check your connection and try again.");
+      setAuthMessage(
+        "Could not connect to the SMS OTP service. Check your connection and try again.",
+      );
     } finally {
       setAuthLoading(false);
     }
@@ -2480,16 +4184,26 @@ export default function Home() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ code: token }),
       });
-      const result = await response.json() as { error?: string; user?: CustomerAuthUser; sessionToken?: string };
+      const result = (await response.json()) as {
+        error?: string;
+        user?: CustomerAuthUser;
+        sessionToken?: string;
+      };
       if (!response.ok || !result.user) {
-        setAuthMessage(result.error || (response.status === 410 ? "OTP expired" : "Invalid OTP"));
+        setAuthMessage(
+          result.error ||
+            (response.status === 410 ? "OTP expired" : "Invalid OTP"),
+        );
         return;
       }
       saveCustomerAuthTokens(result);
       clearPendingCustomerAuthToken();
       saveCustomerAuthUser(result.user);
       setAuthUser(result.user);
-      setCheckoutForm((current) => ({ ...current, phone: current.phone || result.user!.phone }));
+      setCheckoutForm((current) => ({
+        ...current,
+        phone: current.phone || result.user!.phone,
+      }));
       setAuthOtp("");
       setOtpSent(false);
       setOtpCooldown(0);
@@ -2503,7 +4217,12 @@ export default function Home() {
   };
   const openCheckout = async () => {
     if (!cartItems.length) return announce("Add a piece to your cart first");
-    if (cartStockIssues.length) return announce(cartHasSoldOutItems ? "Remove sold out items before checkout" : "Reduce item quantities before checkout");
+    if (cartStockIssues.length)
+      return announce(
+        cartHasSoldOutItems
+          ? "Remove sold out items before checkout"
+          : "Reduce item quantities before checkout",
+      );
     if (!authUser) {
       window.localStorage.setItem(checkoutAfterAuthKey, "1");
       setCartOpen(false);
@@ -2547,87 +4266,153 @@ export default function Home() {
   const applyCoupon = async () => {
     const code = normalizeCouponCode(couponInput);
     if (!code) return announce("Enter a coupon code");
-    const findCoupon = (source: MarketingRecord[]) => source.find((record) => String(record.kind || "").toLowerCase() === "coupon" && String(record.status || "").toLowerCase() === "active" && normalizeCouponCode(record.code) === code);
+    let couponOffers = onlineSalesPromotions;
+    try {
+      const response = await customerApiFetch(`/offers?coupon=${encodeURIComponent(code)}`, { cache: "no-store", credentials: "include" });
+      const result = await response.json() as { promotions?: unknown };
+      if (response.ok && Array.isArray(result.promotions)) { couponOffers = parseSalesPromotions(JSON.stringify(result.promotions)); setOnlineSalesPromotions(couponOffers); }
+    } catch { /* Existing agent coupons remain available if the refresh fails. */ }
+    const salesCoupon = evaluateSalesPromotions(couponOffers.filter((promotion) => promotion.type === "coupon"), onlinePromotionLines, { ...onlineCustomerContext, now: websitePromotionClock(onlineOfferTime), couponCode: code });
+    setSalesCouponCode("");
+    const findCoupon = (source: MarketingRecord[]) =>
+      source.find(
+        (record) =>
+          String(record.kind || "").toLowerCase() === "coupon" &&
+          String(record.status || "").toLowerCase() === "active" &&
+          normalizeCouponCode(record.code) === code,
+      );
     let coupon = findCoupon([...agentCoupons, ...marketingRecords]);
     if (!coupon) {
       const remote = await fetchStoreSetting("agents");
-      const freshAgentCoupons = parseAgentCoupons(remote.value || window.localStorage.getItem("fanzzy-agents"));
+      const freshAgentCoupons = parseAgentCoupons(
+        remote.value || window.localStorage.getItem("fanzzy-agents"),
+      );
       if (freshAgentCoupons.length) {
         setAgentCoupons(freshAgentCoupons);
         coupon = findCoupon([...freshAgentCoupons, ...marketingRecords]);
       }
     }
+    if (salesCoupon.promotion && !cartItems.some((item) => item.promotion)) { setAppliedCoupon(coupon || null); setSalesCouponCode(code); setCouponInput(code); return announce(`${code} applied`); }
     if (!coupon) {
       setAppliedCoupon(null);
       return announce("That coupon is not active or does not exist");
     }
-    if (!getCouponDiscount(coupon, subtotal)) return announce("This coupon has no valid discount");
+    if (!getCouponDiscount(coupon, subtotal))
+      return announce("This coupon has no valid discount");
     setAppliedCoupon(coupon);
     setCouponInput(code);
     announce(`${code} applied`);
   };
-  const decrementLocalInventory = (items: NonNullable<CustomerOrder["items"]>) => {
-    const normalizeInventoryKey = (value?: string) => String(value || "").trim().replace(/[^a-z0-9]/gi, "").toLowerCase();
+  const decrementLocalInventory = (
+    items: NonNullable<CustomerOrder["items"]>,
+  ) => {
+    const normalizeInventoryKey = (value?: string) =>
+      String(value || "")
+        .trim()
+        .replace(/[^a-z0-9]/gi, "")
+        .toLowerCase();
     let changed = false;
-    const next = products.map((product) => {
-        const matchingItems = items.filter((item) => {
-          const itemId = normalizeInventoryKey(item.productId);
-          return itemId && (itemId === normalizeInventoryKey(product.id) || itemId === normalizeInventoryKey(product.sku));
-        });
-        if (!matchingItems.length) return product;
+    const next = catalogProducts.map((product) => {
+      const matchingItems = items.filter((item) => {
+        const itemId = normalizeInventoryKey(item.productId);
+        return (
+          itemId &&
+          (itemId === normalizeInventoryKey(product.id) ||
+            itemId === normalizeInventoryKey(product.sku))
+        );
+      });
+      if (!matchingItems.length) return product;
 
-        const updated: Product = {
-          ...product,
-          variants: product.variants?.map((variant) => ({ ...variant })),
-          sizeStock: { ...(product.sizeStock || {}) },
-        };
-        matchingItems.forEach((item) => {
-          const quantity = Math.max(0, Math.floor(Number(item.quantity) || 0));
-          if (!quantity) return;
-          const normalizedSize = normalizeInventoryKey(item.size);
-          const normalizedVariant = normalizeInventoryKey(item.variantName);
-          if (normalizedSize) {
-            const sizeKey = Object.keys(updated.sizeStock || {}).find((key) => normalizeInventoryKey(key) === normalizedSize) || item.size!;
-            const sizeVariantIndex = updated.variants?.findIndex((variant) => normalizeInventoryKey(variant.size || variant.name) === normalizedSize) ?? -1;
-            const sizeVariant = sizeVariantIndex >= 0 ? updated.variants?.[sizeVariantIndex] : undefined;
-            const currentSizeStock = updated.sizeStock?.[sizeKey] ?? (sizeVariant?.stock ?? updated.stock);
-            updated.sizeStock = { ...(updated.sizeStock || {}), [sizeKey]: Math.max(0, Math.floor(Number(currentSizeStock) - quantity)) };
-            if (sizeVariantIndex >= 0 && updated.variants) {
-              updated.variants[sizeVariantIndex] = {
-                ...updated.variants[sizeVariantIndex],
-                stock: Math.max(0, Math.floor(Number(updated.variants[sizeVariantIndex].stock ?? currentSizeStock) - quantity)),
-              };
-            }
+      const updated: Product = {
+        ...product,
+        variants: product.variants?.map((variant) => ({ ...variant })),
+        sizeStock: { ...(product.sizeStock || {}) },
+      };
+      matchingItems.forEach((item) => {
+        const quantity = Math.max(0, Math.floor(Number(item.quantity) || 0));
+        if (!quantity) return;
+        const normalizedSize = normalizeInventoryKey(item.size);
+        const normalizedVariant = normalizeInventoryKey(item.variantName);
+        if (normalizedSize) {
+          const sizeKey =
+            Object.keys(updated.sizeStock || {}).find(
+              (key) => normalizeInventoryKey(key) === normalizedSize,
+            ) || item.size!;
+          const sizeVariantIndex =
+            updated.variants?.findIndex(
+              (variant) =>
+                normalizeInventoryKey(variant.size || variant.name) ===
+                normalizedSize,
+            ) ?? -1;
+          const sizeVariant =
+            sizeVariantIndex >= 0
+              ? updated.variants?.[sizeVariantIndex]
+              : undefined;
+          const currentSizeStock =
+            updated.sizeStock?.[sizeKey] ?? sizeVariant?.stock ?? updated.stock;
+          updated.sizeStock = {
+            ...(updated.sizeStock || {}),
+            [sizeKey]: Math.max(
+              0,
+              Math.floor(Number(currentSizeStock) - quantity),
+            ),
+          };
+          if (sizeVariantIndex >= 0 && updated.variants) {
+            updated.variants[sizeVariantIndex] = {
+              ...updated.variants[sizeVariantIndex],
+              stock: Math.max(
+                0,
+                Math.floor(
+                  Number(
+                    updated.variants[sizeVariantIndex].stock ??
+                      currentSizeStock,
+                  ) - quantity,
+                ),
+              ),
+            };
+          }
+          changed = true;
+          return;
+        }
+        if (normalizedVariant && updated.variants?.length) {
+          const variantIndex = updated.variants.findIndex(
+            (variant, index) =>
+              normalizeInventoryKey(variant.name || `Option ${index + 1}`) ===
+              normalizedVariant,
+          );
+          if (variantIndex >= 0) {
+            const variant = updated.variants[variantIndex];
+            updated.variants[variantIndex] = {
+              ...variant,
+              stock: Math.max(
+                0,
+                Math.floor(Number(variant.stock ?? updated.stock) - quantity),
+              ),
+            };
             changed = true;
             return;
           }
-          if (normalizedVariant && updated.variants?.length) {
-            const variantIndex = updated.variants.findIndex((variant, index) =>
-              normalizeInventoryKey(variant.name || `Option ${index + 1}`) === normalizedVariant,
-            );
-            if (variantIndex >= 0) {
-              const variant = updated.variants[variantIndex];
-              updated.variants[variantIndex] = {
-                ...variant,
-                stock: Math.max(0, Math.floor(Number(variant.stock ?? updated.stock) - quantity)),
-              };
-              changed = true;
-              return;
-            }
-          }
-          updated.stock = Math.max(0, Math.floor(Number(updated.stock) - quantity));
-          changed = true;
-        });
-        return updated;
+        }
+        updated.stock = Math.max(
+          0,
+          Math.floor(Number(updated.stock) - quantity),
+        );
+        changed = true;
+      });
+      return updated;
     });
     if (!changed) return false;
     setProducts(next);
-    window.localStorage.setItem("fanzzy-products", JSON.stringify(next));
-    const variantCache = Object.fromEntries(next.filter((product) => product.variants?.length).flatMap((product) => [
-      [product.sku, product.variants],
-      [product.id, product.variants],
-    ]));
-    window.localStorage.setItem(localProductVariantsKey, JSON.stringify(variantCache));
+    writeOptionalBrowserCache("fanzzy-products", next);
+    const variantCache = Object.fromEntries(
+      next
+        .filter((product) => product.variants?.length)
+        .flatMap((product) => [
+          [product.sku, product.variants],
+          [product.id, product.variants],
+        ]),
+    );
+    writeOptionalBrowserCache(localProductVariantsKey, variantCache);
     window.dispatchEvent(new Event("fanzzy-products-updated"));
     return true;
   };
@@ -2635,102 +4420,294 @@ export default function Home() {
     const adjustmentId = order.razorpayPaymentId || order.id;
     if (!adjustmentId) return;
     const storageKey = `fanzzy-local-inventory-adjustments:${authUser?.id || "guest"}`;
+    const sessionKey = `${storageKey}:${adjustmentId}`;
+    if (localInventoryAdjustments.current.has(sessionKey)) return;
     let adjustedIds: string[] = [];
     try {
-      const parsed = JSON.parse(window.localStorage.getItem(storageKey) || "[]") as unknown;
-      if (Array.isArray(parsed)) adjustedIds = parsed.filter((value): value is string => typeof value === "string");
+      const parsed = JSON.parse(
+        window.localStorage.getItem(storageKey) || "[]",
+      ) as unknown;
+      if (Array.isArray(parsed))
+        adjustedIds = parsed.filter(
+          (value): value is string => typeof value === "string",
+        );
     } catch {
       adjustedIds = [];
     }
-    if (adjustedIds.includes(adjustmentId) || !decrementLocalInventory(order.items || [])) return;
-    window.localStorage.setItem(storageKey, JSON.stringify([...adjustedIds, adjustmentId].slice(-250)));
+    if (
+      adjustedIds.includes(adjustmentId) ||
+      !decrementLocalInventory(order.items || [])
+    )
+      return;
+    localInventoryAdjustments.current.add(sessionKey);
+    writeOptionalBrowserCache(
+      storageKey,
+      [...adjustedIds, adjustmentId].slice(-250),
+    );
   };
-  const refundRequestForOrder = (orderId: string) => refundRequests.find((request) => request.orderId === orderId && request.userId === authUser?.id);
-  const requestRefund = async (order: CustomerOrder) => {
-    if (!authUser || order.status !== "Delivered") return announce("Refund requests are available after delivery.");
+  const refundRequestForOrder = (orderId: string) =>
+    refundRequests.find(
+      (request) =>
+        request.orderId === orderId && request.userId === authUser?.id,
+    );
+  const requestRefund = async (
+    order: CustomerOrder,
+    requestedItems: RequestedReturnItem[] = [],
+  ) => {
+    if (!authUser || order.status !== "Delivered")
+      return announce("Refund requests are available after delivery.");
+    const returnChoices = onlineRefundChoices(order);
+    const selectedItemIds = new Set<string>();
+    const validRequestedItems: RequestedReturnItem[] = [];
+    for (const requestedItem of requestedItems) {
+      const choice = returnChoices.find(
+        (candidate) => candidate.id === requestedItem.orderItemId,
+      );
+      const quantity = Math.floor(Number(requestedItem.quantity));
+      if (
+        !choice ||
+        selectedItemIds.has(choice.id) ||
+        !Number.isFinite(quantity) ||
+        quantity < 1 ||
+        quantity > choice.quantity
+      )
+        continue;
+      selectedItemIds.add(choice.id);
+      validRequestedItems.push({ orderItemId: choice.id, quantity });
+    }
+    if (returnChoices.length > 1 && !validRequestedItems.length) {
+      return announce("Select one or more items to return.");
+    }
     const existing = refundRequestForOrder(order.id);
-    if (existing) return announce(existing.status === "Requested" ? "Refund request already sent" : `Refund request: ${existing.status}`);
+    if (existing)
+      return announce(
+        existing.status === "Requested"
+          ? "Refund request already sent"
+          : `Refund request: ${existing.status}`,
+      );
     setRefundSubmittingId(order.id);
     try {
       const remote = await fetchStoreSetting("refundRequests");
       let allRequests: RefundRequest[] = [];
       try {
-        const parsed = JSON.parse(remote.value || window.localStorage.getItem("fanzzy-refund-requests") || "[]") as unknown;
-        if (Array.isArray(parsed)) allRequests = parsed.filter((request): request is RefundRequest => Boolean(request && typeof request === "object" && typeof (request as RefundRequest).orderId === "string" && typeof (request as RefundRequest).userId === "string"));
+        const parsed = JSON.parse(
+          (remote.error
+            ? window.localStorage.getItem("fanzzy-refund-requests")
+            : remote.value) || "[]",
+        ) as unknown;
+        if (Array.isArray(parsed))
+          allRequests = parsed.filter((request): request is RefundRequest =>
+            Boolean(
+              request &&
+              typeof request === "object" &&
+              typeof (request as RefundRequest).orderId === "string" &&
+              typeof (request as RefundRequest).userId === "string",
+            ),
+          );
       } catch {
         allRequests = [];
       }
-      if (allRequests.some((request) => request.orderId === order.id && request.userId === authUser.id)) {
+      if (
+        allRequests.some(
+          (request) =>
+            request.orderId === order.id && request.userId === authUser.id,
+        )
+      ) {
         setRefundRequests(allRequests);
         announce("Refund request already sent");
         return;
       }
-      const token = globalThis.crypto?.randomUUID?.().replace(/-/g, "").slice(-8).toUpperCase() || Date.now().toString(36).toUpperCase();
-      const nextRequest: RefundRequest = { id: `#RF-${token}`, orderId: order.id, userId: authUser.id, customerName: order.customerName, phone: order.phone || authUser.phone, amount: order.total, status: "Requested", reason: "Customer requested a refund", createdAt: new Date().toISOString() };
-      const nextRequests = [nextRequest, ...allRequests.filter((request) => request.id !== nextRequest.id)];
-      const saveError = await saveStoreSetting("refundRequests", JSON.stringify(nextRequests));
-      if (saveError) throw new Error("Refund request could not be sent. Please try again.");
-      window.localStorage.setItem("fanzzy-refund-requests", JSON.stringify(nextRequests));
+      const token =
+        globalThis.crypto
+          ?.randomUUID?.()
+          .replace(/-/g, "")
+          .slice(-8)
+          .toUpperCase() || Date.now().toString(36).toUpperCase();
+      const nextRequest: RefundRequest = {
+        id: `#RF-${token}`,
+        orderId: order.id,
+        userId: authUser.id,
+        customerName: order.customerName,
+        phone: order.phone || authUser.phone,
+        amount: order.total,
+        status: "Requested",
+        reason: "Customer requested a refund",
+        createdAt: new Date().toISOString(),
+        requestedItemIds: validRequestedItems.map((item) => item.orderItemId),
+        requestedItems: validRequestedItems,
+      };
+      const nextRequests = [
+        nextRequest,
+        ...allRequests.filter((request) => request.id !== nextRequest.id),
+      ];
+      const saveError = await saveStoreSetting(
+        "refundRequests",
+        JSON.stringify(nextRequests),
+      );
+      if (saveError)
+        throw new Error("Refund request could not be sent. Please try again.");
+      window.localStorage.setItem(
+        "fanzzy-refund-requests",
+        JSON.stringify(nextRequests),
+      );
       setRefundRequests(nextRequests);
+      setReturnSelectionOrder(null);
+      setReturnItemQuantities({});
       window.dispatchEvent(new Event("fanzzy-refund-requests-updated"));
+      if (typeof BroadcastChannel !== "undefined") {
+        const channel = new BroadcastChannel("fanzzy-refund-requests");
+        channel.postMessage({ type: "updated", requests: nextRequests });
+        channel.close();
+      }
       announce(`Refund request sent for ${order.id}`);
     } catch (error) {
-      announce(error instanceof Error ? error.message : "Refund request could not be sent. Please try again.");
+      announce(
+        error instanceof Error
+          ? error.message
+          : "Refund request could not be sent. Please try again.",
+      );
     } finally {
       setRefundSubmittingId(null);
     }
   };
+  const openReturnRequest = (order: CustomerOrder) => {
+    const returnChoices = onlineRefundChoices(order);
+    if (returnChoices.length < 2) {
+      void requestRefund(
+        order,
+        returnChoices[0]
+          ? [{ orderItemId: returnChoices[0].id, quantity: 1 }]
+          : [],
+      );
+      return;
+    }
+    setReturnItemQuantities({});
+    setReturnSelectionOrder(order);
+  };
+  const returnSelectionChoices = returnSelectionOrder
+    ? onlineRefundChoices(returnSelectionOrder)
+    : [];
+  const closeCancellationConfirmation = () => {
+    if (cancellingOrderId) return;
+    setCancelConfirmationOrder(null);
+    setCancellationReason("");
+    setCancellationDescription("");
+    setCancellationItemIndexes([]);
+  };
+  const openCancellationConfirmation = (order: CustomerOrder) => {
+    setCancellationReason("");
+    setCancellationDescription("");
+    setCancellationItemIndexes([]);
+    setCancelConfirmationOrder(order);
+  };
+  const cancelCustomerOrder = async (order: CustomerOrder) => {
+    if (!authUser) return announce("Sign in to cancel an order.");
+    const eligibility = getCustomerCancellationEligibility(order);
+    if (!eligibility.eligible) return announce(eligibility.message);
+    if (!isCustomerCancellationReason(cancellationReason))
+      return announce("Please select a cancellation reason.");
+    const description = cancellationDescription.trim().replace(/\s+/g, " ");
+    if (cancellationReason === "Other" && !description)
+      return announce("Please describe why you want to cancel this order.");
+    if (!cancellationItemIndexes.length)
+      return announce("Select one or more items to cancel.");
+
+    setCancellingOrderId(order.id);
+    try {
+      const response = await customerApiFetch("/orders/cancel", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          orderId: order.id,
+          cancellationReason,
+          cancellationDescription: description,
+          itemIndexes: cancellationItemIndexes,
+        }),
+      });
+      const body = (await response.json()) as {
+        error?: string;
+        order?: CustomerOrder;
+      };
+      if (!response.ok || !body.order)
+        throw new Error(body.error || "Could not cancel the order.");
+
+      const cancelledOrder = body.order;
+      setOrders((current) =>
+        current.map((candidate) =>
+          candidate.id === cancelledOrder.id ? cancelledOrder : candidate,
+        ),
+      );
+      setOrderConfirmation((current) =>
+        current?.id === cancelledOrder.id ? cancelledOrder : current,
+      );
+      setCustomerTrackingOrder((current) =>
+        current?.id === cancelledOrder.id ? null : current,
+      );
+      closeCancellationConfirmation();
+      window.dispatchEvent(new Event("fanzzy-orders-updated"));
+      window.dispatchEvent(new Event("fanzzy-products-updated"));
+      announce(
+        cancelledOrder.refundStatus === "Pending"
+          ? `${cancelledOrder.id} cancelled. Your refund is being processed.`
+          : `${cancelledOrder.id} cancelled successfully.`,
+      );
+    } catch (error) {
+      announce(
+        error instanceof Error ? error.message : "Could not cancel the order.",
+      );
+    } finally {
+      setCancellingOrderId(null);
+    }
+  };
+  const cancellableCancellationItems = (cancelConfirmationOrder?.items || [])
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => !item.cancelled);
+  const selectedCancellationItems = cancellableCancellationItems.filter(
+    ({ index }) => cancellationItemIndexes.includes(index),
+  );
+  const cancellationSelectionIsFull =
+    cancellableCancellationItems.length > 0 &&
+    selectedCancellationItems.length === cancellableCancellationItems.length;
+  const cancellationSelectionAmount = selectedCancellationItems.reduce(
+    (total, { item }) =>
+      total +
+      (Number(String(item.price || "").replace(/[^0-9.-]/g, "")) || 0) *
+        Math.max(0, Number(item.quantity) || 0),
+    0,
+  );
+  const cancellationSelectionAmountLabel = `₹${cancellationSelectionAmount.toLocaleString(
+    "en-IN",
+    {
+      minimumFractionDigits: cancellationSelectionAmount % 1 ? 2 : 0,
+      maximumFractionDigits: 2,
+    },
+  )}`;
   const persistConfirmedOrder = async (newOrder: CustomerOrder) => {
     if (!authUser) {
       setIsPaying(false);
       setCheckoutOpen(false);
-      setAuthMessage("Sign in with a one-time SMS code before placing an order.");
+      setAuthMessage(
+        "Sign in with a one-time SMS code before placing an order.",
+      );
       setAuthOpen(true);
       return;
     }
-    let previousOrders: unknown[] = [];
-    try {
-      const stored = window.localStorage.getItem(`fanzzy-orders:${authUser.id}`);
-      const parsed = stored ? JSON.parse(stored) : [];
-      if (Array.isArray(parsed)) previousOrders = parsed;
-    } catch {
-      previousOrders = [];
-    }
-    const remote = await fetchStoreOrders<CustomerOrder>();
-    const merged = new Map<string, CustomerOrder>();
-    remote.data?.forEach((order) => { if (order?.id) merged.set(order.id, order); });
-    previousOrders.forEach((order) => {
-      if (order && typeof order === "object" && "id" in order && typeof order.id === "string" && !merged.has(order.id)) {
-        merged.set(order.id, order as CustomerOrder);
-      }
-    });
-    const existingConfirmation = Array.from(merged.values()).find((order) => newOrder.paymentMethod === "cod"
-      ? order.id === newOrder.id && isPaidOrder(order)
-      : Boolean(order.razorpayPaymentId && order.razorpayPaymentId === newOrder.razorpayPaymentId));
-    if (existingConfirmation) {
-      const userOrders = Array.from(merged.values()).filter((order) => belongsToCustomer(order, authUser));
-      window.localStorage.setItem(`fanzzy-orders:${authUser.id}`, JSON.stringify(userOrders));
-      window.localStorage.setItem("fanzzy-orders", JSON.stringify(Array.from(merged.values())));
-      window.dispatchEvent(new Event("fanzzy-orders-updated"));
-      setOrders(userOrders);
-      setOrderConfirmation(existingConfirmation);
-      if (existingConfirmation.inventoryAdjusted === true) decrementLocalInventoryOnce(existingConfirmation);
-      setCart({});
-      setCartVariants({});
-      setCartPromotionLines({});
-      setCheckoutOpen(false);
-      setFulfillmentMethod("delivery");
-      setSelectedPickupHubId("");
-      setCheckoutForm({ name: "", phone: "", email: "", address: "", pincode: "", landmark: "" });
-      setIsPaying(false);
-      announce(`${existingConfirmation.id} was already confirmed`);
-      return;
-    }
-    const nextOrders = [newOrder, ...Array.from(merged.values()).filter((order) => order.id !== newOrder.id)];
-    const saveError = await saveStoreOrders(nextOrders);
-    window.localStorage.setItem("fanzzy-orders", JSON.stringify(nextOrders));
-    const userOrders = nextOrders.filter((order) => belongsToCustomer(order, authUser) && isPaidOrder(order));
-    window.localStorage.setItem(`fanzzy-orders:${authUser.id}`, JSON.stringify(userOrders));
+    const remote = await fetchCustomerOrders<CustomerOrder>();
+    const canonical = remote.data?.find(
+      (order) =>
+        order.id === newOrder.id &&
+        belongsToCustomer(order, authUser) &&
+        isPaidOrder(order),
+    );
+    if (remote.error || !canonical)
+      throw new Error(
+        "Order confirmation is still awaiting server verification.",
+      );
+    newOrder = canonical;
+    const nextOrders = remote.data || [];
+    const userOrders = nextOrders.filter(
+      (order) => belongsToCustomer(order, authUser) && isPaidOrder(order),
+    );
     window.dispatchEvent(new Event("fanzzy-orders-updated"));
     setOrders(userOrders);
     setOrderConfirmation(newOrder);
@@ -2740,81 +4717,96 @@ export default function Home() {
     setCheckoutOpen(false);
     setFulfillmentMethod("delivery");
     setSelectedPickupHubId("");
-    setCheckoutForm({ name: "", phone: "", email: "", address: "", pincode: "", landmark: "" });
+    setCheckoutForm({
+      name: "",
+      phone: "",
+      email: "",
+      address: "",
+      pincode: "",
+      landmark: "",
+    });
     setCouponInput("");
     setAppliedCoupon(null);
+    setSalesCouponCode("");
     setIsPaying(false);
-    if (newOrder.inventoryAdjusted === true) decrementLocalInventoryOnce(newOrder);
+    if (newOrder.inventoryAdjusted === true)
+      decrementLocalInventoryOnce(newOrder);
     window.dispatchEvent(new Event("fanzzy-products-updated"));
-    announce(saveError
-      ? `${newOrder.id} is paid and saved on this device. It will sync when the order service is restored.`
-      : `${newOrder.id} placed successfully`);
+    announce(`${newOrder.id} placed successfully`);
   };
   const persistPendingOrder = async (newOrder: CustomerOrder) => {
     if (!authUser) throw new Error("Sign in before placing an order");
-    const remote = await fetchStoreOrders<CustomerOrder>();
-    const merged = new Map<string, CustomerOrder>();
-    remote.data?.forEach((order) => { if (order?.id) merged.set(order.id, order); });
-    try {
-      const stored = window.localStorage.getItem(`fanzzy-orders:${authUser.id}`);
-      const localOrders = stored ? JSON.parse(stored) : [];
-      if (Array.isArray(localOrders)) {
-        localOrders.forEach((order) => {
-          if (order?.id && !merged.has(order.id)) merged.set(order.id, order as CustomerOrder);
-        });
-      }
-    } catch {
-      // A corrupt local cache must not prevent the server-side order record.
-    }
-    const nextOrders = [newOrder, ...Array.from(merged.values()).filter((order) => order.id !== newOrder.id)];
-    const saveError = await saveStoreOrders(nextOrders);
-    // Keep a browser-local copy when Supabase is temporarily unavailable.
-    window.localStorage.setItem("fanzzy-orders", JSON.stringify(nextOrders));
-    window.localStorage.setItem(
-      `fanzzy-orders:${authUser.id}`,
-      JSON.stringify(nextOrders.filter((order) => belongsToCustomer(order, authUser))),
-    );
-    window.dispatchEvent(new Event("fanzzy-orders-updated"));
-    // Do not open Razorpay unless this pre-payment order has reached the
-    // shared store. A browser-only copy cannot be seen by the live admin and
-    // would turn a successful payment into a missing order.
-    if (saveError) {
-      throw new Error("Orders are temporarily unavailable. No payment was started. Please try again shortly.");
-    }
+    if (newOrder.inventoryReserved || newOrder.razorpayOrderId) return;
+    await savePendingCustomerOrder(newOrder);
   };
   const submitCheckout = async () => {
     if (isPaying) return;
+    if (!onlineOffersReady) return announce("Offers are still loading. Please try again shortly.");
     if (!authUser) {
       setCheckoutOpen(false);
-      setAuthMessage("Sign in with a one-time SMS code before placing an order.");
+      setAuthMessage(
+        "Sign in with a one-time SMS code before placing an order.",
+      );
       setAuthOpen(true);
       return;
     }
-    if (cartStockIssues.length) return announce(cartHasSoldOutItems ? "Remove sold out items before checkout" : "Reduce item quantities before checkout");
-    if (!paymentSettings.online && !paymentSettings.cod) return announce("No payment method is currently available. Please try again shortly.");
-    if (paymentMethod === "online" && !paymentSettings.online) return announce("Online payment is currently unavailable. Choose COD instead.");
-    if (paymentMethod === "cod" && !paymentSettings.cod) return announce("COD is currently unavailable. Choose online payment instead.");
+    if (cartStockIssues.length)
+      return announce(
+        cartHasSoldOutItems
+          ? "Remove sold out items before checkout"
+          : "Reduce item quantities before checkout",
+      );
+    if (!paymentSettings.online && !paymentSettings.cod)
+      return announce(
+        "No payment method is currently available. Please try again shortly.",
+      );
+    if (paymentMethod === "online" && !paymentSettings.online)
+      return announce(
+        "Online payment is currently unavailable. Choose COD instead.",
+      );
+    if (paymentMethod === "cod" && !paymentSettings.cod)
+      return announce(
+        "COD is currently unavailable. Choose online payment instead.",
+      );
     const name = checkoutForm.name.trim();
     const digits = checkoutForm.phone.replace(/\D/g, "");
     const email = checkoutForm.email.trim();
     const pincode = checkoutForm.pincode.replace(/\D/g, "");
     const validationErrors: CheckoutErrors = {};
-    if (!name) validationErrors.name = "Enter the customer name for this order.";
-    if (!email) validationErrors.email = "Enter an email address for this order.";
-    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) validationErrors.email = "Enter a valid email address.";
-    if (digits.length < 10) validationErrors.phone = "Enter a valid WhatsApp number with at least 10 digits.";
-    if (fulfillmentMethod === "pickup" && !selectedPickupHub) validationErrors.pickupHub = "Select the hub where you will collect this order.";
-    if (fulfillmentMethod === "delivery" && !checkoutForm.address.trim()) validationErrors.address = "Enter the complete delivery address.";
-    if (fulfillmentMethod === "delivery" && pincode.length !== 6) validationErrors.pincode = "Enter a valid 6-digit delivery pincode.";
-    if (fulfillmentMethod === "delivery" && !checkoutForm.landmark.trim()) validationErrors.landmark = "Enter a nearby landmark for delivery.";
-    const firstValidationError = validationErrors.name || validationErrors.email || validationErrors.phone || validationErrors.pickupHub || validationErrors.address || validationErrors.pincode || validationErrors.landmark;
+    if (!name)
+      validationErrors.name = "Enter the customer name for this order.";
+    if (!email)
+      validationErrors.email = "Enter an email address for this order.";
+    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+      validationErrors.email = "Enter a valid email address.";
+    if (digits.length < 10)
+      validationErrors.phone =
+        "Enter a valid WhatsApp number with at least 10 digits.";
+    if (fulfillmentMethod === "pickup" && !selectedPickupHub)
+      validationErrors.pickupHub =
+        "Select the hub where you will collect this order.";
+    if (fulfillmentMethod === "delivery" && !checkoutForm.address.trim())
+      validationErrors.address = "Enter the complete delivery address.";
+    if (fulfillmentMethod === "delivery" && pincode.length !== 6)
+      validationErrors.pincode = "Enter a valid 6-digit delivery pincode.";
+    if (fulfillmentMethod === "delivery" && !checkoutForm.landmark.trim())
+      validationErrors.landmark = "Enter a nearby landmark for delivery.";
+    const firstValidationError =
+      validationErrors.name ||
+      validationErrors.email ||
+      validationErrors.phone ||
+      validationErrors.pickupHub ||
+      validationErrors.address ||
+      validationErrors.pincode ||
+      validationErrors.landmark;
     if (firstValidationError) {
       setCheckoutErrors(validationErrors);
       requestAnimationFrame(() => {
         if (validationErrors.name) checkoutNameRef.current?.focus();
         else if (validationErrors.email) checkoutEmailRef.current?.focus();
         else if (validationErrors.phone) checkoutPhoneRef.current?.focus();
-        else if (validationErrors.pickupHub) checkoutPickupHubRef.current?.focus();
+        else if (validationErrors.pickupHub)
+          checkoutPickupHubRef.current?.focus();
         else if (validationErrors.address) checkoutAddressRef.current?.focus();
         else checkoutPincodeRef.current?.focus();
       });
@@ -2822,11 +4814,19 @@ export default function Home() {
       return;
     }
     setCheckoutErrors({});
-    const orderAddress = fulfillmentMethod === "pickup" && selectedPickupHub
-      ? `Pickup from ${selectedPickupHub.name} · ${selectedPickupHub.place}`
-      : `${checkoutForm.address.trim()}, Landmark: ${checkoutForm.landmark.trim()}, ${pincode}`;
+    const orderAddress =
+      fulfillmentMethod === "pickup" && selectedPickupHub
+        ? `Pickup from ${selectedPickupHub.name} · ${selectedPickupHub.place}`
+        : `${checkoutForm.address.trim()}, Landmark: ${checkoutForm.landmark.trim()}, ${pincode}`;
 
-    const orderToken = globalThis.crypto?.randomUUID?.().replace(/-/g, "").slice(-6).toUpperCase() || "000000";
+    if (!globalThis.crypto?.randomUUID) {
+      announce("Secure checkout is unavailable in this browser.");
+      return;
+    }
+    const orderToken = globalThis.crypto
+      .randomUUID()
+      .replace(/-/g, "")
+      .toUpperCase();
     const orderId = `#FZ-${orderToken}`;
     const pendingOrder: CustomerOrder = {
       id: orderId,
@@ -2841,19 +4841,38 @@ export default function Home() {
       email: checkoutForm.email.trim(),
       address: orderAddress,
       fulfillmentMethod,
-      ...(fulfillmentMethod === "pickup" && selectedPickupHub ? {
-        pickupHubId: selectedPickupHub.id,
-        pickupHubName: selectedPickupHub.name,
-        pickupHubPlace: selectedPickupHub.place,
-      } : {}),
+      ...(fulfillmentMethod === "pickup" && selectedPickupHub
+        ? {
+            pickupHubId: selectedPickupHub.id,
+            pickupHubName: selectedPickupHub.name,
+            pickupHubPlace: selectedPickupHub.place,
+          }
+        : {}),
       paymentStatus: "pending",
-      ...(appliedCoupon ? { coupon: appliedCoupon.code } : {}),
+      ...(salesCouponCode || appliedCoupon?.code ? { coupon: salesCouponCode || appliedCoupon?.code } : {}),
       couponDiscount,
       promotionDiscount: bogoDiscount,
       shippingTotal: deliveryTotal,
       paymentMethod,
       codCharge: codTotal,
-      items: cartItems.map((product) => ({ productId: product.id, productName: product.name, name: `${product.billName || product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}${product.size ? ` · Size ${product.size}` : ""}`, quantity: product.quantity, price: formatINR(getCartLinePrice(product)), regularPrice: getCustomerPrice(product), image: product.image, variantName: product.variant?.name, variantImage: product.variant?.image, size: product.size || undefined, hsnCode: product.hsnCode || undefined, supplierName: product.supplierName || undefined, vendorId: product.vendorId || null, vendorName: product.vendorName || "Vestano", vendorSlug: product.vendorSlug, promotion: product.promotion || undefined })),
+      items: cartItems.map((product) => ({
+        productId: product.sku || product.id,
+        productName: product.name,
+        name: `${product.billName || product.name}${product.variant?.name ? ` · ${product.variant.name}` : ""}${product.size ? ` · Size ${product.size}` : ""}`,
+        quantity: product.quantity,
+        price: formatINR(getCartLinePrice(product)),
+        regularPrice: getCustomerPrice(product),
+        image: product.image,
+        variantName: product.variant?.name,
+        variantImage: product.variant?.image,
+        size: product.size || undefined,
+        hsnCode: product.hsnCode || undefined,
+        supplierName: product.supplierName || undefined,
+        vendorId: product.vendorId || null,
+        vendorName: product.vendorName || "Vestano",
+        vendorSlug: product.vendorSlug,
+        promotion: product.promotion || undefined,
+      })),
     };
 
     setIsPaying(true);
@@ -2865,7 +4884,7 @@ export default function Home() {
       // failure cannot release the same reservation twice.
       stockReserved = false;
       try {
-        await fetch(razorpayApiUrl("release-stock"), {
+        await customerAuthorizedFetch(razorpayApiUrl("release-stock"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ fanzzyOrderId: orderId }),
@@ -2879,14 +4898,24 @@ export default function Home() {
       // Save before opening Razorpay so a completed payment can always be matched
       // in Admin Orders, even if the customer's browser closes during the callback.
       await persistPendingOrder(pendingOrder);
-      const reservationResponse = await fetch(razorpayApiUrl("reserve-stock"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fanzzyOrderId: orderId }),
-      });
-      const reservation = await readRazorpayResponse<{ reserved?: boolean; reservedAt?: string; error?: string }>(reservationResponse);
+      const reservationResponse = await customerAuthorizedFetch(
+        razorpayApiUrl("reserve-stock"),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ fanzzyOrderId: orderId }),
+        },
+      );
+      const reservation = await readRazorpayResponse<{
+        reserved?: boolean;
+        reservedAt?: string;
+        error?: string;
+      }>(reservationResponse);
       if (!reservationResponse.ok || !reservation.reserved) {
-        throw new Error(reservation.error || "This product is no longer available in the requested quantity");
+        throw new Error(
+          reservation.error ||
+            "This product is no longer available in the requested quantity",
+        );
       }
       stockReserved = true;
       reservedPendingOrder = {
@@ -2903,8 +4932,15 @@ export default function Home() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ fanzzyOrderId: orderId }),
         });
-        const confirmation = await readRazorpayResponse<{ confirmed?: boolean; order?: Partial<CustomerOrder>; error?: string }>(codResponse);
-        if (!codResponse.ok || !confirmation.confirmed) throw new Error(confirmation.error || "COD order confirmation failed");
+        const confirmation = await readRazorpayResponse<{
+          confirmed?: boolean;
+          order?: Partial<CustomerOrder>;
+          error?: string;
+        }>(codResponse);
+        if (!codResponse.ok || !confirmation.confirmed)
+          throw new Error(
+            confirmation.error || "COD order confirmation failed",
+          );
         stockReserved = false;
         const codOrder: CustomerOrder = {
           ...reservedPendingOrder,
@@ -2916,16 +4952,43 @@ export default function Home() {
         await persistConfirmedOrder(codOrder);
         return;
       }
-      const orderResponse = await fetch(razorpayApiUrl("order"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ amount: Math.round(orderTotal * 100), receipt: orderId.replace("#", ""), fanzzyOrderId: orderId }),
-      });
-      const razorpayOrder = await readRazorpayResponse<{ id?: string; amount?: number; currency?: string; keyId?: string; error?: string }>(orderResponse);
-      if (!orderResponse.ok || !razorpayOrder.id || !razorpayOrder.keyId) throw new Error(razorpayOrder.error || "Razorpay order creation failed");
-      reservedPendingOrder = { ...reservedPendingOrder, razorpayOrderId: razorpayOrder.id };
+      const orderResponse = await customerAuthorizedFetch(
+        razorpayApiUrl("order"),
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            amount: Math.round(orderTotal * 100),
+            receipt: orderId.replace("#", ""),
+            fanzzyOrderId: orderId,
+          }),
+        },
+      );
+      const razorpayOrder = await readRazorpayResponse<{
+        id?: string;
+        amount?: number;
+        currency?: string;
+        keyId?: string;
+        error?: string;
+      }>(orderResponse);
+      if (!orderResponse.ok || !razorpayOrder.id || !razorpayOrder.keyId)
+        throw new Error(
+          razorpayOrder.error || "Razorpay order creation failed",
+        );
+      reservedPendingOrder = {
+        ...reservedPendingOrder,
+        razorpayOrderId: razorpayOrder.id,
+      };
       await persistPendingOrder(reservedPendingOrder);
       const Razorpay = await loadRazorpayCheckout();
+      // Razorpay expects a complete international-format contact value when
+      // it pre-fills Checkout. Its documented Test Mode contact keeps the
+      // local simulation independent of a customer's real mobile number.
+      const razorpayContact = razorpayOrder.keyId.startsWith("rzp_test_")
+        ? "+919000090000"
+        : checkoutForm.phone.trim().startsWith("+")
+          ? checkoutForm.phone.trim()
+          : `+91${checkoutForm.phone.replace(/\D/g, "").slice(-10)}`;
       const checkout = new Razorpay({
         key: razorpayOrder.keyId,
         amount: razorpayOrder.amount || Math.round(orderTotal * 100),
@@ -2933,24 +4996,46 @@ export default function Home() {
         name: "Fanzzy",
         description: `Fanzzy order ${orderId}`,
         order_id: razorpayOrder.id,
-        prefill: { name, contact: checkoutForm.phone.trim(), ...(checkoutForm.email.trim() ? { email: checkoutForm.email.trim() } : {}) },
+        prefill: {
+          name,
+          contact: razorpayContact,
+          ...(checkoutForm.email.trim()
+            ? { email: checkoutForm.email.trim() }
+            : {}),
+        },
         notes: { address: orderAddress, fanzzy_order_id: orderId },
         theme: { color: "#4b1c2b" },
         handler: (payment) => {
           void (async () => {
             try {
-              const verifyResponse = await fetch(razorpayApiUrl("verify"), {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  razorpayOrderId: payment.razorpay_order_id,
-                  razorpayPaymentId: payment.razorpay_payment_id,
-                  razorpaySignature: payment.razorpay_signature,
-                }),
-              });
-              const verification = await readRazorpayResponse<{ verified?: boolean; error?: string; inventoryAdjusted?: boolean }>(verifyResponse);
-              if (!verifyResponse.ok || !verification.verified) throw new Error(verification.error || "Payment verification failed");
-              const paidOrder = { ...reservedPendingOrder, paymentStatus: "paid" as const, razorpayOrderId: payment.razorpay_order_id, razorpayPaymentId: payment.razorpay_payment_id, inventoryAdjusted: verification.inventoryAdjusted === true };
+              const verifyResponse = await customerAuthorizedFetch(
+                razorpayApiUrl("verify"),
+                {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    razorpayOrderId: payment.razorpay_order_id,
+                    razorpayPaymentId: payment.razorpay_payment_id,
+                    razorpaySignature: payment.razorpay_signature,
+                  }),
+                },
+              );
+              const verification = await readRazorpayResponse<{
+                verified?: boolean;
+                error?: string;
+                inventoryAdjusted?: boolean;
+              }>(verifyResponse);
+              if (!verifyResponse.ok || !verification.verified)
+                throw new Error(
+                  verification.error || "Payment verification failed",
+                );
+              const paidOrder = {
+                ...reservedPendingOrder,
+                paymentStatus: "paid" as const,
+                razorpayOrderId: payment.razorpay_order_id,
+                razorpayPaymentId: payment.razorpay_payment_id,
+                inventoryAdjusted: verification.inventoryAdjusted === true,
+              };
               // The verify endpoint has now made the reservation permanent for
               // this paid order. Never release it after this point.
               stockReserved = false;
@@ -2958,45 +5043,62 @@ export default function Home() {
             } catch (error) {
               await releaseCheckoutStock();
               setIsPaying(false);
-              announce(error instanceof Error ? error.message : "Payment could not be verified");
+              announce(
+                error instanceof Error
+                  ? error.message
+                  : "Payment could not be verified",
+              );
             }
           })();
         },
-        modal: { ondismiss: () => { void releaseCheckoutStock(); setIsPaying(false); } },
+        modal: {
+          ondismiss: () => {
+            void releaseCheckoutStock();
+            setIsPaying(false);
+          },
+        },
       });
       checkout.open();
     } catch (error) {
       await releaseCheckoutStock();
       setIsPaying(false);
-      announce(error instanceof Error ? error.message : "Online payment could not start");
+      announce(
+        error instanceof Error
+          ? error.message
+          : "Online payment could not start",
+      );
     }
   };
-  const downloadBill = async (order: CustomerOrder) => {
-    if (printingBillId) return;
-    setPrintingBillId(order.id);
-    announce(`Opening print options for ${order.id}…`);
-    try {
-      const printed = await printOrderBill(order);
-      announce(printed ? `Print window opened for bill ${order.id}` : "Printing failed: allow popups and try again");
-    } catch {
-      announce("Printing failed: allow popups and try again");
-    } finally {
-      setPrintingBillId(null);
-    }
-  };
-  const getOrderedItemSelection = (item: NonNullable<CustomerOrder["items"]>[number]) => ({
+  const getOrderedItemSelection = (
+    item: NonNullable<CustomerOrder["items"]>[number],
+  ) => ({
     size: item.size || item.name.match(/(?:^| · )Size (.+)$/i)?.[1] || "",
-    variant: item.variantName || (item.name.includes(" · ") ? item.name.split(" · ").slice(1).filter((part) => !/^Size /i.test(part)).join(" · ") : ""),
+    variant:
+      item.variantName ||
+      (item.name.includes(" · ")
+        ? item.name
+            .split(" · ")
+            .slice(1)
+            .filter((part) => !/^Size /i.test(part))
+            .join(" · ")
+        : ""),
   });
-  const getOrderedProduct = (item: NonNullable<CustomerOrder["items"]>[number]) => {
-    const orderedName = (item.productName || item.name.split(" · ")[0]).trim().toLowerCase();
-    return products.find((candidate) =>
-      matchesProductKey(candidate, item.productId)
-      || candidate.name.trim().toLowerCase() === orderedName
-      || candidate.billName?.trim().toLowerCase() === orderedName,
+  const getOrderedProduct = (
+    item: NonNullable<CustomerOrder["items"]>[number],
+  ) => {
+    const orderedName = (item.productName || item.name.split(" · ")[0])
+      .trim()
+      .toLowerCase();
+    return products.find(
+      (candidate) =>
+        matchesProductKey(candidate, item.productId) ||
+        candidate.name.trim().toLowerCase() === orderedName ||
+        candidate.billName?.trim().toLowerCase() === orderedName,
     );
   };
-  const openOrderedProduct = (item: NonNullable<CustomerOrder["items"]>[number]) => {
+  const openOrderedProduct = (
+    item: NonNullable<CustomerOrder["items"]>[number],
+  ) => {
     const product = getOrderedProduct(item);
     if (!product) {
       announce("This product is no longer available in the collection.");
@@ -3004,205 +5106,2873 @@ export default function Home() {
     }
     const { variant, size } = getOrderedItemSelection(item);
     const orderedVariant = size
-      ? product.variants?.find((candidate) => String(candidate.size || candidate.name).trim().replace(/^size\s+/i, "").toLowerCase() === size.trim().replace(/^size\s+/i, "").toLowerCase())
+      ? product.variants?.find(
+          (candidate) =>
+            String(candidate.size || candidate.name)
+              .trim()
+              .replace(/^size\s+/i, "")
+              .toLowerCase() ===
+            size
+              .trim()
+              .replace(/^size\s+/i, "")
+              .toLowerCase(),
+        )
       : variant
-        ? product.variants?.find((candidate, index) => (candidate.name || `Option ${index + 1}`).trim().toLowerCase() === variant.trim().toLowerCase())
+        ? product.variants?.find(
+            (candidate, index) =>
+              (candidate.name || `Option ${index + 1}`).trim().toLowerCase() ===
+              variant.trim().toLowerCase(),
+          )
         : undefined;
     openQuickProduct(product, {
       variantName: variant || undefined,
       size: size || undefined,
-      image: item.variantImage || orderedVariant?.image || item.image || product.image,
+      image:
+        item.variantImage ||
+        orderedVariant?.image ||
+        item.image ||
+        product.image,
     });
   };
 
   const visibleOrders = useMemo(() => {
     if (!authUser) return [];
-    return orders.filter((order) => isCustomerOrder(order, authUser)).map((order) => (
-      /^manifested$/i.test(String(order.delhiveryLiveStatus || "").trim())
-        ? { ...order, delhiveryLiveStatus: customerShipmentStatus(order.delhiveryLiveStatus) }
-        : order
-    ));
+    return orders
+      .filter((order) => isCustomerOrder(order, authUser))
+      .map((order) =>
+        /^manifested$/i.test(String(order.delhiveryLiveStatus || "").trim())
+          ? {
+              ...order,
+              delhiveryLiveStatus: customerShipmentStatus(
+                order.delhiveryLiveStatus,
+              ),
+            }
+          : order,
+      );
   }, [authUser, orders]);
   const assistantReply = (message: string) => {
     const query = message.toLowerCase();
     const money = (value: number) => formatINR(value);
-    const productSummary = (items: Product[]) => items.slice(0, 3).map((product) => `${product.name} (${money(getCustomerPrice(product))})`).join(", ");
-    if (/hello|hi|hey|help/.test(query)) return "I can help with almost anything in the store: latest arrivals, product suggestions, budgets, gifts, stock, a new order, order tracking, shipping, returns, payments, and jewellery care. Ask me anything.";
+    const productSummary = (items: Product[]) =>
+      items
+        .slice(0, 3)
+        .map(
+          (product) => `${product.name} (${money(getCustomerPrice(product))})`,
+        )
+        .join(", ");
+    if (/hello|hi|hey|help/.test(query))
+      return "I can help with almost anything in the store: latest arrivals, product suggestions, budgets, gifts, stock, a new order, order tracking, shipping, returns, payments, and jewellery care. Ask me anything.";
     if (/latest|new arrival|newest|recent|just in|arrived/.test(query)) {
       const latest = [...products].reverse().slice(0, 3);
-      return latest.length ? `Our latest arrivals are ${productSummary(latest)}. Ask me about any one of them or tell me your budget.` : "There are no new arrivals loaded yet. Please check back after Admin adds the next pieces.";
+      return latest.length
+        ? `Our latest arrivals are ${productSummary(latest)}. Ask me about any one of them or tell me your budget.`
+        : "There are no new arrivals loaded yet. Please check back after Admin adds the next pieces.";
     }
-    if (/new order|place an order|buy|purchase|checkout|how do i order/.test(query)) return cartCount ? `You have ${cartCount} piece${cartCount === 1 ? "" : "s"} in your cart. Open Cart, choose Proceed to buy, add your details, and place the order.` : "To place a new order, open Shop, choose a piece, tap + to add it to your cart, then use Proceed to buy at checkout.";
+    if (
+      /new order|place an order|buy|purchase|checkout|how do i order/.test(
+        query,
+      )
+    )
+      return cartCount
+        ? `You have ${cartCount} piece${cartCount === 1 ? "" : "s"} in your cart. Open Cart, choose Proceed to buy, add your details, and place the order.`
+        : "To place a new order, open Shop, choose a piece, tap + to add it to your cart, then use Proceed to buy at checkout.";
     if (/order|track|delivery|status/.test(query)) {
-      if (!orders.length) return "I don’t see an order on this device yet. Place an order first, then open My orders to track it with your WhatsApp number.";
+      if (!orders.length)
+        return "I don’t see an order on this device yet. Place an order first, then open My orders to track it with your WhatsApp number.";
       const latest = orders[0];
       return `Your latest order ${latest.id} is currently ${latest.status}. The total is ${latest.total}. Open My orders for the full history.`;
     }
     if (/price|cost|budget|under|below|less than/.test(query)) {
-      const budget = query.match(/(?:under|below|less than|within|budget)\s*(?:₹|rs\.?\s*)?([\d,]+)/)?.[1];
+      const budget = query.match(
+        /(?:under|below|less than|within|budget)\s*(?:₹|rs\.?\s*)?([\d,]+)/,
+      )?.[1];
       if (budget) {
         const amount = Number(budget.replace(/,/g, ""));
-        const matches = products.filter((product) => getCustomerPrice(product) <= amount);
-        return matches.length ? `Within ${money(amount)}, I found ${productSummary(matches)}.` : `I couldn’t find a piece under ${money(amount)} yet. Try increasing your budget or ask for our lowest-priced pieces.`;
+        const matches = products.filter(
+          (product) => getCustomerPrice(product) <= amount,
+        );
+        return matches.length
+          ? `Within ${money(amount)}, I found ${productSummary(matches)}.`
+          : `I couldn’t find a piece under ${money(amount)} yet. Try increasing your budget or ask for our lowest-priced pieces.`;
       }
       return `Our pieces currently range from ${money(Math.min(...products.map((product) => getCustomerPrice(product))))} to ${money(Math.max(...products.map((product) => getCustomerPrice(product))))}. Tell me a maximum budget and I’ll filter them.`;
     }
     if (/stock|available|availability|in stock/.test(query)) {
       const available = products.filter((product) => product.price >= 0);
-      return available.length ? `These pieces are currently listed in the catalog: ${productSummary(available)}. Ask me for a specific product and I’ll check its listing.` : "The catalog is updating. Please check again in a moment.";
+      return available.length
+        ? `These pieces are currently listed in the catalog: ${productSummary(available)}. Ask me for a specific product and I’ll check its listing.`
+        : "The catalog is updating. Please check again in a moment.";
     }
-    if (/ship|deliver/.test(query)) return "We offer complimentary shipping above ₹999. Your order updates are shared using the WhatsApp number entered at checkout.";
-    if (/return|exchange/.test(query)) return "Returns are accepted within 7 days for eligible unworn pieces. Keep the packaging safe and contact us if you need help with a return.";
-    if (/care|clean|maintain/.test(query)) return "Keep jewellery away from perfume, water, and sprays. Store each piece separately in a soft pouch and gently wipe it after wear.";
-    if (/gift|present|birthday|anniversary/.test(query)) return "For gifting, I’d start with a versatile pair of earrings or a delicate necklace. Tell me the recipient’s style or your budget and I’ll narrow it down.";
-    if (/offer|discount|coupon|promo|sale/.test(query)) return "Look for the current offer banner on the storefront. You can copy an active coupon code there before checkout.";
-    if (/payment|cod|cash|online|razorpay/.test(query)) return "At checkout, enter your name, WhatsApp number, email address, and delivery address. Available payment options are shown when the order is placed.";
-    if (/category|collection|what do you sell|jewellery|jewelry/.test(query)) return "Fanzzy has earrings, necklaces, bracelets, and rings. Ask for a category or open View all categories to browse the full edit.";
-    const category = ["earrings", "necklaces", "bracelets", "rings"].find((item) => query.includes(item));
+    if (/ship|deliver/.test(query))
+      return "We offer complimentary shipping above ₹999. Your order updates are shared using the WhatsApp number entered at checkout.";
+    if (/return|exchange/.test(query))
+      return "Returns are accepted within 7 days for eligible unworn pieces. Keep the packaging safe and contact us if you need help with a return.";
+    if (/care|clean|maintain/.test(query))
+      return "Keep jewellery away from perfume, water, and sprays. Store each piece separately in a soft pouch and gently wipe it after wear.";
+    if (/gift|present|birthday|anniversary/.test(query))
+      return "For gifting, I’d start with a versatile pair of earrings or a delicate necklace. Tell me the recipient’s style or your budget and I’ll narrow it down.";
+    if (/offer|discount|coupon|promo|sale/.test(query))
+      return "Look for the current offer banner on the storefront. You can copy an active coupon code there before checkout.";
+    if (/payment|cod|cash|online|razorpay/.test(query))
+      return "At checkout, enter your name, WhatsApp number, email address, and delivery address. Available payment options are shown when the order is placed.";
+    if (/category|collection|what do you sell|jewellery|jewelry/.test(query))
+      return "Fanzzy has earrings, necklaces, bracelets, and rings. Ask for a category or open View all categories to browse the full edit.";
+    const category = ["earrings", "necklaces", "bracelets", "rings"].find(
+      (item) => query.includes(item),
+    );
     if (category) {
-      const matches = products.filter((product) => product.category.toLowerCase().includes(category)).slice(0, 3);
-      if (matches.length) return `Here are a few ${category} to explore: ${matches.map((product) => `${product.name} (${formatINR(getCustomerPrice(product))})`).join(", ")}.`;
+      const matches = products
+        .filter((product) => product.category.toLowerCase().includes(category))
+        .slice(0, 3);
+      if (matches.length)
+        return `Here are a few ${category} to explore: ${matches.map((product) => `${product.name} (${formatINR(getCustomerPrice(product))})`).join(", ")}.`;
     }
-    const matches = products.filter((product) => `${product.name} ${product.category}`.toLowerCase().includes(query)).slice(0, 3);
-    if (matches.length) return `I found ${matches.map((product) => `${product.name} (${formatINR(getCustomerPrice(product))})`).join(", ")}. Open the collection to take a closer look.`;
+    const matches = products
+      .filter((product) =>
+        `${product.name} ${product.category}`.toLowerCase().includes(query),
+      )
+      .slice(0, 3);
+    if (matches.length)
+      return `I found ${matches.map((product) => `${product.name} (${formatINR(getCustomerPrice(product))})`).join(", ")}. Open the collection to take a closer look.`;
     return "I’m here to help with products, latest arrivals, budgets, gifts, new orders, order status, shipping, payments, returns, offers, and jewellery care. Try asking: ‘What’s new?’, ‘Show me rings under ₹1500’, or ‘How do I place a new order?’";
   };
   const assistantProducts = (message: string) => {
     const query = message.toLowerCase();
-    if (/order|track|delivery|status|ship|return|exchange|care|clean|payment|cod|razorpay/.test(query)) return [];
-    if (/latest|new arrival|newest|recent|just in|arrived/.test(query)) return [...products].reverse().slice(0, 3);
-    const budget = query.match(/(?:under|below|less than|within|budget)\s*(?:₹|rs\.?\s*)?([\d,]+)/)?.[1];
-    if (budget) return products.filter((product) => getCustomerPrice(product) <= Number(budget.replace(/,/g, ""))).slice(0, 3);
-    const category = ["earrings", "necklaces", "bracelets", "rings"].find((item) => query.includes(item));
-    if (category) return products.filter((product) => product.category.toLowerCase().includes(category)).slice(0, 3);
-    if (/gift|present|birthday|anniversary/.test(query)) return products.filter((product) => product.tag === "Bestseller" || product.tag === "New in").slice(0, 3);
-    return products.filter((product) => `${product.name} ${product.category}`.toLowerCase().includes(query)).slice(0, 3);
+    if (
+      /order|track|delivery|status|ship|return|exchange|care|clean|payment|cod|razorpay/.test(
+        query,
+      )
+    )
+      return [];
+    if (/latest|new arrival|newest|recent|just in|arrived/.test(query))
+      return [...products].reverse().slice(0, 3);
+    const budget = query.match(
+      /(?:under|below|less than|within|budget)\s*(?:₹|rs\.?\s*)?([\d,]+)/,
+    )?.[1];
+    if (budget)
+      return products
+        .filter(
+          (product) =>
+            getCustomerPrice(product) <= Number(budget.replace(/,/g, "")),
+        )
+        .slice(0, 3);
+    const category = ["earrings", "necklaces", "bracelets", "rings"].find(
+      (item) => query.includes(item),
+    );
+    if (category)
+      return products
+        .filter((product) => product.category.toLowerCase().includes(category))
+        .slice(0, 3);
+    if (/gift|present|birthday|anniversary/.test(query))
+      return products
+        .filter(
+          (product) => product.tag === "Bestseller" || product.tag === "New in",
+        )
+        .slice(0, 3);
+    return products
+      .filter((product) =>
+        `${product.name} ${product.category}`.toLowerCase().includes(query),
+      )
+      .slice(0, 3);
   };
   const sendAssistantMessage = (value = assistantInput) => {
     const message = value.trim();
     if (!message) return;
     const matches = assistantProducts(message);
-    setAssistantMessages((current) => [...current, { role: "user", text: message }, { role: "assistant", text: assistantReply(message), productIds: matches.map((product) => product.id) }]);
+    setAssistantMessages((current) => [
+      ...current,
+      { role: "user", text: message },
+      {
+        role: "assistant",
+        text: assistantReply(message),
+        productIds: matches.map((product) => product.id),
+      },
+    ]);
     setAssistantInput("");
   };
   const quickOffers = quickProduct ? offersForProduct(quickProduct) : [];
-  const activeQuickOffer = selectedPromotion && quickOffers.some((offer) => offer.id === selectedPromotion.id) ? selectedPromotion : quickOffers[0] || null;
-  const quickFreeChoices = activeQuickOffer && quickProduct
-    ? getProductVariantType(quickProduct) === "normal" && quickProduct.variants?.length
-      ? quickProduct.variants.map((variant) => makePromotionSelection(quickProduct, variant, null))
-      : getProductVariantType(quickProduct) === "size" && getProductSizes(quickProduct).length
-        ? getProductSizes(quickProduct).map((size) => makePromotionSelection(quickProduct, null, size))
-        : [makePromotionSelection(quickProduct, null, null)]
-    : [];
-  const quickBundleChoices = activeQuickOffer?.type === "bundle" ? products.flatMap((product) => getProductVariantType(product) === "normal" && product.variants?.length ? product.variants.map((variant) => makePromotionSelection(product, variant, null)) : [makePromotionSelection(product)]) : [];
-  const isSelectionEligible = (offer: PromotionOffer, selection: PromotionSelection, bucket: "paid" | "free") => {
+  const activeQuickOffer =
+    selectedPromotion &&
+    quickOffers.some((offer) => offer.id === selectedPromotion.id)
+      ? selectedPromotion
+      : quickOffers[0] || null;
+  const quickFreeChoices =
+    activeQuickOffer && quickProduct
+      ? getProductVariantType(quickProduct) === "normal" &&
+        quickProduct.variants?.length
+        ? quickProduct.variants.map((variant) =>
+            makePromotionSelection(quickProduct, variant, null),
+          )
+        : getProductVariantType(quickProduct) === "size" &&
+            getProductSizes(quickProduct).length
+          ? getProductSizes(quickProduct).map((size) =>
+              makePromotionSelection(quickProduct, null, size),
+            )
+          : [makePromotionSelection(quickProduct, null, null)]
+      : [];
+  const quickBundleChoices =
+    activeQuickOffer?.type === "bundle"
+      ? products.flatMap((product) =>
+          getProductVariantType(product) === "normal" &&
+          product.variants?.length
+            ? product.variants.map((variant) =>
+                makePromotionSelection(product, variant, null),
+              )
+            : [makePromotionSelection(product)],
+        )
+      : [];
+  const isSelectionEligible = (
+    offer: PromotionOffer,
+    selection: PromotionSelection,
+    bucket: "paid" | "free",
+  ) => {
     const scope = bucket === "paid" ? offer.eligiblePaid : offer.eligibleFree;
     if (!scope.length) return true;
-    return scope.some((item) => item.productId === selection.productId && (
-      selectionKey(item) === selectionKey(selection) || (!item.variantName && !item.size)
-    ));
+    return scope.some(
+      (item) =>
+        item.productId === selection.productId &&
+        (selectionKey(item) === selectionKey(selection) ||
+          (!item.variantName && !item.size)),
+    );
   };
-  const categoryGroups = (["normal", "luxury"] as CatalogCategorySection[]).map((section) => ({
-    section,
-    categories: storefrontCategories.filter((category) => category.section === section).slice(0, 2),
-  }));
-  const getCategoryPieceCount = (category: StorefrontCategory) => products.length
-    ? products.filter((product) => matchesCatalogCategory(product.category, category.name, category.section, categories)).length
-    : Number.parseInt(category.count, 10) || 0;
+  const categoryGroups = (["normal", "luxury"] as CatalogCategorySection[]).map(
+    (section) => ({
+      section,
+      categories: storefrontCategories
+        .filter((category) => category.section === section)
+        .slice(0, 2),
+    }),
+  );
+  const getCategoryPieceCount = (category: StorefrontCategory) =>
+    products.length
+      ? products.filter((product) =>
+          matchesCatalogCategory(
+            product.category,
+            category.name,
+            category.section,
+            categories,
+          ),
+        ).length
+      : Number.parseInt(category.count, 10) || 0;
 
   return (
-    <main className={`site-shell${activeCategorySection === "luxury" ? " luxury-filter-active" : ""}`} id="top">
-      <div className="announcement"><div className="announcement-promo"><strong>{announcementText}</strong><button onClick={() => announce("Explore the collection below")}>Explore now&nbsp; ↗</button></div><span className="announcement-powered">Driven by Excellence. Powered by Vestano Retail</span></div>
+    <main
+      className={`site-shell${activeCategorySection === "luxury" ? " luxury-filter-active" : ""}`}
+      id="top"
+    >
+      <div className="announcement">
+        <div className="announcement-promo">
+          <strong>{announcementText}</strong>
+          <button onClick={() => announce("Explore the collection below")}>
+            Explore now&nbsp; ↗
+          </button>
+        </div>
+        <span className="announcement-powered">
+          Driven by Excellence. Powered by Vestano Retail
+        </span>
+      </div>
 
       <header className="site-header">
-        <a href="#top" className="wordmark" aria-label="fanZZy home"><img {...storefrontImageProps("/fanzzy-mark.png", "110px")} decoding="async" alt="fanZZy" className="brand-logo" /><span className="navbar-brand-name">fanZZy</span></a>
-        <nav className="desktop-nav" aria-label="Main navigation"><a href="#shop">Shop</a><a href="#categories">Collections</a><a href="#story">The journal</a><a href={`${siteBasePath}/track-order`}>Track order</a><a href="#footer">About</a></nav>
+        <a href="#top" className="wordmark" aria-label="fanZZy home">
+          <img
+            {...storefrontImageProps("/fanzzy-mark.png", "110px")}
+            decoding="async"
+            alt="fanZZy"
+            className="brand-logo"
+          />
+          <span className="navbar-brand-name">fanZZy</span>
+        </a>
+        <nav className="desktop-nav" aria-label="Main navigation">
+          <a href="#shop">Shop</a>
+          <a href="#categories">Collections</a>
+          <a href="#story">The journal</a>
+          <a href={`${siteBasePath}/track-order`}>Track order</a>
+          <a href="#footer">About</a>
+        </nav>
         <div className="header-actions">
-          <label className="navbar-search"><span aria-hidden="true">⌕</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search jewellery" onFocus={openSearch} aria-label="Search jewellery" />{search && <button className="navbar-search-clear" type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => setSearch("")} aria-label="Clear search">×</button>}</label>
-          <button className="header-action-with-icon saved-header-action" onClick={() => setSavedOpen(true)} aria-label="View saved pieces"><svg className="header-action-icon" viewBox="0 0 16 16" aria-hidden="true" fill="none"><path d="M8 13.25S2.75 10.15 2.75 6.55A2.55 2.55 0 0 1 8 5.8a2.55 2.55 0 0 1 5.25.75C13.25 10.15 8 13.25 8 13.25Z" /></svg><span className="action-label">Saved</span>{wishlist.length > 0 && <b>{wishlist.length}</b>}</button>
-          <button className="header-action-with-icon" onClick={openOrders} aria-label="View my orders"><svg className="header-action-icon" viewBox="0 0 16 16" aria-hidden="true" fill="none"><path d="M5 2.5h6v11L8 11.7 5 13.5v-11Z" /><path d="M6.6 5.4h2.8M6.6 7.7h2.1" /></svg><span className="action-label">My orders</span>{orders.length > 0 && <b>{orders.length}</b>}</button>
-          <button className="header-action-with-icon" onClick={openCart} aria-label={cartCount > 0 ? `Open shopping cart, ${cartCount} item${cartCount === 1 ? "" : "s"}` : "Open shopping cart"}><svg className="header-action-icon cart-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none"><path d="M3 4h2l2.2 11h10.9l3-8H6" /><circle cx="9" cy="19" r="1.5" /><circle cx="18" cy="19" r="1.5" /></svg><span className="action-label">Cart</span>{cartCount > 0 && <span className="bag-count">({cartCount})</span>}</button>
-          <button className="profile-button" onClick={() => setProfileOpen(true)} aria-label="View account profile"><span className="profile-logo" data-signed-in={authUser ? "true" : "false"} aria-hidden="true"><span /></span><span className="action-label">Profile</span></button>
+          <label className="navbar-search">
+            <span aria-hidden="true">⌕</span>
+            <input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search jewellery"
+              onFocus={openSearch}
+              aria-label="Search jewellery"
+            />
+            {search && (
+              <button
+                className="navbar-search-clear"
+                type="button"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => setSearch("")}
+                aria-label="Clear search"
+              >
+                ×
+              </button>
+            )}
+          </label>
+          <button
+            className="header-action-with-icon saved-header-action"
+            onClick={() => setSavedOpen(true)}
+            aria-label="View saved pieces"
+          >
+            <svg
+              className="header-action-icon"
+              viewBox="0 0 16 16"
+              aria-hidden="true"
+              fill="none"
+            >
+              <path d="M8 13.25S2.75 10.15 2.75 6.55A2.55 2.55 0 0 1 8 5.8a2.55 2.55 0 0 1 5.25.75C13.25 10.15 8 13.25 8 13.25Z" />
+            </svg>
+            <span className="action-label">Saved</span>
+            {wishlist.length > 0 && <b>{wishlist.length}</b>}
+          </button>
+          <button
+            className="header-action-with-icon"
+            onClick={openOrders}
+            aria-label="View my orders"
+          >
+            <svg
+              className="header-action-icon"
+              viewBox="0 0 16 16"
+              aria-hidden="true"
+              fill="none"
+            >
+              <path d="M5 2.5h6v11L8 11.7 5 13.5v-11Z" />
+              <path d="M6.6 5.4h2.8M6.6 7.7h2.1" />
+            </svg>
+            <span className="action-label">My orders</span>
+            {orders.length > 0 && <b>{orders.length}</b>}
+          </button>
+          <button
+            className="header-action-with-icon"
+            onClick={openCart}
+            aria-label={
+              cartCount > 0
+                ? `Open shopping cart, ${cartCount} item${cartCount === 1 ? "" : "s"}`
+                : "Open shopping cart"
+            }
+          >
+            <svg
+              className="header-action-icon cart-icon"
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+              fill="none"
+            >
+              <path d="M3 4h2l2.2 11h10.9l3-8H6" />
+              <circle cx="9" cy="19" r="1.5" />
+              <circle cx="18" cy="19" r="1.5" />
+            </svg>
+            <span className="action-label">Cart</span>
+            {cartCount > 0 && <span className="bag-count">({cartCount})</span>}
+          </button>
+          <button
+            className="profile-button"
+            onClick={() => setProfileOpen(true)}
+            aria-label="View account profile"
+          >
+            <span
+              className="profile-logo"
+              data-signed-in={authUser ? "true" : "false"}
+              aria-hidden="true"
+            >
+              <span />
+            </span>
+            <span className="action-label">Profile</span>
+          </button>
         </div>
-        <button className="mobile-menu" onClick={() => setMobileNavOpen((current) => !current)} aria-label={mobileNavOpen ? "Close menu" : "Open menu"} aria-expanded={mobileNavOpen}>{mobileNavOpen ? "×" : "☰"}</button>
+        <button
+          className="mobile-menu"
+          onClick={() => setMobileNavOpen((current) => !current)}
+          aria-label={mobileNavOpen ? "Close menu" : "Open menu"}
+          aria-expanded={mobileNavOpen}
+        >
+          {mobileNavOpen ? "×" : "☰"}
+        </button>
       </header>
 
-      {mobileNavOpen && <div className="mobile-nav-panel" role="dialog" aria-label="Mobile navigation">
-        <nav aria-label="Mobile navigation links">
-          <a href="#shop" onClick={() => setMobileNavOpen(false)}>Shop <span>↗</span></a>
-          <a href="#categories" onClick={() => setMobileNavOpen(false)}>Collections <span>↗</span></a>
-          <a href="#story" onClick={() => setMobileNavOpen(false)}>The journal <span>↗</span></a>
-          <a href={`${siteBasePath}/track-order`} onClick={() => setMobileNavOpen(false)}>Track order <span>↗</span></a>
-          <a href="#footer" onClick={() => setMobileNavOpen(false)}>About <span>↗</span></a>
-        </nav>
-        <div className="mobile-nav-actions">
-          <button onClick={() => { setMobileNavOpen(false); openSearch(); }}>Search the collection <span>⌕</span></button>
-          <button onClick={() => { setMobileNavOpen(false); setSavedOpen(true); }}>Saved pieces <span>♡</span></button>
-          <button onClick={() => { setMobileNavOpen(false); openOrders(); }}>My orders <span>↗</span></button>
-          <button onClick={() => { setMobileNavOpen(false); setProfileOpen(true); }}>Profile <span className="mobile-profile-logo" aria-hidden="true"><span /></span></button>
-          <button onClick={() => { setMobileNavOpen(false); openCart(); }}>Your cart {cartCount > 0 && <span>({cartCount})</span>}</button>
+      {mobileNavOpen && (
+        <div
+          className="mobile-nav-panel"
+          role="dialog"
+          aria-label="Mobile navigation"
+        >
+          <nav aria-label="Mobile navigation links">
+            <a href="#shop" onClick={() => setMobileNavOpen(false)}>
+              Shop <span>↗</span>
+            </a>
+            <a href="#categories" onClick={() => setMobileNavOpen(false)}>
+              Collections <span>↗</span>
+            </a>
+            <a href="#story" onClick={() => setMobileNavOpen(false)}>
+              The journal <span>↗</span>
+            </a>
+            <a
+              href={`${siteBasePath}/track-order`}
+              onClick={() => setMobileNavOpen(false)}
+            >
+              Track order <span>↗</span>
+            </a>
+            <a href="#footer" onClick={() => setMobileNavOpen(false)}>
+              About <span>↗</span>
+            </a>
+          </nav>
+          <div className="mobile-nav-actions">
+            <button
+              onClick={() => {
+                setMobileNavOpen(false);
+                openSearch();
+              }}
+            >
+              Search the collection <span>⌕</span>
+            </button>
+            <button
+              onClick={() => {
+                setMobileNavOpen(false);
+                setSavedOpen(true);
+              }}
+            >
+              Saved pieces <span>♡</span>
+            </button>
+            <button
+              onClick={() => {
+                setMobileNavOpen(false);
+                openOrders();
+              }}
+            >
+              My orders <span>↗</span>
+            </button>
+            <button
+              onClick={() => {
+                setMobileNavOpen(false);
+                setProfileOpen(true);
+              }}
+            >
+              Profile{" "}
+              <span className="mobile-profile-logo" aria-hidden="true">
+                <span />
+              </span>
+            </button>
+            <button
+              onClick={() => {
+                setMobileNavOpen(false);
+                openCart();
+              }}
+            >
+              Your cart {cartCount > 0 && <span>({cartCount})</span>}
+            </button>
+          </div>
         </div>
-      </div>}
+      )}
 
-      {heroSlides.length > 0 && <section className="hero hero-background" id="top"><div className="hero-slide-layer" key={heroSlides[heroSlideIndex]}><img {...storefrontImageProps(heroSlides[heroSlideIndex], "100vw")} fetchPriority="high" decoding="async" alt="Fanzzy collection highlight" /></div></section>}
+      {heroSlides.length > 0 && (
+        <section className="hero hero-background" id="top">
+          <div className="hero-slide-layer" key={heroSlides[heroSlideIndex]}>
+            <img
+              {...storefrontImageProps(heroSlides[heroSlideIndex], "100vw")}
+              fetchPriority="high"
+              decoding="async"
+              alt="Fanzzy collection highlight"
+            />
+          </div>
+        </section>
+      )}
 
-      <section className="section-block" id="categories"><div className="category-showcase"><div className="category-intro"><h2>Find your <em>signature.</em></h2></div><div className="category-section-grids">{categoryGroups.map(({ section, categories: sectionCategories }) => sectionCategories.length ? <div className={`category-display-group ${section === "luxury" ? "luxury-category-group" : "normal-category-group"}`} key={section}><a className="category-group-heading" href={`${siteBasePath}/collections#${section}`} aria-label={`View all ${section === "luxury" ? "Luxury" : "Everyday Collection"} categories`}><div><h3>{section === "luxury" ? "Luxury Category" : "Everyday Collection"}</h3></div><span className="category-group-link">View <span>↗</span></span></a><div className="category-grid">{sectionCategories.map((category, index) => <button className={`category-card category-${index + 1}`} key={category.name} onClick={() => openCategoryProducts(category.name, section)}><img {...storefrontImageProps(category.image || categoryImageFallback(category.name, index), "(max-width: 640px) 46vw, 24vw")} loading={index < 4 ? "eager" : "lazy"} decoding="async" alt={category.name} /><span className="category-overlay" /><span className="category-info"><strong>{category.name}</strong><small>{getCategoryPieceCount(category)} pieces</small></span></button>)}</div></div> : null)}</div></div></section>
-      {vendors.length > 0 && <section className="section-block vendor-strip-section" aria-labelledby="vendor-strip-title"><div className="vendor-strip-heading"><div><p className="eyebrow">SHOP BY VENDOR</p><h2 id="vendor-strip-title">Meet the <em>makers.</em></h2></div><a className="text-link" href={`${siteBasePath}/vendors`}>View all vendors <span>↗</span></a></div><div className="vendor-strip" role="list">{vendors.map((vendor) => { const image = vendor.logoUrl || vendor.coverUrl; return <a className="vendor-strip-card" href={`${siteBasePath}/vendors/store/?slug=${encodeURIComponent(vendor.slug)}`} key={vendor.id} role="listitem"><span className="vendor-strip-logo">{image ? <img loading="lazy" decoding="async" src={image} alt="" /> : <strong>{vendor.businessName.trim().charAt(0).toUpperCase()}</strong>}</span><span className="vendor-strip-copy"><strong>{vendor.businessName}</strong><small>{vendor.featured ? "Featured vendor" : "Explore store"} <span>↗</span></small></span></a>; })}</div></section>}
-
-      <section className="manifesto"><p className="eyebrow">THE FANZZY STANDARD</p><h2>Jewellery with a point of view.<br /><em>Made for your everyday extraordinary.</em></h2><p className="manifesto-copy">Fanzzy is a study in contrast — soft and sculptural, familiar and unexpected. Every piece is made in small batches with considered materials and a little bit of magic.</p></section>
-
-
-      <section className={`section-block product-section${activeCategorySection === "luxury" ? " luxury-filter-active" : ""}`} id="shop"><div className="section-heading"><div><p className="eyebrow">CURATED FOR YOU</p><h2>Pieces worth <em>keeping.</em></h2></div><a className="text-link" href="#footer">Shop all <span>↗</span></a></div>{promotionalOffers.length > 0 && <div className="storefront-offer-rail"><span className="eyebrow">LIVE OFFERS</span><div className="storefront-offer-list">{promotionalOffers.map((offer) => <button key={offer.id} onClick={() => { const first = products.find((product) => offersForProduct(product).some((item) => item.id === offer.id)); if (first) openQuickProduct(first); }}>{offerTypeLabel(offer)} {offer.freeQuantity > 0 && <span className="offer-free-label">FREE</span>} <b>↗</b></button>)}</div></div>}<div className="filter-row"><div className="filter-pills"><button className={activeCategory === "All pieces" ? "active" : ""} onClick={() => selectCategory("All pieces")}>All pieces</button>{filterCategories.normal.map((category) => <button className={`${activeCategory === category.name && (activeCategorySection === "all" || activeCategorySection === category.section) ? "active " : ""}`} key={`${category.section}-${category.name}`} onClick={() => selectCategory(category.name, category.section)}>{category.name}{duplicateFilterCategoryKeys.has(categoryFilterKey(category.name)) && <span className="category-section-marker"> · Normal</span>}</button>)}{filterCategories.luxury.length > 0 && <span className="luxury-category-badge">Luxury categories</span>}{filterCategories.luxury.map((category) => <button className={`${activeCategory === category.name && (activeCategorySection === "all" || activeCategorySection === category.section) ? "active " : ""}luxury-category-filter`} key={`${category.section}-${category.name}`} onClick={() => selectCategory(category.name, category.section)}>{category.name}{duplicateFilterCategoryKeys.has(categoryFilterKey(category.name)) && <span className="category-section-marker is-luxury"> · Luxury</span>}</button>)}</div><div className="filter-tools"><label className="product-sort-control"><span>Sort by</span><select value={productSort} onChange={(event) => setProductSort(event.target.value)} aria-label="Sort products"><option value="price-low">Price: low to high</option><option value="price-high">Price: high to low</option><option value="featured">Featured</option><option value="name">Name: A to Z</option><option value="stock">Availability</option></select></label><span className="result-count">{catalogLoading ? "Loading pieces…" : `${filteredProducts.length} pieces`}</span></div></div><div className="product-grid">{catalogLoading ? <p className="muted">Loading pieces…</p> : filteredProducts.map((product) => { const productPromotions = promotionsByProductId.get(product.id) ?? []; const productIsLuxury = productCatalogSection(product.category, categories) === "luxury"; return <ProductCard key={product.id} product={product} isLuxury={productIsLuxury} promotions={productPromotions} cartQuantity={getProductCartQuantity(product)} wished={wishlist.includes(product.id)} onWishlist={() => toggleWishlist(product.id)} onAdd={() => (getProductVariantType(product) === "normal" && product.variants?.length) || (getProductVariantType(product) === "size" && product.sizes?.length) || productPromotions.length ? openQuickProduct(product) : addToCart(product)} onDecrease={() => decreaseProductCart(product)} onIncrease={() => increaseProductCart(product)} onQuickView={() => openQuickProduct(product)} onImageZoom={() => setZoomedImage({ src: product.image, alt: product.name, adjustments: product.imageAdjustments })} />; })}</div></section>
-      <section className="editorial" id="story"><div className="editorial-image"><img loading="lazy" decoding="async" src="https://images.unsplash.com/photo-1515562141207-7a88fb7ce338?auto=format&fit=crop&w=1100&q=85" alt="Close-up of sculptural gold jewelry" /><span>THE ART OF<br /><em>ADORNMENT</em></span></div><div className="editorial-copy"><p className="eyebrow">A NOTE FROM THE STUDIO</p><h2>Less noise.<br /><em>More meaning.</em></h2><p>There is beauty in the in-between. The way a quiet chain layers with your favourite shirt. A ring that becomes part of your hand. Fanzzy is made for these small rituals — the ones that make a day feel like yours.</p><a className="button button-dark" href="#footer">Read our story <span>↗</span></a><div className="editorial-sign">F / 19<br /></div></div></section>
-
-      <section className="offer-banner"><div><p className="eyebrow light">{activeCampaign ? activeCampaign.kind === "Coupon" ? "EXCLUSIVE OFFER" : "SEASONAL EDIT" : "LIMITED OFFER"}</p><h2>{activeCampaign ? activeCampaign.name : "Buy 1, get 1"}<br /><em>{activeCampaign ? "is here." : "on us."}</em></h2></div><div><p>{activeCampaign ? <>{activeCampaign.detail}{activeCampaign.discount && <> · <strong>{activeCampaign.discount}</strong></>}{activeCampaign.code && <> with code <strong>{activeCampaign.code}</strong></>}</> : <>Choose two eligible pieces and enjoy our Buy 1 Get 1 offer.</>}</p>{activeCampaign?.code ? <button className="button button-light" onClick={() => { const code = activeCampaign.code ?? ""; navigator.clipboard?.writeText(code); announce(`Code copied: ${code}`); }}>Copy code <span>↗</span></button> : <button className="button button-light" onClick={() => announce(activeCampaign && isBogoCampaign(activeCampaign) ? `${getBogoOfferLabel(activeCampaign)} offer opened` : "Offer collection opened")}>Shop the offer <span>↗</span></button>}</div></section>
-
-      <section className="newsletter"><div><p className="eyebrow">THE FANZZY LETTER</p><h2>A little light<br /><em>in your inbox.</em></h2></div><form onSubmit={subscribeNewsletter}><p>New drops, studio notes, and 10% off your first order — no noise, promise.</p><div className="email-line"><input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Your email address" aria-label="Your email address" required /><button aria-label="Subscribe to newsletter">↗</button></div>{(subscribed || newsletterMessage) && <span className="success-message">{newsletterMessage}</span>}</form></section>
-
-      <footer className="site-footer" id="footer"><div className="footer-brand"><a href="#top" className="wordmark wordmark-light"><img {...storefrontImageProps("/fanzzy-mark.png", "110px")} decoding="async" alt="Fanzzy" className="brand-logo" /></a><p>Quietly remarkable jewellery<br />for all your becoming.</p></div><div><p className="eyebrow light">Explore</p><a href="#shop">New arrivals</a><a href="#shop">Bestsellers</a><a href="#categories">Collections</a><a href="#shop">Gift cards</a></div><div><p className="eyebrow light">Need a hand?</p><a href="#footer">Contact us</a><a href="#footer">Shipping & returns</a><a href="#footer">Care guide</a><a href="#footer">FAQs</a></div><div><p className="eyebrow light">Follow along</p><a href="https://www.instagram.com/fanzzy.in/?hl=en" target="_blank" rel="noreferrer">Instagram ↗</a><a href="https://www.facebook.com/profile.php?id=61593401750910" target="_blank" rel="noreferrer">Facebook ↗</a><a href="https://www.pinterest.com/fanzzyv/" target="_blank" rel="noreferrer">Pinterest ↗</a><a href="#footer">WhatsApp ↗</a><p className="footer-small">Made with intention in India.<br />© Fanzzy 2024</p></div><div className="footer-bottom"><button type="button" onClick={() => setPrivacyOpen(true)}>Privacy</button><button type="button" onClick={() => setTermsOpen(true)}>Terms</button><button type="button" onClick={() => setReturnPolicyOpen(true)}>Return Policy</button><span>Accessibility</span><span>India / INR ₹</span></div></footer>
-
-      <button className={`whatsapp-float ${cartItems.length > 0 && !cartOpen && cartPreviewOpen ? "cart-preview-visible" : ""}`} onClick={() => setAssistantOpen(true)} aria-label="Open Fanzzy AI Assistant">✦ <span>Chat with AI</span></button>
-
-      {cartItems.length > 0 && !cartOpen && cartPreviewOpen && <aside className="cart-preview-bar" aria-label="Cart summary">
-        <div className="cart-preview-heading">
-          <div><p className="eyebrow">YOUR CART</p><strong>{cartCount} piece{cartCount === 1 ? "" : "s"}</strong></div>
-          <div className="cart-preview-heading-total"><b>{formatINR(orderTotal)}</b><button type="button" onClick={() => setCartPreviewOpen(false)} aria-label="Close cart preview">×</button></div>
+      <section className="section-block" id="categories">
+        <div className="category-showcase">
+          <div className="category-intro">
+            <h2>
+              Find your <em>signature.</em>
+            </h2>
+          </div>
+          <div className="category-section-grids">
+            {categoryGroups.map(({ section, categories: sectionCategories }) =>
+              sectionCategories.length ? (
+                <div
+                  className={`category-display-group ${section === "luxury" ? "luxury-category-group" : "normal-category-group"}`}
+                  key={section}
+                >
+                  <a
+                    className="category-group-heading"
+                    href={`${siteBasePath}/collections#${section}`}
+                    aria-label={`View all ${section === "luxury" ? "Luxury" : "Everyday Collection"} categories`}
+                  >
+                    <div>
+                      <h3>
+                        {section === "luxury"
+                          ? "Luxury Category"
+                          : "Everyday Collection"}
+                      </h3>
+                    </div>
+                    <span className="category-group-link">
+                      View <span>↗</span>
+                    </span>
+                  </a>
+                  <div className="category-grid">
+                    {sectionCategories.map((category, index) => (
+                      <button
+                        className={`category-card category-${index + 1}`}
+                        key={category.name}
+                        onClick={() =>
+                          openCategoryProducts(category.name, section)
+                        }
+                      >
+                        <img
+                          {...storefrontImageProps(
+                            category.image ||
+                              categoryImageFallback(category.name, index),
+                            "(max-width: 640px) 46vw, 24vw",
+                          )}
+                          loading={index < 4 ? "eager" : "lazy"}
+                          decoding="async"
+                          alt={category.name}
+                        />
+                        <span className="category-overlay" />
+                        <span className="category-info">
+                          <strong>{category.name}</strong>
+                          <small>
+                            {getCategoryPieceCount(category)} pieces
+                          </small>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null,
+            )}
+          </div>
         </div>
-        <div className="cart-preview-items">
-          {cartItems.slice(0, 2).map((item) => <span key={item.cartKey}>{item.name}{item.variant?.name ? ` · ${item.variant.name}` : ""}{item.size ? ` · Size ${item.size}` : ""} × {item.quantity}</span>)}
-          {cartItems.length > 2 && <span>+ {cartItems.length - 2} more item{cartItems.length - 2 === 1 ? "" : "s"}</span>}
+      </section>
+      {vendors.length > 0 && (
+        <section
+          className="section-block vendor-strip-section"
+          aria-labelledby="vendor-strip-title"
+        >
+          <div className="vendor-strip-heading">
+            <div>
+              <p className="eyebrow">SHOP BY VENDOR</p>
+              <h2 id="vendor-strip-title">
+                Meet the <em>makers.</em>
+              </h2>
+            </div>
+            <a className="text-link" href={`${siteBasePath}/vendors`}>
+              View all vendors <span>↗</span>
+            </a>
+          </div>
+          <div className="vendor-strip" role="list">
+            {vendors.map((vendor) => {
+              const image = vendor.logoUrl || vendor.coverUrl;
+              return (
+                <a
+                  className="vendor-strip-card"
+                  href={`${siteBasePath}/vendors/store/?slug=${encodeURIComponent(vendor.slug)}`}
+                  key={vendor.id}
+                  role="listitem"
+                >
+                  <span className="vendor-strip-logo">
+                    {image ? (
+                      <img loading="lazy" decoding="async" src={image} alt="" />
+                    ) : (
+                      <strong>
+                        {vendor.businessName.trim().charAt(0).toUpperCase()}
+                      </strong>
+                    )}
+                  </span>
+                  <span className="vendor-strip-copy">
+                    <strong>{vendor.businessName}</strong>
+                    <small>
+                      {vendor.featured ? "Featured vendor" : "Explore store"}{" "}
+                      <span>↗</span>
+                    </small>
+                  </span>
+                </a>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      <section className="manifesto">
+        <p className="eyebrow">THE FANZZY STANDARD</p>
+        <h2>
+          Jewellery with a point of view.
+          <br />
+          <em>Made for your everyday extraordinary.</em>
+        </h2>
+        <p className="manifesto-copy">
+          Fanzzy is a study in contrast — soft and sculptural, familiar and
+          unexpected. Every piece is made in small batches with considered
+          materials and a little bit of magic.
+        </p>
+      </section>
+
+      <section
+        className={`section-block product-section${activeCategorySection === "luxury" ? " luxury-filter-active" : ""}`}
+        id="shop"
+      >
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">CURATED FOR YOU</p>
+            <h2>
+              Pieces worth <em>keeping.</em>
+            </h2>
+          </div>
+          <a className="text-link" href="#footer">
+            Shop all <span>↗</span>
+          </a>
         </div>
-        <div className="cart-preview-actions">
-          <button type="button" className="cart-preview-view" onClick={openCart}>View cart</button>
-          <button type="button" className="button button-dark" onClick={() => void openCheckout()} disabled={cartStockIssues.length > 0}>Proceed to buy <span>↗</span></button>
+        {promotionalOffers.length > 0 && (
+          <div className="storefront-offer-rail">
+            <span className="eyebrow">LIVE OFFERS</span>
+            <div className="storefront-offer-list">
+              {promotionalOffers.map((offer) => (
+                <button
+                  key={offer.id}
+                  onClick={() => {
+                    const first = products.find((product) =>
+                      offersForProduct(product).some(
+                        (item) => item.id === offer.id,
+                      ),
+                    );
+                    if (first) openQuickProduct(first);
+                  }}
+                >
+                  {offerTypeLabel(offer)}{" "}
+                  {offer.freeQuantity > 0 && (
+                    <span className="offer-free-label">FREE</span>
+                  )}{" "}
+                  <b>↗</b>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        <div className="filter-row">
+          <div className="filter-pills">
+            <button
+              className={activeCategory === "All pieces" ? "active" : ""}
+              onClick={() => selectCategory("All pieces")}
+            >
+              All pieces
+            </button>
+            {filterCategories.normal.map((category) => (
+              <button
+                className={`${activeCategory === category.name && (activeCategorySection === "all" || activeCategorySection === category.section) ? "active " : ""}`}
+                key={`${category.section}-${category.name}`}
+                onClick={() => selectCategory(category.name, category.section)}
+              >
+                {category.name}
+                {duplicateFilterCategoryKeys.has(
+                  categoryFilterKey(category.name),
+                ) && <span className="category-section-marker"> · Normal</span>}
+              </button>
+            ))}
+            {filterCategories.luxury.length > 0 && (
+              <span className="luxury-category-badge">Luxury categories</span>
+            )}
+            {filterCategories.luxury.map((category) => (
+              <button
+                className={`${activeCategory === category.name && (activeCategorySection === "all" || activeCategorySection === category.section) ? "active " : ""}luxury-category-filter`}
+                key={`${category.section}-${category.name}`}
+                onClick={() => selectCategory(category.name, category.section)}
+              >
+                {category.name}
+                {duplicateFilterCategoryKeys.has(
+                  categoryFilterKey(category.name),
+                ) && (
+                  <span className="category-section-marker is-luxury">
+                    {" "}
+                    · Luxury
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+          <div className="filter-tools">
+            <label className="product-sort-control">
+              <span>Sort by</span>
+              <select
+                value={productSort}
+                onChange={(event) => setProductSort(event.target.value)}
+                aria-label="Sort products"
+              >
+                <option value="price-low">Price: low to high</option>
+                <option value="price-high">Price: high to low</option>
+                <option value="featured">Featured</option>
+                <option value="name">Name: A to Z</option>
+                <option value="stock">Availability</option>
+              </select>
+            </label>
+            <span className="result-count">
+              {catalogLoading
+                ? "Loading pieces…"
+                : `${filteredProducts.length} pieces`}
+            </span>
+          </div>
         </div>
-      </aside>}
+        <div className="product-grid">
+          {catalogLoading ? (
+            <p className="muted">Loading pieces…</p>
+          ) : !filteredProducts.length ? (
+            <p className="muted">
+              No pieces found. Try another category or search.
+            </p>
+          ) : (
+            filteredProducts.map((product) => {
+              const productPromotions =
+                promotionsByProductId.get(product.id) ?? [];
+              const productIsLuxury =
+                productCatalogSection(product.category, categories) ===
+                "luxury";
+              return (
+                <ProductCard
+                  key={product.id}
+                  product={product}
+                  isLuxury={productIsLuxury}
+                  promotions={productPromotions}
+                  itemOffer={websiteProductOffer(onlineSalesPromotions, { productId: product.sku || product.id, category: product.category, price: product.price }, onlineOfferTime)}
+                  cartQuantity={getProductCartQuantity(product)}
+                  wished={wishlist.includes(product.id)}
+                  onWishlist={() => toggleWishlist(product.id)}
+                  onAdd={() =>
+                    (getProductVariantType(product) === "normal" &&
+                      product.variants?.length) ||
+                    (getProductVariantType(product) === "size" &&
+                      product.sizes?.length) ||
+                    productPromotions.length
+                      ? openQuickProduct(product)
+                      : addToCart(product)
+                  }
+                  onDecrease={() => decreaseProductCart(product)}
+                  onIncrease={() => increaseProductCart(product)}
+                  onQuickView={() => openQuickProduct(product)}
+                  onImageZoom={() =>
+                    setZoomedImage({
+                      src: product.image,
+                      alt: product.name,
+                      adjustments: product.imageAdjustments,
+                    })
+                  }
+                />
+              );
+            })
+          )}
+        </div>
+      </section>
+      <section className="editorial" id="story">
+        <div className="editorial-image">
+          <img
+            loading="lazy"
+            decoding="async"
+            src="https://images.unsplash.com/photo-1515562141207-7a88fb7ce338?auto=format&fit=crop&w=1100&q=85"
+            alt="Close-up of sculptural gold jewelry"
+          />
+          <span>
+            THE ART OF
+            <br />
+            <em>ADORNMENT</em>
+          </span>
+        </div>
+        <div className="editorial-copy">
+          <p className="eyebrow">A NOTE FROM THE STUDIO</p>
+          <h2>
+            Less noise.
+            <br />
+            <em>More meaning.</em>
+          </h2>
+          <p>
+            There is beauty in the in-between. The way a quiet chain layers with
+            your favourite shirt. A ring that becomes part of your hand. Fanzzy
+            is made for these small rituals — the ones that make a day feel like
+            yours.
+          </p>
+          <a className="button button-dark" href="#footer">
+            Read our story <span>↗</span>
+          </a>
+          <div className="editorial-sign">
+            F / 19
+            <br />
+          </div>
+        </div>
+      </section>
 
-      {termsOpen && <div className="drawer-backdrop terms-backdrop" onClick={() => setTermsOpen(false)}><section className="terms-modal" role="dialog" aria-modal="true" aria-labelledby="terms-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">FANZZY</p><h2 id="terms-title">Terms &amp; Conditions</h2></div><button aria-label="Close terms" onClick={() => setTermsOpen(false)}>×</button></div><div className="terms-content"><p>By using <strong>Fanzzy</strong> and placing an order, you agree to the following terms:</p><ul><li>Product colours and appearance may slightly vary from images shown.</li><li>Where a product video is available, customers can view it by opening the product details.</li><li>Prices, offers and product availability may change without prior notice.</li><li>Orders are confirmed only after successful payment/confirmation.</li><li>Delivery time may vary depending on location and courier service.</li><li>Returns, exchanges and refunds are subject to our <strong>Return &amp; Refund Policy</strong>.</li><li>Fanzzy reserves the right to cancel orders due to stock, payment, pricing or technical issues.</li><li>Customer information will be handled according to our <strong>Privacy Policy</strong>.</li><li>All website content, images and the Fanzzy brand are protected and may not be copied without permission.</li><li>These terms are governed by applicable laws of <strong>India</strong>.</li></ul><p>For any assistance, please contact <strong>Fanzzy Customer Support</strong>.</p><p><strong>© 2026 Fanzzy. All Rights Reserved.</strong></p></div></section></div>}
+      <section className="offer-banner">
+        <div>
+          <p className="eyebrow light">
+            {activeCampaign
+              ? activeCampaign.kind === "Coupon"
+                ? "EXCLUSIVE OFFER"
+                : "SEASONAL EDIT"
+              : "LIMITED OFFER"}
+          </p>
+          <h2>
+            {activeCampaign ? activeCampaign.name : "Buy 1, get 1"}
+            <br />
+            <em>{activeCampaign ? "is here." : "on us."}</em>
+          </h2>
+        </div>
+        <div>
+          <p>
+            {activeCampaign ? (
+              <>
+                {activeCampaign.detail}
+                {activeCampaign.discount && (
+                  <>
+                    {" "}
+                    · <strong>{activeCampaign.discount}</strong>
+                  </>
+                )}
+                {activeCampaign.code && (
+                  <>
+                    {" "}
+                    with code <strong>{activeCampaign.code}</strong>
+                  </>
+                )}
+              </>
+            ) : (
+              <>Choose two eligible pieces and enjoy our Buy 1 Get 1 offer.</>
+            )}
+          </p>
+          {activeCampaign?.code ? (
+            <button
+              className="button button-light"
+              onClick={() => {
+                const code = activeCampaign.code ?? "";
+                navigator.clipboard?.writeText(code);
+                announce(`Code copied: ${code}`);
+              }}
+            >
+              Copy code <span>↗</span>
+            </button>
+          ) : (
+            <button
+              className="button button-light"
+              onClick={() =>
+                announce(
+                  activeCampaign && isBogoCampaign(activeCampaign)
+                    ? `${getBogoOfferLabel(activeCampaign)} offer opened`
+                    : "Offer collection opened",
+                )
+              }
+            >
+              Shop the offer <span>↗</span>
+            </button>
+          )}
+        </div>
+      </section>
 
-      {returnPolicyOpen && <div className="drawer-backdrop terms-backdrop" onClick={() => setReturnPolicyOpen(false)}><section className="terms-modal" role="dialog" aria-modal="true" aria-labelledby="return-policy-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">FANZZY</p><h2 id="return-policy-title">Return Policy</h2></div><button aria-label="Close return policy" onClick={() => setReturnPolicyOpen(false)}>×</button></div><div className="terms-content"><p>Customers may request a return for eligible products within the return period mentioned on our website.</p><p>Once a return request is approved, the <strong>customer must send the product to the return hub/address provided by Fanzzy</strong>.</p><ul><li>The product must be unused, undamaged, and returned in its original packaging with all tags/accessories intact.</li><li><strong>Return courier/shipping charges must be paid by the customer. Fanzzy will not bear the cost of sending the returned product to our hub.</strong></li><li>Customers are responsible for safely packing and dispatching the return item.</li><li>We recommend using a trackable courier service. Fanzzy will not be responsible for return parcels lost or damaged during transit.</li><li>Refund/replacement processing will begin only after the returned item reaches our hub and successfully passes the quality inspection.</li><li>Original delivery/shipping charges, if any, are non-refundable unless the return is due to a wrong or defective product supplied by Fanzzy.</li><li>Products that are used, damaged, altered, or returned without original packaging may not be eligible for refund or replacement.</li><li>Certain products may be marked as <strong>non-returnable</strong> for hygiene or other applicable reasons.</li></ul><p>If a customer receives a <strong>wrong, damaged, or defective product</strong>, they should contact Fanzzy customer support within the specified return period with the order details and supporting photos/videos.</p></div></section></div>}
-      {privacyOpen && <div className="drawer-backdrop terms-backdrop" onClick={() => setPrivacyOpen(false)}><section className="terms-modal" role="dialog" aria-modal="true" aria-labelledby="privacy-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">FANZZY</p><h2 id="privacy-title">Privacy Policy</h2></div><button aria-label="Close privacy policy" onClick={() => setPrivacyOpen(false)}>×</button></div><div className="terms-content"><p>At <strong>Fanzzy</strong>, we respect and protect your privacy. We collect necessary information such as your name, contact details, address, and order information to process orders, arrange delivery, manage returns/refunds, and provide customer support.</p><p>Your information may be shared with trusted <strong>payment, courier, and service partners</strong> only when required to complete our services. We do not sell customers' personal information to third parties.</p><p>We take reasonable measures to keep your information secure. By using the Fanzzy website, you agree to this Privacy Policy and any updates made to it.</p></div></section></div>}
+      <section className="newsletter">
+        <div>
+          <p className="eyebrow">THE FANZZY LETTER</p>
+          <h2>
+            A little light
+            <br />
+            <em>in your inbox.</em>
+          </h2>
+        </div>
+        <form onSubmit={subscribeNewsletter}>
+          <p>
+            New drops, studio notes, and 10% off your first order — no noise,
+            promise.
+          </p>
+          <div className="email-line">
+            <input
+              type="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              placeholder="Your email address"
+              aria-label="Your email address"
+              required
+            />
+            <button aria-label="Subscribe to newsletter">↗</button>
+          </div>
+          {(subscribed || newsletterMessage) && (
+            <span className="success-message">{newsletterMessage}</span>
+          )}
+        </form>
+      </section>
 
-      {assistantOpen && <div className="drawer-backdrop" onClick={() => setAssistantOpen(false)}><aside className="assistant-drawer" role="dialog" aria-modal="true" aria-labelledby="assistant-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">FANZZY AI</p><h2 id="assistant-title">How can I help?</h2></div><button aria-label="Close AI assistant" onClick={() => setAssistantOpen(false)}>×</button></div><div className="assistant-messages" aria-live="polite">{assistantMessages.map((message, index) => <div className={`assistant-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.text}{message.productIds?.length ? <div className="assistant-product-actions">{message.productIds.map((productId) => { const product = products.find((item) => item.id === productId); return product ? <button key={product.id} onClick={() => { openQuickProduct(product); setAssistantOpen(false); }}>View {product.name} · {formatINR(getCustomerPrice(product))} ↗</button> : null; })}</div> : null}</span></div>)}</div><div className="assistant-prompts"><button onClick={() => sendAssistantMessage("Help me choose a gift")}>Choose a gift</button><button onClick={() => sendAssistantMessage("Track my order")}>Track my order</button><button onClick={() => sendAssistantMessage("How do I care for my jewellery?")}>Jewellery care</button></div><form className="assistant-form" onSubmit={(event) => { event.preventDefault(); sendAssistantMessage(); }}><input value={assistantInput} onChange={(event) => setAssistantInput(event.target.value)} placeholder="Ask Fanzzy Assistant..." aria-label="Ask Fanzzy Assistant" /><button type="submit" aria-label="Send message">↗</button></form></aside></div>}
+      <footer className="site-footer" id="footer">
+        <div className="footer-brand">
+          <a href="#top" className="wordmark wordmark-light">
+            <img
+              {...storefrontImageProps("/fanzzy-mark.png", "110px")}
+              decoding="async"
+              alt="Fanzzy"
+              className="brand-logo"
+            />
+          </a>
+          <p>
+            Quietly remarkable jewellery
+            <br />
+            for all your becoming.
+          </p>
+        </div>
+        <div>
+          <p className="eyebrow light">Explore</p>
+          <a href="#shop">New arrivals</a>
+          <a href="#shop">Bestsellers</a>
+          <a href="#categories">Collections</a>
+          <a href="#shop">Gift cards</a>
+        </div>
+        <div>
+          <p className="eyebrow light">Need a hand?</p>
+          <a href="#footer">Contact us</a>
+          <a href="#footer">Shipping & returns</a>
+          <a href="#footer">Care guide</a>
+          <a href="#footer">FAQs</a>
+        </div>
+        <div>
+          <p className="eyebrow light">Follow along</p>
+          <a
+            href="https://www.instagram.com/fanzzy.in/?hl=en"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Instagram ↗
+          </a>
+          <a
+            href="https://www.facebook.com/profile.php?id=61593401750910"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Facebook ↗
+          </a>
+          <a
+            href="https://www.pinterest.com/fanzzyv/"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Pinterest ↗
+          </a>
+          <a href="#footer">WhatsApp ↗</a>
+          <p className="footer-small">
+            Made with intention in India.
+            <br />© Fanzzy 2024
+          </p>
+        </div>
+        <div className="footer-bottom">
+          <button type="button" onClick={() => setPrivacyOpen(true)}>
+            Privacy
+          </button>
+          <button type="button" onClick={() => setTermsOpen(true)}>
+            Terms
+          </button>
+          <button type="button" onClick={() => setReturnPolicyOpen(true)}>
+            Return Policy
+          </button>
+          <span>Accessibility</span>
+          <span>India / INR ₹</span>
+        </div>
+      </footer>
 
-      {searchOpen && <div className="overlay search-overlay" role="dialog" aria-modal="true" aria-label="Search"><div className="overlay-top"><span className="wordmark"><img {...storefrontImageProps("/fanzzy-mark.png", "110px")} decoding="async" alt="Fanzzy" className="brand-logo" /></span><button onClick={closeSearch}>Close&nbsp; ×</button></div><div className="search-content"><p className="eyebrow">SEARCH THE COLLECTION</p><div className="large-search"><input autoFocus value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Try “gold hoops”" /><span>⌕</span></div>{search && <div className="search-results">{filteredProducts.length ? filteredProducts.map((product) => <button key={product.id} onClick={() => { openQuickProduct(product) }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(getCustomerPrice(product))}</small></span><b>↗</b></button>) : <p className="muted">No pieces found. Try another search.</p>}</div>}{!search && <div className="search-suggestions"><span>Trending now</span><button onClick={() => setSearch("hoops")}>Hoops</button><button onClick={() => setSearch("pearl")}>Pearls</button><button onClick={() => setSearch("chain")}>Chains</button></div>}</div></div>}
+      <button
+        className={`whatsapp-float ${cartItems.length > 0 && !cartOpen && cartPreviewOpen ? "cart-preview-visible" : ""}`}
+        onClick={() => setAssistantOpen(true)}
+        aria-label="Open Fanzzy AI Assistant"
+      >
+        ✦ <span>Chat with AI</span>
+      </button>
 
-      {orderConfirmation && <div className="drawer-backdrop" onClick={() => setOrderConfirmation(null)}><section className="order-confirmation" role="dialog" aria-modal="true" aria-labelledby="order-confirmation-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close order confirmation" onClick={() => setOrderConfirmation(null)}>×</button><p className="eyebrow">{orderConfirmation.paymentMethod === "cod" ? "COD ORDER CONFIRMED" : "PAYMENT SUCCESSFUL"}</p><h2 id="order-confirmation-title">{orderConfirmation.paymentMethod === "cod" ? "Your order is confirmed." : "Your payment is complete."}</h2><p>{orderConfirmation.paymentMethod === "cod" ? <>Please pay <strong>{orderConfirmation.total}</strong> to the delivery partner when order <strong>{orderConfirmation.id}</strong> arrives.</> : <>We received <strong>{orderConfirmation.total}</strong> for order <strong>{orderConfirmation.id}</strong>. Your order has been confirmed.</>}</p>{orderConfirmation.fulfillmentMethod === "pickup" && <p className="pickup-confirmation"><strong>Pickup from {orderConfirmation.pickupHubName || "hub"}</strong><br />{orderConfirmation.pickupHubPlace || "Pickup place saved with your order."}<br /><small>No delivery charges.</small></p>}{orderConfirmation.razorpayPaymentId && <p className="payment-reference">Payment ID: {orderConfirmation.razorpayPaymentId}</p>}<div className="confirmation-actions"><button className="button button-dark" type="button" disabled={printingBillId !== null} aria-busy={printingBillId === orderConfirmation.id} onClick={() => void downloadBill(orderConfirmation)}>{printingBillId === orderConfirmation.id ? "Printing…" : "Print bill"} <span>↗</span></button><button className="save-text" onClick={() => { setOrderConfirmation(null); setOrdersOpen(true); }}>View my orders</button></div></section></div>}
+      {cartItems.length > 0 && !cartOpen && cartPreviewOpen && (
+        <aside className="cart-preview-bar" aria-label="Cart summary">
+          <div className="cart-preview-heading">
+            <div>
+              <p className="eyebrow">YOUR CART</p>
+              <strong>
+                {cartCount} piece{cartCount === 1 ? "" : "s"}
+              </strong>
+            </div>
+            <div className="cart-preview-heading-total">
+              <b>{formatINR(orderTotal)}</b>
+              <button
+                type="button"
+                onClick={() => setCartPreviewOpen(false)}
+                aria-label="Close cart preview"
+              >
+                ×
+              </button>
+            </div>
+          </div>
+          <div className="cart-preview-items">
+            {cartItems.slice(0, 2).map((item) => (
+              <span key={item.cartKey}>
+                {item.name}
+                {item.variant?.name ? ` · ${item.variant.name}` : ""}
+                {item.size ? ` · Size ${item.size}` : ""} × {item.quantity}
+              </span>
+            ))}
+            {cartItems.length > 2 && (
+              <span>
+                + {cartItems.length - 2} more item
+                {cartItems.length - 2 === 1 ? "" : "s"}
+              </span>
+            )}
+          </div>
+          <div className="cart-preview-actions">
+            <button
+              type="button"
+              className="cart-preview-view"
+              onClick={openCart}
+            >
+              View cart
+            </button>
+            <button
+              type="button"
+              className="button button-dark"
+              onClick={() => void openCheckout()}
+              disabled={cartStockIssues.length > 0}
+            >
+              Proceed to buy <span>↗</span>
+            </button>
+          </div>
+        </aside>
+      )}
 
-      {savedOpen && <div className="drawer-backdrop" onClick={() => setSavedOpen(false)}><aside className="orders-drawer saved-drawer" role="dialog" aria-modal="true" aria-labelledby="saved-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR EDIT</p><h2 id="saved-title">Saved pieces</h2></div><button aria-label="Close saved pieces" onClick={() => setSavedOpen(false)}>×</button></div>{wishlist.length ? <div className="saved-list">{wishlist.map((productId) => { const product = products.find((item) => item.id === productId); return product ? <article className="saved-card" key={product.id}><button className="saved-product" onClick={() => { openQuickProduct(product); setSavedOpen(false); }}><img src={product.image} alt="" /><span><strong>{product.name}</strong><small>{product.category} · {formatINR(getCustomerPrice(product))}</small></span><b>↗</b></button><div className="saved-card-actions"><button className="module-secondary" onClick={() => { addToCart(product); setSavedOpen(false); }}>Add to cart</button><button className="saved-remove" onClick={() => toggleWishlist(product.id)}>Remove</button></div></article> : null; })}</div> : <div className="orders-empty saved-empty"><div>♡</div><h3>Your edit is waiting.</h3><p>Tap the heart on any piece to keep it close while you decide.</p><button className="button button-dark" onClick={() => setSavedOpen(false)}>Explore pieces <span>↗</span></button></div>}</aside></div>}
+      {termsOpen && (
+        <div
+          className="drawer-backdrop terms-backdrop"
+          onClick={() => setTermsOpen(false)}
+        >
+          <section
+            className="terms-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="terms-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="drawer-header">
+              <div>
+                <p className="eyebrow">FANZZY</p>
+                <h2 id="terms-title">Terms &amp; Conditions</h2>
+              </div>
+              <button
+                aria-label="Close terms"
+                onClick={() => setTermsOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="terms-content">
+              <p>
+                By using <strong>Fanzzy</strong> and placing an order, you agree
+                to the following terms:
+              </p>
+              <ul>
+                <li>
+                  Product colours and appearance may slightly vary from images
+                  shown.
+                </li>
+                <li>
+                  Where a product video is available, customers can view it by
+                  opening the product details.
+                </li>
+                <li>
+                  Prices, offers and product availability may change without
+                  prior notice.
+                </li>
+                <li>
+                  Orders are confirmed only after successful
+                  payment/confirmation.
+                </li>
+                <li>
+                  Delivery time may vary depending on location and courier
+                  service.
+                </li>
+                <li>
+                  Returns, exchanges and refunds are subject to our{" "}
+                  <strong>Return &amp; Refund Policy</strong>.
+                </li>
+                <li>
+                  Fanzzy reserves the right to cancel orders due to stock,
+                  payment, pricing or technical issues.
+                </li>
+                <li>
+                  Customer information will be handled according to our{" "}
+                  <strong>Privacy Policy</strong>.
+                </li>
+                <li>
+                  All website content, images and the Fanzzy brand are protected
+                  and may not be copied without permission.
+                </li>
+                <li>
+                  These terms are governed by applicable laws of{" "}
+                  <strong>India</strong>.
+                </li>
+              </ul>
+              <p>
+                For any assistance, please contact{" "}
+                <strong>Fanzzy Customer Support</strong>.
+              </p>
+              <p>
+                <strong>© 2026 Fanzzy. All Rights Reserved.</strong>
+              </p>
+            </div>
+          </section>
+        </div>
+      )}
 
-      {profileOpen && <div className="drawer-backdrop" onClick={() => setProfileOpen(false)}><aside className="orders-drawer profile-drawer" role="dialog" aria-modal="true" aria-labelledby="profile-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR FANZZY ACCOUNT</p><h2 id="profile-title">Profile</h2></div><button aria-label="Close profile" onClick={() => setProfileOpen(false)}>×</button></div>{authUser ? <div className="profile-content"><div className="profile-avatar" aria-hidden="true">{profileName.slice(0, 1).toUpperCase()}</div><p className="eyebrow">SIGNED IN</p><h3>{profileName}</h3><p className="profile-welcome">Your saved pieces, cart and order history stay together here.</p><dl className="profile-details"><div><dt>Login mobile number</dt><dd>{authUser.phone}</dd></div><div><dt>Account ID</dt><dd>{authUser.id}</dd></div></dl><div className="profile-shortcuts"><button onClick={() => { setProfileOpen(false); setOrdersOpen(true); }}><span>Orders</span><b>{orders.length.toString().padStart(2, "0")} ↗</b></button><button onClick={() => { setProfileOpen(false); setSavedOpen(true); }}><span>Saved</span><b>{wishlist.length.toString().padStart(2, "0")} ♡</b></button></div><button className="button button-dark full-width" onClick={() => { setProfileOpen(false); openCart(); }}>Open my cart <span>↗</span></button><button className="profile-sign-out" onClick={signOut}>Sign out</button></div> : <div className="profile-content profile-signed-out"><div className="profile-avatar" aria-hidden="true">○</div><p className="eyebrow">NOT SIGNED IN</p><h3>Welcome to Fanzzy.</h3><p>Sign in with a one-time SMS code to keep your cart and orders connected to your mobile number.</p><button className="button button-dark full-width" onClick={() => { setProfileOpen(false); setAuthMessage(""); setAuthOpen(true); }}>Sign in with mobile OTP <span>↗</span></button></div>}</aside></div>}
+      {returnPolicyOpen && (
+        <div
+          className="drawer-backdrop terms-backdrop"
+          onClick={() => setReturnPolicyOpen(false)}
+        >
+          <section
+            className="terms-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="return-policy-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="drawer-header">
+              <div>
+                <p className="eyebrow">FANZZY</p>
+                <h2 id="return-policy-title">Return Policy</h2>
+              </div>
+              <button
+                aria-label="Close return policy"
+                onClick={() => setReturnPolicyOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="terms-content">
+              <p>
+                Customers may request a return for eligible products within the
+                return period mentioned on our website.
+              </p>
+              <p>
+                Once a return request is approved, the{" "}
+                <strong>
+                  customer must send the product to the return hub/address
+                  provided by Fanzzy
+                </strong>
+                .
+              </p>
+              <ul>
+                <li>
+                  The product must be unused, undamaged, and returned in its
+                  original packaging with all tags/accessories intact.
+                </li>
+                <li>
+                  <strong>
+                    Return courier/shipping charges must be paid by the
+                    customer. Fanzzy will not bear the cost of sending the
+                    returned product to our hub.
+                  </strong>
+                </li>
+                <li>
+                  Customers are responsible for safely packing and dispatching
+                  the return item.
+                </li>
+                <li>
+                  We recommend using a trackable courier service. Fanzzy will
+                  not be responsible for return parcels lost or damaged during
+                  transit.
+                </li>
+                <li>
+                  Refund/replacement processing will begin only after the
+                  returned item reaches our hub and successfully passes the
+                  quality inspection.
+                </li>
+                <li>
+                  Original delivery/shipping charges, if any, are non-refundable
+                  unless the return is due to a wrong or defective product
+                  supplied by Fanzzy.
+                </li>
+                <li>
+                  Products that are used, damaged, altered, or returned without
+                  original packaging may not be eligible for refund or
+                  replacement.
+                </li>
+                <li>
+                  Certain products may be marked as{" "}
+                  <strong>non-returnable</strong> for hygiene or other
+                  applicable reasons.
+                </li>
+              </ul>
+              <p>
+                If a customer receives a{" "}
+                <strong>wrong, damaged, or defective product</strong>, they
+                should contact Fanzzy customer support within the specified
+                return period with the order details and supporting
+                photos/videos.
+              </p>
+            </div>
+          </section>
+        </div>
+      )}
+      {privacyOpen && (
+        <div
+          className="drawer-backdrop terms-backdrop"
+          onClick={() => setPrivacyOpen(false)}
+        >
+          <section
+            className="terms-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="privacy-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="drawer-header">
+              <div>
+                <p className="eyebrow">FANZZY</p>
+                <h2 id="privacy-title">Privacy Policy</h2>
+              </div>
+              <button
+                aria-label="Close privacy policy"
+                onClick={() => setPrivacyOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="terms-content">
+              <p>
+                At <strong>Fanzzy</strong>, we respect and protect your privacy.
+                We collect necessary information such as your name, contact
+                details, address, and order information to process orders,
+                arrange delivery, manage returns/refunds, and provide customer
+                support.
+              </p>
+              <p>
+                Your information may be shared with trusted{" "}
+                <strong>payment, courier, and service partners</strong> only
+                when required to complete our services. We do not sell
+                customers' personal information to third parties.
+              </p>
+              <p>
+                We take reasonable measures to keep your information secure. By
+                using the Fanzzy website, you agree to this Privacy Policy and
+                any updates made to it.
+              </p>
+            </div>
+          </section>
+        </div>
+      )}
 
-      {ordersOpen && <div className="drawer-backdrop" onClick={() => setOrdersOpen(false)}><aside className="orders-drawer" role="dialog" aria-modal="true" aria-labelledby="orders-title" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR FANZZY ACCOUNT</p><h2 id="orders-title">My orders</h2></div><button aria-label="Close orders" onClick={() => setOrdersOpen(false)}>×</button></div><div className="orders-intro"><p>These are the orders placed using your signed-in account. Only you can see this account’s orders.</p></div>{visibleOrders.length ? <div className="customer-order-list">{visibleOrders.map((order) => <article className="customer-order-card" key={order.id}><div className="customer-order-head"><div><strong>{order.id}</strong><small>{formatOrderDate(order.date)}{formatOrderTime(order.createdAt) ? ` · ${formatOrderTime(order.createdAt)}` : ""} · {order.customerName}</small></div><span className={`customer-order-status ${order.status.toLowerCase()}`}>{order.status}</span></div>{order.items?.length ? <div className="customer-order-items">{order.items.map((item, itemIndex) => { const product = getOrderedProduct(item); const { size, variant } = getOrderedItemSelection(item); const orderedProductName = item.productName?.trim() || product?.name.trim() || item.name.split(" · ")[0].trim(); const promotion = item.promotion; const promotionRole = promotion?.role === "free" ? "FREE ITEM" : promotion?.role === "bundle" ? "BUNDLE ITEM" : "PAID ITEM"; const selectedVariant = size ? product?.variants?.find((candidate) => String(candidate.size || candidate.name).trim().replace(/^size\s+/i, "").toLowerCase() === size.trim().replace(/^size\s+/i, "").toLowerCase()) : variant ? product?.variants?.find((candidate, index) => (candidate.name || `Option ${index + 1}`).trim().toLowerCase() === variant.trim().toLowerCase()) : undefined; const displayImage = item.variantImage || selectedVariant?.image || item.image || product?.image; return <button className="customer-order-product" key={`${order.id}-${item.productId || item.name}-${variant}-${size}-${promotion?.groupId || "legacy"}-${itemIndex}`} onClick={() => openOrderedProduct(item)} aria-label={`View ${orderedProductName} details`}>{displayImage ? <img src={displayImage} alt="" /> : <span className="order-product-placeholder" aria-hidden="true">✦</span>}<span className="order-product-copy"><strong>{orderedProductName}</strong><b>× {item.quantity}</b>{(variant || size) && <span className="order-product-selection">{variant && `Variant: ${variant}`}{variant && size && " · "}{size && `Size: ${size}`}</span>}{promotion && <small className={`order-product-promotion ${promotion.role === "free" ? "is-free" : ""}`}>{promotionRole} · {promotion.label}</small>}{product ? <em>{product.category} · View details ↗</em> : <em>Product no longer in the collection</em>}</span><small>{item.price}</small></button>; })}</div> : <p className="customer-order-items legacy-order">Order details are available in your confirmation.</p>}<div className="customer-order-total"><span>Total paid</span><strong>{order.total}</strong></div>{order.status === "Delivered" && (() => { const refundRequest = refundRequestForOrder(order.id); return <div className="customer-refund-action">{refundRequest ? <span>Refund request: {refundRequest.status}</span> : <button className="module-secondary" type="button" disabled={refundSubmittingId === order.id} onClick={() => void requestRefund(order)}>{refundSubmittingId === order.id ? "Sending request…" : "Request refund"}</button>}</div>; })()}{order.fulfillmentMethod !== "pickup" && (order.delhiveryAwb ? <div className="customer-order-tracking"><div><span>Delhivery · {order.delhiveryLiveStatus || "Shipment created"}</span><strong>{order.delhiveryAwb}</strong>{order.delhiveryLiveLocation && <small>{order.delhiveryLiveLocation}</small>}{order.delhiveryLastTrackedAt && <small>Updated {formatOrderTime(order.delhiveryLastTrackedAt)}</small>}</div><a href={order.delhiveryTrackingUrl || `https://www.delhivery.com/tracking?uniqueIdentifier=${encodeURIComponent(order.delhiveryAwb)}`} target="_blank" rel="noreferrer">Track shipment ↗</a></div> : order.delhiveryShipmentStatus === "pending" ? <p className="customer-order-shipping-note">Your Delhivery shipment is being prepared.</p> : order.delhiveryShipmentStatus === "failed" ? <p className="customer-order-shipping-note">Tracking will appear after the shipment is confirmed.</p> : null)}<div className="customer-order-actions">{order.fulfillmentMethod !== "pickup" && <button className="module-primary customer-track-button" type="button" onClick={() => setCustomerTrackingOrder(order)}>Track order</button>}<button className="module-secondary customer-bill-button" type="button" disabled={printingBillId !== null} aria-busy={printingBillId === order.id} onClick={() => void downloadBill(order)}>{printingBillId === order.id ? "Printing…" : "Print bill ↗"}</button></div></article>)}</div> : <div className="orders-empty"><div>✦</div><h3>No orders found for this account.</h3><p>Orders appear here after you complete payment while signed in to this account.</p><button className="button button-dark" onClick={() => setOrdersOpen(false)}>Shop the collection <span>↗</span></button></div>}</aside></div>}
+      {assistantOpen && (
+        <div
+          className="drawer-backdrop"
+          onClick={() => setAssistantOpen(false)}
+        >
+          <aside
+            className="assistant-drawer"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="assistant-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="drawer-header">
+              <div>
+                <p className="eyebrow">FANZZY AI</p>
+                <h2 id="assistant-title">How can I help?</h2>
+              </div>
+              <button
+                aria-label="Close AI assistant"
+                onClick={() => setAssistantOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="assistant-messages" aria-live="polite">
+              {assistantMessages.map((message, index) => (
+                <div
+                  className={`assistant-message ${message.role}`}
+                  key={`${message.role}-${index}`}
+                >
+                  <span>
+                    {message.text}
+                    {message.productIds?.length ? (
+                      <div className="assistant-product-actions">
+                        {message.productIds.map((productId) => {
+                          const product = catalogProducts.find(
+                            (item) => item.id === productId,
+                          );
+                          return product ? (
+                            <button
+                              key={product.id}
+                              onClick={() => {
+                                openQuickProduct(product);
+                                setAssistantOpen(false);
+                              }}
+                            >
+                              View {product.name} ·{" "}
+                              {formatINR(getCustomerPrice(product))} ↗
+                            </button>
+                          ) : null;
+                        })}
+                      </div>
+                    ) : null}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="assistant-prompts">
+              <button
+                onClick={() => sendAssistantMessage("Help me choose a gift")}
+              >
+                Choose a gift
+              </button>
+              <button onClick={() => sendAssistantMessage("Track my order")}>
+                Track my order
+              </button>
+              <button
+                onClick={() =>
+                  sendAssistantMessage("How do I care for my jewellery?")
+                }
+              >
+                Jewellery care
+              </button>
+            </div>
+            <form
+              className="assistant-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                sendAssistantMessage();
+              }}
+            >
+              <input
+                value={assistantInput}
+                onChange={(event) => setAssistantInput(event.target.value)}
+                placeholder="Ask Fanzzy Assistant..."
+                aria-label="Ask Fanzzy Assistant"
+              />
+              <button type="submit" aria-label="Send message">
+                ↗
+              </button>
+            </form>
+          </aside>
+        </div>
+      )}
 
-      {customerTrackingOrder && customerTrackingOrder.fulfillmentMethod !== "pickup" && <div className="drawer-backdrop customer-tracking-backdrop" onClick={() => setCustomerTrackingOrder(null)}><section className="customer-tracking-modal" role="dialog" aria-modal="true" aria-labelledby="customer-tracking-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" type="button" aria-label="Close order tracking" onClick={() => setCustomerTrackingOrder(null)}>×</button><header><p className="eyebrow">ORDER TRACKING</p><h2 id="customer-tracking-title">{customerTrackingOrder.id}</h2><p>{customerTrackingOrder.status} · {customerTrackingOrder.total}</p></header><section className="customer-tracking-destination"><p className="eyebrow">DELIVERY ADDRESS</p><strong>{customerTrackingOrder.customerName}</strong><span>{customerTrackingOrder.address || "Delivery address not available."}</span></section>{customerTrackingOrder.delhiveryAwb ? (() => { const liveStatus = customerTrackingOrder.delhiveryLiveStatus || (customerTrackingOrder.delhiveryShipmentStatus === "created" ? "Ready to ship" : "Order received"); const currentStage = customerTrackingStageIndex(liveStatus); const scans = customerTrackingOrder.delhiveryScans || []; return <><section className="customer-tracking-summary"><div><small>DELHIVERY AWB</small><strong>{customerTrackingOrder.delhiveryAwb}</strong></div><div><small>LIVE STATUS</small><strong>{liveStatus}</strong>{customerTrackingOrder.delhiveryLiveLocation && <span>{customerTrackingOrder.delhiveryLiveLocation}</span>}</div></section><a className="customer-tracking-link" href={customerTrackingOrder.delhiveryTrackingUrl || `https://www.delhivery.com/tracking?uniqueIdentifier=${encodeURIComponent(customerTrackingOrder.delhiveryAwb)}`} target="_blank" rel="noreferrer">Open Delhivery tracking ↗</a><section className="customer-tracking-timeline"><p className="eyebrow">LIVE DELIVERY TIMELINE</p><ol className="tracking-stage-list" aria-label="Delhivery delivery progress">{customerTrackingStages.map((stage, index) => { const current = index === currentStage; const completed = index < currentStage; const scan = scans.find((candidate) => stage.match.test(`${candidate.status} ${candidate.instructions || ""}`)); const date = scan?.date || (current ? customerTrackingOrder.delhiveryLiveStatusDate : index === 0 ? customerTrackingOrder.delhiveryShipmentCreatedAt || customerTrackingOrder.createdAt : index === 1 ? customerTrackingOrder.delhiveryPickupRequestDate : ""); const detail = current ? index === 2 && customerTrackingOrder.delhiveryLiveLocation ? `Moving through ${customerTrackingOrder.delhiveryLiveLocation}.` : index === 3 ? "Your parcel is out for delivery today." : index === 4 ? "Your order has been delivered." : index === 1 ? "Pickup has been scheduled with Delhivery." : "Your parcel is being prepared." : completed ? "Completed" : "Waiting for update"; return <li className={`${completed ? "completed " : ""}${current ? "current" : "upcoming"}`} aria-current={current ? "step" : undefined} key={stage.key}><span className="tracking-stage-dot" /><div><strong>{stage.label}</strong><small>{detail}</small>{date && <time>{formatTrackingDate(date)}</time>}</div></li>; })}</ol>{scans.length > 0 && <div className="tracking-scan-summary"><strong>Latest courier scan</strong><span>{scans[0].status}{scans[0].location ? ` · ${scans[0].location}` : ""}</span>{scans[0].date && <time>{formatTrackingDate(scans[0].date)}</time>}</div>}</section></>; })() : <div className="customer-tracking-notice"><strong>Delhivery tracking is not available yet</strong><span>{customerTrackingOrder.delhiveryShipmentStatus === "failed" ? customerTrackingOrder.delhiveryShipmentError || "Shipment creation needs attention before tracking can begin." : "The tracking timeline will appear after your shipment and AWB are created."}</span></div>}</section></div>}
+      {searchOpen && (
+        <div
+          className="overlay search-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Search"
+        >
+          <div className="overlay-top">
+            <span className="wordmark">
+              <img
+                {...storefrontImageProps("/fanzzy-mark.png", "110px")}
+                decoding="async"
+                alt="Fanzzy"
+                className="brand-logo"
+              />
+            </span>
+            <button onClick={closeSearch}>Close&nbsp; ×</button>
+          </div>
+          <div className="search-content">
+            <p className="eyebrow">SEARCH THE COLLECTION</p>
+            <div className="large-search">
+              <input
+                autoFocus
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Try “gold hoops”"
+              />
+              <span>⌕</span>
+            </div>
+            {search && (
+              <div className="search-results">
+                {filteredProducts.length ? (
+                  filteredProducts.map((product) => (
+                    <button
+                      key={product.id}
+                      onClick={() => {
+                        openQuickProduct(product);
+                      }}
+                    >
+                      <img src={product.image} alt="" />
+                      <span>
+                        <strong>{product.name}</strong>
+                        <small>
+                          {product.category} ·{" "}
+                          {formatINR(getCustomerPrice(product))}
+                        </small>
+                      </span>
+                      <b>↗</b>
+                    </button>
+                  ))
+                ) : (
+                  <p className="muted">No pieces found. Try another search.</p>
+                )}
+              </div>
+            )}
+            {!search && (
+              <div className="search-suggestions">
+                <span>Trending now</span>
+                <button onClick={() => setSearch("hoops")}>Hoops</button>
+                <button onClick={() => setSearch("pearl")}>Pearls</button>
+                <button onClick={() => setSearch("chain")}>Chains</button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
-      {cartOpen && <div className="drawer-backdrop cart-backdrop" onClick={() => setCartOpen(false)}><aside className="cart-drawer" onClick={(event) => event.stopPropagation()}><div className="drawer-header"><div><p className="eyebrow">YOUR CART</p><h2>{cartCount ? `${cartCount} piece${cartCount > 1 ? "s" : ""}` : "A little empty"}</h2></div><button onClick={() => setCartOpen(false)}>×</button></div>{cartItems.length ? <><div className="drawer-items">{cartItems.map((product) => <div className={`drawer-item${getVariantStock(product, product.variant) <= 0 ? " drawer-item-sold-out" : ""}`} key={product.cartKey}><img src={product.variant?.image || product.image} alt="" style={imageAdjustmentStyle(product.variant?.adjustments || product.imageAdjustments)} /><div><strong>{product.name}</strong>{product.variant?.name && <small className="cart-variant-name">{product.variant.name}</small>}{product.size && <small className="cart-variant-name">Size {product.size}</small>}{product.promotion && <small className={`cart-promotion-label ${product.promotion.role === "free" ? "is-free" : ""}`}>{product.promotion.role === "free" ? `FREE · ${product.promotion.label}` : product.promotion.role === "bundle" ? `${product.promotion.label} · allocated price` : product.promotion.label}</small>}{getVariantStock(product, product.variant) <= 0 && <small className="cart-stock-label">Sold out</small>}<small>{formatINR(getCartLinePrice(product))}{product.promotion && product.promotion.role === "bundle" && product.promotion.linePrice !== product.promotion.regularPrice ? <del className="cart-regular-price">{formatINR(product.promotion.regularPrice)}</del> : null}</small><div className="quantity"><button onClick={() => updateQuantity(product.cartKey, -1)} aria-label={`Decrease ${product.name} quantity`}>−</button><span>{product.quantity}</span><button onClick={() => updateQuantity(product.cartKey, 1)} aria-label={`Increase ${product.name} quantity`}>+</button></div></div><div className="cart-item-actions"><b>{formatINR(getCartLinePrice(product) * product.quantity)}</b><button className="cart-remove" onClick={() => removeFromCart(product.cartKey)} aria-label={`Remove ${product.name} from cart`}>Remove</button></div></div>)}</div><div className="cart-fulfillment"><p className="field-label">Receive your order</p><div className="cart-fulfillment-options"><button type="button" className={fulfillmentMethod === "delivery" ? "active" : ""} onClick={() => setFulfillmentMethod("delivery")}>Home delivery<small>Delivery in 4–6 working days</small></button><button type="button" className={fulfillmentMethod === "pickup" ? "active" : ""} onClick={() => { setFulfillmentMethod("pickup"); if (!selectedPickupHubId && pickupHubs[0]) setSelectedPickupHubId(pickupHubs[0].id); }} disabled={!pickupHubs.length}>Hub pickup<small>{pickupHubs.length ? "Collect from a hub" : "No hubs available"}</small></button></div>{fulfillmentMethod === "pickup" && pickupHubs.length > 0 && <select aria-label="Pickup hub" value={selectedPickupHubId} onChange={(event) => setSelectedPickupHubId(event.target.value)}><option value="">Select pickup hub</option>{pickupHubs.map((hub) => <option key={hub.id} value={hub.id}>{hub.name} · {hub.place}</option>)}</select>}{fulfillmentMethod === "pickup" && !pickupHubs.length && <small className="cart-fulfillment-help">Add a pickup hub in Admin before choosing hub pickup.</small>}</div><div className="drawer-footer">{cartStockIssues.length > 0 && <div className="cart-stock-warning" role="alert"><strong>Remove sold out items before checkout</strong><span>{cartHasSoldOutItems ? "This cart contains an unavailable item." : "One or more quantities are above the available stock."}</span><button type="button" className="cart-remove-unavailable" onClick={() => { cartStockIssues.forEach((item) => removeFromCart(item.cartKey)); announce("Unavailable items removed from cart"); }}>Remove unavailable items</button></div>}<div><span>Subtotal</span><strong>{formatINR(subtotal)}</strong></div>{cartItems.some((item) => item.promotion?.role === "bundle") && <div className="offer-total"><span>Bundle regular total</span><strong>{formatINR(cartItems.reduce((sum, item) => sum + (item.promotion?.regularPrice || 0) * item.quantity, 0))}</strong></div>}{cartItems.some((item) => item.promotion?.role === "free") && <div className="offer-total"><span>Free-item discount</span><strong>Applied</strong></div>}{bogoDiscount > 0 && <div className="offer-total"><span>{bogoOfferLabel} discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}{couponDiscount > 0 && <div className="offer-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}<div><span>Delivery</span><strong>{deliveryTotal > 0 ? formatINR(deliveryTotal) : "Free"}</strong></div><div className="drawer-total"><span>Total</span><strong>{formatINR(orderTotal)}</strong></div><p>{cartItems.some((item) => item.promotion) ? "Promotion items are linked by offer group ID for inventory, returns, and refunds." : deliveryTotal > 0 ? "Delivery charge applied to this order." : deliveryCharge.freeAboveEnabled ? `Free delivery on orders above ${formatINR(deliveryCharge.freeAbove)}.` : "Complimentary shipping."}</p><button className="button button-dark full-width" onClick={openCheckout} disabled={cartStockIssues.length > 0} title={cartStockIssues.length > 0 ? "Remove unavailable items before checkout" : undefined}>Proceed to buy <span>↗</span></button></div></> : <div className="empty-bag"><div>✦</div><p>Your future favourites<br />belong here.</p><button className="text-link" onClick={() => setCartOpen(false)}>Continue shopping <span>↗</span></button></div>}</aside></div>}
+      {orderConfirmation && (
+        <div
+          className="drawer-backdrop"
+          onClick={() => setOrderConfirmation(null)}
+        >
+          <section
+            className="order-confirmation"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="order-confirmation-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              className="modal-close"
+              aria-label="Close order confirmation"
+              onClick={() => setOrderConfirmation(null)}
+            >
+              ×
+            </button>
+            <p className="eyebrow">
+              {orderConfirmation.paymentMethod === "cod"
+                ? "COD ORDER CONFIRMED"
+                : "PAYMENT SUCCESSFUL"}
+            </p>
+            <h2 id="order-confirmation-title">
+              {orderConfirmation.paymentMethod === "cod"
+                ? "Your order is confirmed."
+                : "Your payment is complete."}
+            </h2>
+            <p>
+              {orderConfirmation.paymentMethod === "cod" ? (
+                <>
+                  Please pay <strong>{orderConfirmation.total}</strong> to the
+                  delivery partner when order{" "}
+                  <strong>{orderConfirmation.id}</strong> arrives.
+                </>
+              ) : (
+                <>
+                  We received <strong>{orderConfirmation.total}</strong> for
+                  order <strong>{orderConfirmation.id}</strong>. Your order has
+                  been confirmed.
+                </>
+              )}
+            </p>
+            {orderConfirmation.fulfillmentMethod === "pickup" && (
+              <p className="pickup-confirmation">
+                <strong>
+                  Pickup from {orderConfirmation.pickupHubName || "hub"}
+                </strong>
+                <br />
+                {orderConfirmation.pickupHubPlace ||
+                  "Pickup place saved with your order."}
+                <br />
+                <small>No delivery charges.</small>
+              </p>
+            )}
+            {orderConfirmation.razorpayPaymentId && (
+              <p className="payment-reference">
+                Payment ID: {orderConfirmation.razorpayPaymentId}
+              </p>
+            )}
+            <div className="confirmation-actions">
+              <button
+                className="save-text"
+                onClick={() => {
+                  setOrderConfirmation(null);
+                  setOrdersOpen(true);
+                }}
+              >
+                View my orders
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
 
-      {authOpen && <div className="drawer-backdrop auth-backdrop" onClick={closeAuth}><section className="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close sign in" onClick={closeAuth}>×</button><p className="eyebrow">SECURE MOBILE LOGIN</p><h2 id="auth-title">Continue with your mobile number.</h2><p className="auth-intro">Enter your mobile number and receive a one-time code by SMS. No password is required.</p><div className="otp-auth-form"><label>Mobile number<input type="tel" value={authPhone} onChange={(event) => { setAuthPhone(event.target.value); setAuthOtp(""); setOtpSent(false); setOtpCooldown(0); }} placeholder="+91 98765 43210" inputMode="tel" autoComplete="tel" disabled={authLoading} /></label>{otpSent && <label>6-digit verification code<input value={authOtp} onChange={(event) => setAuthOtp(event.target.value.replace(/\D/g, "").slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" maxLength={6} placeholder="Enter 6-digit SMS code" disabled={authLoading} onKeyDown={(event) => { if (event.key === "Enter") void verifyOtp(); }} /></label>}{otpSent ? <><button className="google-sign-in" type="button" onClick={() => void verifyOtp()} disabled={authLoading}><span className="email-otp-mark" aria-hidden="true">✦</span>{authLoading ? "Please wait…" : "Verify SMS code"}<span aria-hidden="true">↗</span></button><div className="otp-fallback-actions"><button className="auth-resend" type="button" onClick={() => void sendOtp()} disabled={authLoading || otpCooldown > 0}>{otpCooldown > 0 ? `Resend SMS in ${otpCooldown}s` : "Resend SMS OTP"}</button></div></> : <div className="otp-channel-actions"><button className="google-sign-in" type="button" onClick={() => void sendOtp()} disabled={authLoading}><span className="email-otp-mark" aria-hidden="true">✦</span>{authLoading ? "Please wait…" : "Send SMS code"}<span aria-hidden="true">↗</span></button></div>}</div>{authMessage && <p className="auth-message" role="alert">{authMessage}</p>}<p className="auth-note">Your orders and cart are saved to this verified mobile number.</p></section></div>}
+      {savedOpen && (
+        <div className="drawer-backdrop" onClick={() => setSavedOpen(false)}>
+          <aside
+            className="orders-drawer saved-drawer"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="saved-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="drawer-header">
+              <div>
+                <p className="eyebrow">YOUR EDIT</p>
+                <h2 id="saved-title">Saved pieces</h2>
+              </div>
+              <button
+                aria-label="Close saved pieces"
+                onClick={() => setSavedOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+            {wishlist.length ? (
+              <div className="saved-list">
+                {wishlist.map((productId) => {
+                  const product = catalogProducts.find(
+                    (item) => item.id === productId,
+                  );
+                  return product ? (
+                    <article className="saved-card" key={product.id}>
+                      <button
+                        className="saved-product"
+                        onClick={() => {
+                          openQuickProduct(product);
+                          setSavedOpen(false);
+                        }}
+                      >
+                        <img src={product.image} alt="" />
+                        <span>
+                          <strong>{product.name}</strong>
+                          <small>
+                            {product.category} ·{" "}
+                            {formatINR(getCustomerPrice(product))}
+                          </small>
+                        </span>
+                        <b>↗</b>
+                      </button>
+                      <div className="saved-card-actions">
+                        <button
+                          className="module-secondary"
+                          onClick={() => {
+                            addToCart(product);
+                            setSavedOpen(false);
+                          }}
+                        >
+                          Add to cart
+                        </button>
+                        <button
+                          className="saved-remove"
+                          onClick={() => toggleWishlist(product.id)}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </article>
+                  ) : null;
+                })}
+              </div>
+            ) : (
+              <div className="orders-empty saved-empty">
+                <div>♡</div>
+                <h3>Your edit is waiting.</h3>
+                <p>
+                  Tap the heart on any piece to keep it close while you decide.
+                </p>
+                <button
+                  className="button button-dark"
+                  onClick={() => setSavedOpen(false)}
+                >
+                  Explore pieces <span>↗</span>
+                </button>
+              </div>
+            )}
+          </aside>
+        </div>
+      )}
+
+      {profileOpen && (
+        <div className="drawer-backdrop" onClick={() => setProfileOpen(false)}>
+          <aside
+            className="orders-drawer profile-drawer"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="profile-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="drawer-header">
+              <div>
+                <p className="eyebrow">YOUR FANZZY ACCOUNT</p>
+                <h2 id="profile-title">Profile</h2>
+              </div>
+              <button
+                aria-label="Close profile"
+                onClick={() => setProfileOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+            {authUser ? (
+              <div className="profile-content">
+                <div className="profile-avatar" aria-hidden="true">
+                  {profileName.slice(0, 1).toUpperCase()}
+                </div>
+                <p className="eyebrow">SIGNED IN</p>
+                <h3>{profileName}</h3>
+                <p className="profile-welcome">
+                  Your saved pieces, cart and order history stay together here.
+                </p>
+                <dl className="profile-details">
+                  <div>
+                    <dt>Login mobile number</dt>
+                    <dd>{authUser.phone}</dd>
+                  </div>
+                  <div>
+                    <dt>Account ID</dt>
+                    <dd>{authUser.id}</dd>
+                  </div>
+                </dl>
+                <div className="profile-shortcuts">
+                  <button
+                    onClick={() => {
+                      setProfileOpen(false);
+                      setOrdersOpen(true);
+                    }}
+                  >
+                    <span>Orders</span>
+                    <b>{orders.length.toString().padStart(2, "0")} ↗</b>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setProfileOpen(false);
+                      setSavedOpen(true);
+                    }}
+                  >
+                    <span>Saved</span>
+                    <b>{wishlist.length.toString().padStart(2, "0")} ♡</b>
+                  </button>
+                </div>
+                <button
+                  className="button button-dark full-width"
+                  onClick={() => {
+                    setProfileOpen(false);
+                    openCart();
+                  }}
+                >
+                  Open my cart <span>↗</span>
+                </button>
+                <button className="profile-sign-out" onClick={signOut}>
+                  Sign out
+                </button>
+              </div>
+            ) : (
+              <div className="profile-content profile-signed-out">
+                <div className="profile-avatar" aria-hidden="true">
+                  ○
+                </div>
+                <p className="eyebrow">NOT SIGNED IN</p>
+                <h3>Welcome to Fanzzy.</h3>
+                <p>
+                  Sign in with a one-time SMS code to keep your cart and orders
+                  connected to your mobile number.
+                </p>
+                <button
+                  className="button button-dark full-width"
+                  onClick={() => {
+                    setProfileOpen(false);
+                    setAuthMessage("");
+                    setAuthOpen(true);
+                  }}
+                >
+                  Sign in with mobile OTP <span>↗</span>
+                </button>
+              </div>
+            )}
+          </aside>
+        </div>
+      )}
+
+      {ordersOpen && (
+        <div className="drawer-backdrop" onClick={() => setOrdersOpen(false)}>
+          <aside
+            className="orders-drawer"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="orders-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="drawer-header">
+              <div>
+                <p className="eyebrow">YOUR FANZZY ACCOUNT</p>
+                <h2 id="orders-title">My orders</h2>
+              </div>
+              <button
+                aria-label="Close orders"
+                onClick={() => setOrdersOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="orders-intro">
+              <p>
+                These are the orders placed using your signed-in account. Only
+                you can see this account’s orders.
+              </p>
+            </div>
+            {visibleOrders.length ? (
+              <div className="customer-order-list">
+                {visibleOrders.map((order) => {
+                  const refundRequest = refundRequestForOrder(order.id);
+                  const refundCompleted =
+                    refundRequest?.status === "Refunded" ||
+                    order.returnStatus === "Refunded" ||
+                    order.refundStatus === "Completed" ||
+                    order.refundStatus === "Refunded";
+                  const displayedStatus = refundCompleted
+                    ? "Refunded"
+                    : order.status;
+                  return (
+                  <article className="customer-order-card" key={order.id}>
+                    <div className="customer-order-head">
+                      <div>
+                        <strong>{order.id}</strong>
+                        <small>
+                          {formatOrderDate(order.date)}
+                          {formatOrderTime(order.createdAt)
+                            ? ` · ${formatOrderTime(order.createdAt)}`
+                            : ""}{" "}
+                          · {order.customerName}
+                        </small>
+                      </div>
+                      <span
+                        className={`customer-order-status ${displayedStatus.toLowerCase()}`}
+                      >
+                        {displayedStatus}
+                      </span>
+                    </div>
+                    {order.items?.length ? (
+                      <div className="customer-order-items">
+                        {order.items.map((item, itemIndex) => {
+                          const product = getOrderedProduct(item);
+                          const { size, variant } =
+                            getOrderedItemSelection(item);
+                          const orderedProductName =
+                            item.productName?.trim() ||
+                            product?.name.trim() ||
+                            item.name.split(" · ")[0].trim();
+                          const promotion = item.promotion;
+                          const promotionRole =
+                            promotion?.role === "free"
+                              ? "FREE ITEM"
+                              : promotion?.role === "bundle"
+                                ? "BUNDLE ITEM"
+                                : "PAID ITEM";
+                          const selectedVariant = size
+                            ? product?.variants?.find(
+                                (candidate) =>
+                                  String(candidate.size || candidate.name)
+                                    .trim()
+                                    .replace(/^size\s+/i, "")
+                                    .toLowerCase() ===
+                                  size
+                                    .trim()
+                                    .replace(/^size\s+/i, "")
+                                    .toLowerCase(),
+                              )
+                            : variant
+                              ? product?.variants?.find(
+                                  (candidate, index) =>
+                                    (candidate.name || `Option ${index + 1}`)
+                                      .trim()
+                                      .toLowerCase() ===
+                                    variant.trim().toLowerCase(),
+                                )
+                              : undefined;
+                          const displayImage =
+                            item.variantImage ||
+                            selectedVariant?.image ||
+                            item.image ||
+                            product?.image;
+                          return (
+                            <button
+                              className="customer-order-product"
+                              key={`${order.id}-${item.productId || item.name}-${variant}-${size}-${promotion?.groupId || "legacy"}-${itemIndex}`}
+                              onClick={() => openOrderedProduct(item)}
+                              aria-label={`View ${orderedProductName} details`}
+                            >
+                              {displayImage ? (
+                                <img src={displayImage} alt="" />
+                              ) : (
+                                <span
+                                  className="order-product-placeholder"
+                                  aria-hidden="true"
+                                >
+                                  ✦
+                                </span>
+                              )}
+                              <span className="order-product-copy">
+                                <strong>{orderedProductName}</strong>
+                                <b>× {item.quantity}</b>
+                                {item.cancelled && (
+                                  <small className="order-product-cancelled">
+                                    Cancelled
+                                  </small>
+                                )}
+                                {(variant || size) && (
+                                  <span className="order-product-selection">
+                                    {variant && `Variant: ${variant}`}
+                                    {variant && size && " · "}
+                                    {size && `Size: ${size}`}
+                                  </span>
+                                )}
+                                {promotion && (
+                                  <small
+                                    className={`order-product-promotion ${promotion.role === "free" ? "is-free" : ""}`}
+                                  >
+                                    {promotionRole} · {promotion.label}
+                                  </small>
+                                )}
+                                {product ? (
+                                  <em>{product.category} · View details ↗</em>
+                                ) : (
+                                  <em>Product no longer in the collection</em>
+                                )}
+                              </span>
+                              <small>{item.price}</small>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="customer-order-items legacy-order">
+                        Order details are available in your confirmation.
+                      </p>
+                    )}
+                    <div className="customer-order-total">
+                      {order.status === "Cancelled" ? (
+                        <>
+                          <span>No payment due</span>
+                          <strong>₹0</strong>
+                        </>
+                      ) : order.paymentMethod === "cod" ||
+                      order.paymentStatus === "cod_pending" ||
+                      order.paymentStatus === "cod_collected" ? (
+                        <>
+                          <span>
+                            {order.paymentStatus === "cod_collected"
+                              ? "Cash on delivery collected"
+                              : "Cash on delivery"}
+                          </span>
+                          <strong>
+                            {order.paymentStatus === "cod_collected"
+                              ? order.total
+                              : `${order.total} due`}
+                          </strong>
+                        </>
+                      ) : (
+                        <>
+                          <span>Total paid</span>
+                          <strong>{order.total}</strong>
+                        </>
+                      )}
+                    </div>
+                    {order.status === "Processing" &&
+                      (() => {
+                        const cancellation =
+                          getCustomerCancellationEligibility(order);
+                        return (
+                          <div className="customer-cancel-action">
+                            {cancellation.eligible ? (
+                              <>
+                                <button
+                                  className="module-secondary"
+                                  type="button"
+                                  disabled={cancellingOrderId === order.id}
+                                  aria-busy={cancellingOrderId === order.id}
+                                  onClick={() => openCancellationConfirmation(order)}
+                                >
+                                  Cancel order
+                                </button>
+                                <span>{cancellation.message}</span>
+                              </>
+                            ) : (
+                              <span>{cancellation.message}</span>
+                            )}
+                          </div>
+                        );
+                      })()}
+                    {order.status === "Delivered" && (
+                      <div className="customer-refund-action">
+                        {refundRequest ? (
+                          <span>
+                            {refundCompleted
+                              ? "Refund completed"
+                              : `Refund request: ${refundRequest.status}`}
+                          </span>
+                        ) : (
+                          <button
+                            className="module-secondary"
+                            type="button"
+                            disabled={refundSubmittingId === order.id}
+                            onClick={() => openReturnRequest(order)}
+                          >
+                            {refundSubmittingId === order.id
+                              ? "Sending return request…"
+                              : "Return"}
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    {order.fulfillmentMethod !== "pickup" &&
+                      (order.delhiveryAwb ? (
+                        <div className="customer-order-tracking">
+                          <div>
+                            <span>
+                              Delhivery ·{" "}
+                              {order.delhiveryLiveStatus || "Shipment created"}
+                            </span>
+                            <strong>{order.delhiveryAwb}</strong>
+                            {order.delhiveryLiveLocation && (
+                              <small>{order.delhiveryLiveLocation}</small>
+                            )}
+                            {order.delhiveryLastTrackedAt && (
+                              <small>
+                                Updated{" "}
+                                {formatOrderTime(order.delhiveryLastTrackedAt)}
+                              </small>
+                            )}
+                          </div>
+                          <a
+                            href={
+                              order.delhiveryTrackingUrl ||
+                              `https://www.delhivery.com/tracking?uniqueIdentifier=${encodeURIComponent(order.delhiveryAwb)}`
+                            }
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            Track shipment ↗
+                          </a>
+                        </div>
+                      ) : order.delhiveryShipmentStatus === "pending" ? (
+                        <p className="customer-order-shipping-note">
+                          Your Delhivery shipment is being prepared.
+                        </p>
+                      ) : order.delhiveryShipmentStatus === "failed" ? (
+                        <p className="customer-order-shipping-note">
+                          Tracking will appear after the shipment is confirmed.
+                        </p>
+                      ) : null)}
+                    <div className="customer-order-actions">
+                      {order.fulfillmentMethod !== "pickup" && (
+                        <button
+                          className="module-primary customer-track-button"
+                          type="button"
+                          disabled={order.status === "Cancelled"}
+                          aria-disabled={order.status === "Cancelled"}
+                          title={
+                            order.status === "Cancelled"
+                              ? "Tracking is unavailable for a cancelled order"
+                              : undefined
+                          }
+                          onClick={() => {
+                            if (order.status !== "Cancelled")
+                              setCustomerTrackingOrder(order);
+                          }}
+                        >
+                          Track order
+                        </button>
+                      )}
+                    </div>
+                  </article>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="orders-empty">
+                <div>✦</div>
+                <h3>No orders found for this account.</h3>
+                <p>
+                  Orders appear here after you complete payment while signed in
+                  to this account.
+                </p>
+                <button
+                  className="button button-dark"
+                  onClick={() => setOrdersOpen(false)}
+                >
+                  Shop the collection <span>↗</span>
+                </button>
+              </div>
+            )}
+          </aside>
+        </div>
+      )}
+
+      {returnSelectionOrder && (
+        <div
+          className="drawer-backdrop customer-cancel-confirmation-backdrop"
+          onClick={() => {
+            if (refundSubmittingId !== returnSelectionOrder.id) {
+              setReturnSelectionOrder(null);
+              setReturnItemQuantities({});
+            }
+          }}
+        >
+          <section
+            className="customer-cancel-confirmation customer-return-selection"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="return-selection-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              className="modal-close"
+              type="button"
+              aria-label="Close return selection"
+              disabled={refundSubmittingId === returnSelectionOrder.id}
+              onClick={() => {
+                setReturnSelectionOrder(null);
+                setReturnItemQuantities({});
+              }}
+            >
+              ×
+            </button>
+            <p className="eyebrow">SELECT RETURN ITEMS</p>
+            <h2 id="return-selection-title">What would you like to return?</h2>
+            <form
+              className="customer-cancel-confirmation-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void requestRefund(
+                  returnSelectionOrder,
+                  Object.entries(returnItemQuantities).map(
+                    ([orderItemId, quantity]) => ({
+                      orderItemId,
+                      quantity: Math.floor(Number(quantity)),
+                    }),
+                  ),
+                );
+              }}
+            >
+              <p>
+                Choose the product lines you want to return. Our team will
+                review your request before a refund is issued.
+              </p>
+              <fieldset
+                className="customer-cancel-items"
+                disabled={refundSubmittingId === returnSelectionOrder.id}
+              >
+                <legend>
+                  Select items to return <span aria-hidden="true">*</span>
+                </legend>
+                {returnSelectionChoices.map((choice) => {
+                  const selected = Object.prototype.hasOwnProperty.call(
+                    returnItemQuantities,
+                    choice.id,
+                  );
+                  const label = [
+                    choice.productName,
+                    choice.variantName,
+                    choice.size ? `Size ${choice.size}` : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" · ");
+                  return (
+                    <div className="customer-return-choice" key={choice.id}>
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={(event) =>
+                            setReturnItemQuantities((current) => {
+                              const next = { ...current };
+                              if (event.target.checked) next[choice.id] = "1";
+                              else delete next[choice.id];
+                              return next;
+                            })
+                          }
+                        />
+                        <span>
+                          <strong>{label}</strong>
+                          <small>{choice.quantity} bought</small>
+                        </span>
+                      </label>
+                      <label className="customer-return-quantity">
+                        Quantity
+                        <input
+                          type="number"
+                          min="1"
+                          max={choice.quantity}
+                          value={returnItemQuantities[choice.id] || "1"}
+                          disabled={!selected}
+                          onChange={(event) =>
+                            setReturnItemQuantities((current) => ({
+                              ...current,
+                              [choice.id]: event.target.value,
+                            }))
+                          }
+                          onWheel={(event) => event.currentTarget.blur()}
+                        />
+                      </label>
+                    </div>
+                  );
+                })}
+              </fieldset>
+              <p className="customer-cancel-selection-summary">
+                <strong>{Object.keys(returnItemQuantities).length}</strong> product
+                {Object.keys(returnItemQuantities).length === 1 ? "" : "s"} selected · {" "}
+                <strong>{Object.values(returnItemQuantities).reduce((total, quantity) => total + Math.max(0, Math.floor(Number(quantity) || 0)), 0)}</strong> unit{Object.values(returnItemQuantities).reduce((total, quantity) => total + Math.max(0, Math.floor(Number(quantity) || 0)), 0) === 1 ? "" : "s"}
+              </p>
+              <div className="confirmation-actions">
+                <button
+                  className="module-secondary"
+                  type="button"
+                  disabled={refundSubmittingId === returnSelectionOrder.id}
+                  onClick={() => {
+                    setReturnSelectionOrder(null);
+                    setReturnItemQuantities({});
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="module-primary customer-return-submit"
+                  type="submit"
+                  disabled={
+                    !Object.keys(returnItemQuantities).length ||
+                    refundSubmittingId === returnSelectionOrder.id
+                  }
+                  aria-disabled={
+                    !Object.keys(returnItemQuantities).length ||
+                    refundSubmittingId === returnSelectionOrder.id
+                  }
+                  title={
+                    !Object.keys(returnItemQuantities).length
+                      ? "Select at least one item to return"
+                      : undefined
+                  }
+                >
+                  {refundSubmittingId === returnSelectionOrder.id
+                    ? "Sending request…"
+                    : "Send return request"}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+
+      {cancelConfirmationOrder && (
+        <div
+          className="drawer-backdrop customer-cancel-confirmation-backdrop"
+          onClick={() => {
+            if (cancellingOrderId !== cancelConfirmationOrder.id)
+              closeCancellationConfirmation();
+          }}
+        >
+          <section
+            className="customer-cancel-confirmation"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="cancel-order-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              className="modal-close"
+              type="button"
+              aria-label="Close cancellation confirmation"
+              disabled={cancellingOrderId === cancelConfirmationOrder.id}
+              onClick={closeCancellationConfirmation}
+            >
+              ×
+            </button>
+            <p className="eyebrow">CONFIRM CANCELLATION</p>
+            <h2 id="cancel-order-title">
+              Cancel {cancelConfirmationOrder.id}?
+            </h2>
+            <form
+              className="customer-cancel-confirmation-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void cancelCustomerOrder(cancelConfirmationOrder);
+              }}
+            >
+              {cancelConfirmationOrder.paymentMethod === "cod" ||
+              cancelConfirmationOrder.paymentStatus === "cod_pending" ? (
+                <p>
+                  No payment has been collected. The selected items will be
+                  cancelled and returned to stock.
+                </p>
+              ) : (
+                <p>
+                  Confirming will start a refund for the selected items. The
+                  final refund amount is confirmed after cancellation.
+                </p>
+              )}
+              <fieldset
+                className="customer-cancel-items"
+                disabled={cancellingOrderId === cancelConfirmationOrder.id}
+              >
+                <legend>
+                  Select items to cancel <span aria-hidden="true">*</span>
+                </legend>
+                {cancellableCancellationItems.map(({ item, index }) => {
+                  const selected = cancellationItemIndexes.includes(index);
+                  return (
+                    <label key={`${item.productId || item.name}-${index}`}>
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={(event) =>
+                          setCancellationItemIndexes((current) =>
+                            event.target.checked
+                              ? [...current, index]
+                              : current.filter((value) => value !== index),
+                          )
+                        }
+                      />
+                      <span>
+                        <strong>{item.productName || item.name}</strong>
+                        <small>
+                          {item.quantity} item{item.quantity === 1 ? "" : "s"} · {item.price}
+                        </small>
+                      </span>
+                    </label>
+                  );
+                })}
+              </fieldset>
+              {selectedCancellationItems.length > 0 && (
+                <p className="customer-cancel-selection-summary">
+                  {cancellationSelectionIsFull
+                    ? "All items selected"
+                    : `${selectedCancellationItems.length} item${selectedCancellationItems.length === 1 ? "" : "s"} selected`}
+                  {" · "}
+                  <strong>
+                    {cancellationSelectionIsFull
+                      ? cancelConfirmationOrder.total
+                      : cancellationSelectionAmountLabel}
+                  </strong>
+                </p>
+              )}
+              <fieldset
+                className="customer-cancel-reasons"
+                disabled={cancellingOrderId === cancelConfirmationOrder.id}
+              >
+                <legend>
+                  Why are you cancelling? <span aria-hidden="true">*</span>
+                </legend>
+                {customerCancellationReasons.map((reason) => (
+                  <label key={reason}>
+                    <input
+                      type="radio"
+                      name="cancellation-reason"
+                      value={reason}
+                      required
+                      checked={cancellationReason === reason}
+                      onChange={() => setCancellationReason(reason)}
+                    />
+                    <span>{reason}</span>
+                  </label>
+                ))}
+              </fieldset>
+              {cancellationReason === "Other" && (
+                <label className="customer-cancel-description">
+                  Describe your reason <span aria-hidden="true">*</span>
+                  <textarea
+                    value={cancellationDescription}
+                    onChange={(event) =>
+                      setCancellationDescription(event.target.value)
+                    }
+                    placeholder="Tell us why you would like to cancel"
+                    maxLength={500}
+                    required
+                  />
+                  <small>Required · up to 500 characters</small>
+                </label>
+              )}
+              <div className="customer-cancel-confirmation-actions">
+                <button
+                  className="module-secondary"
+                  type="button"
+                  disabled={cancellingOrderId === cancelConfirmationOrder.id}
+                  onClick={closeCancellationConfirmation}
+                >
+                  Keep order
+                </button>
+                <button
+                  className="button button-dark customer-cancel-submit"
+                  type="submit"
+                  disabled={
+                    cancellingOrderId === cancelConfirmationOrder.id ||
+                    !selectedCancellationItems.length
+                  }
+                  aria-disabled={
+                    cancellingOrderId === cancelConfirmationOrder.id ||
+                    !selectedCancellationItems.length
+                  }
+                  aria-busy={cancellingOrderId === cancelConfirmationOrder.id}
+                >
+                  {cancellingOrderId === cancelConfirmationOrder.id
+                    ? "Cancelling…"
+                    : cancellationSelectionIsFull
+                      ? cancelConfirmationOrder.paymentMethod === "cod" ||
+                        cancelConfirmationOrder.paymentStatus === "cod_pending"
+                        ? "Confirm cancellation"
+                        : "Confirm cancellation & refund"
+                      : cancelConfirmationOrder.paymentMethod === "cod" ||
+                          cancelConfirmationOrder.paymentStatus === "cod_pending"
+                        ? "Cancel selected items"
+                        : "Cancel selected items & refund"}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+
+      {customerTrackingOrder &&
+        customerTrackingOrder.status !== "Cancelled" &&
+        customerTrackingOrder.fulfillmentMethod !== "pickup" && (
+          <div
+            className="drawer-backdrop customer-tracking-backdrop"
+            onClick={() => setCustomerTrackingOrder(null)}
+          >
+            <section
+              className="customer-tracking-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="customer-tracking-title"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <button
+                className="modal-close"
+                type="button"
+                aria-label="Close order tracking"
+                onClick={() => setCustomerTrackingOrder(null)}
+              >
+                ×
+              </button>
+              <header>
+                <p className="eyebrow">ORDER TRACKING</p>
+                <h2 id="customer-tracking-title">{customerTrackingOrder.id}</h2>
+                <p>
+                  {customerTrackingOrder.status} · {customerTrackingOrder.total}
+                </p>
+              </header>
+              <section className="customer-tracking-destination">
+                <p className="eyebrow">DELIVERY ADDRESS</p>
+                <strong>{customerTrackingOrder.customerName}</strong>
+                <span>
+                  {customerTrackingOrder.address ||
+                    "Delivery address not available."}
+                </span>
+              </section>
+              {customerTrackingOrder.delhiveryAwb ? (
+                (() => {
+                  const liveStatus =
+                    customerTrackingOrder.delhiveryLiveStatus ||
+                    (customerTrackingOrder.delhiveryShipmentStatus === "created"
+                      ? "Ready to ship"
+                      : "Order received");
+                  const currentStage = customerTrackingStageIndex(liveStatus);
+                  const scans = customerTrackingOrder.delhiveryScans || [];
+                  return (
+                    <>
+                      <section className="customer-tracking-summary">
+                        <div>
+                          <small>DELHIVERY AWB</small>
+                          <strong>{customerTrackingOrder.delhiveryAwb}</strong>
+                        </div>
+                        <div>
+                          <small>LIVE STATUS</small>
+                          <strong>{liveStatus}</strong>
+                          {customerTrackingOrder.delhiveryLiveLocation && (
+                            <span>
+                              {customerTrackingOrder.delhiveryLiveLocation}
+                            </span>
+                          )}
+                        </div>
+                      </section>
+                      <a
+                        className="customer-tracking-link"
+                        href={
+                          customerTrackingOrder.delhiveryTrackingUrl ||
+                          `https://www.delhivery.com/tracking?uniqueIdentifier=${encodeURIComponent(customerTrackingOrder.delhiveryAwb)}`
+                        }
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Open Delhivery tracking ↗
+                      </a>
+                      <section className="customer-tracking-timeline">
+                        <p className="eyebrow">LIVE DELIVERY TIMELINE</p>
+                        <ol
+                          className="tracking-stage-list"
+                          aria-label="Delhivery delivery progress"
+                        >
+                          {customerTrackingStages.map((stage, index) => {
+                            const current = index === currentStage;
+                            const completed = index < currentStage;
+                            const scan = scans.find((candidate) =>
+                              stage.match.test(
+                                `${candidate.status} ${candidate.instructions || ""}`,
+                              ),
+                            );
+                            const date =
+                              scan?.date ||
+                              (current
+                                ? customerTrackingOrder.delhiveryLiveStatusDate
+                                : index === 0
+                                  ? customerTrackingOrder.delhiveryShipmentCreatedAt ||
+                                    customerTrackingOrder.createdAt
+                                  : index === 1
+                                    ? customerTrackingOrder.delhiveryPickupRequestDate
+                                    : "");
+                            const detail = current
+                              ? index === 2 &&
+                                customerTrackingOrder.delhiveryLiveLocation
+                                ? `Moving through ${customerTrackingOrder.delhiveryLiveLocation}.`
+                                : index === 3
+                                  ? "Your parcel is out for delivery today."
+                                  : index === 4
+                                    ? "Your order has been delivered."
+                                    : index === 1
+                                      ? "Pickup has been scheduled with Delhivery."
+                                      : "Your parcel is being prepared."
+                              : completed
+                                ? "Completed"
+                                : "Waiting for update";
+                            return (
+                              <li
+                                className={`${completed ? "completed " : ""}${current ? "current" : "upcoming"}`}
+                                aria-current={current ? "step" : undefined}
+                                key={stage.key}
+                              >
+                                <span className="tracking-stage-dot" />
+                                <div>
+                                  <strong>{stage.label}</strong>
+                                  <small>{detail}</small>
+                                  {date && (
+                                    <time>{formatTrackingDate(date)}</time>
+                                  )}
+                                </div>
+                              </li>
+                            );
+                          })}
+                        </ol>
+                        {scans.length > 0 && (
+                          <div className="tracking-scan-summary">
+                            <strong>Latest courier scan</strong>
+                            <span>
+                              {scans[0].status}
+                              {scans[0].location
+                                ? ` · ${scans[0].location}`
+                                : ""}
+                            </span>
+                            {scans[0].date && (
+                              <time>{formatTrackingDate(scans[0].date)}</time>
+                            )}
+                          </div>
+                        )}
+                      </section>
+                    </>
+                  );
+                })()
+              ) : (
+                <div className="customer-tracking-notice">
+                  <strong>Delhivery tracking is not available yet</strong>
+                  <span>
+                    {customerTrackingOrder.delhiveryShipmentStatus === "failed"
+                      ? customerTrackingOrder.delhiveryShipmentError ||
+                        "Shipment creation needs attention before tracking can begin."
+                      : "The tracking timeline will appear after your shipment and AWB are created."}
+                  </span>
+                </div>
+              )}
+            </section>
+          </div>
+        )}
+
+      {cartOpen && (
+        <div
+          className="drawer-backdrop cart-backdrop"
+          onClick={() => setCartOpen(false)}
+        >
+          <aside
+            className="cart-drawer"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="drawer-header">
+              <div>
+                <p className="eyebrow">YOUR CART</p>
+                <h2>
+                  {cartCount
+                    ? `${cartCount} piece${cartCount > 1 ? "s" : ""}`
+                    : "A little empty"}
+                </h2>
+              </div>
+              <button onClick={() => setCartOpen(false)}>×</button>
+            </div>
+            {cartItems.length ? (
+              <>
+                <div className="drawer-items">
+                  {cartItems.map((product) => (
+                    <div
+                      className={`drawer-item${getVariantStock(product, product.variant) <= 0 ? " drawer-item-sold-out" : ""}`}
+                      key={product.cartKey}
+                    >
+                      <img
+                        src={product.variant?.image || product.image}
+                        alt=""
+                        style={imageAdjustmentStyle(
+                          product.variant?.adjustments ||
+                            product.imageAdjustments,
+                        )}
+                      />
+                      <div>
+                        <strong>{product.name}</strong>
+                        {product.variant?.name && (
+                          <small className="cart-variant-name">
+                            {product.variant.name}
+                          </small>
+                        )}
+                        {product.size && (
+                          <small className="cart-variant-name">
+                            Size {product.size}
+                          </small>
+                        )}
+                        {product.promotion && (
+                          <small
+                            className={`cart-promotion-label ${product.promotion.role === "free" ? "is-free" : ""}`}
+                          >
+                            {product.promotion.role === "free"
+                              ? `FREE · ${product.promotion.label}`
+                              : product.promotion.role === "bundle"
+                                ? `${product.promotion.label} · allocated price`
+                                : product.promotion.label}
+                          </small>
+                        )}
+                        {getVariantStock(product, product.variant) <= 0 && (
+                          <small className="cart-stock-label">Sold out</small>
+                        )}
+                        <small>
+                          {formatINR(getCartLinePrice(product))}
+                          {product.promotion &&
+                          product.promotion.role === "bundle" &&
+                          product.promotion.linePrice !==
+                            product.promotion.regularPrice ? (
+                            <del className="cart-regular-price">
+                              {formatINR(product.promotion.regularPrice)}
+                            </del>
+                          ) : null}
+                        </small>
+                        <div className="quantity">
+                          <button
+                            onClick={() => updateQuantity(product.cartKey, -1)}
+                            aria-label={`Decrease ${product.name} quantity`}
+                          >
+                            −
+                          </button>
+                          <span>{product.quantity}</span>
+                          <button
+                            onClick={() => updateQuantity(product.cartKey, 1)}
+                            aria-label={`Increase ${product.name} quantity`}
+                          >
+                            +
+                          </button>
+                        </div>
+                      </div>
+                      <div className="cart-item-actions">
+                        <b>
+                          {formatINR(
+                            getCartLinePrice(product) * product.quantity,
+                          )}
+                        </b>
+                        <button
+                          className="cart-remove"
+                          onClick={() => removeFromCart(product.cartKey)}
+                          aria-label={`Remove ${product.name} from cart`}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="cart-fulfillment">
+                  <p className="field-label">Receive your order</p>
+                  <div className="cart-fulfillment-options">
+                    <button
+                      type="button"
+                      className={
+                        fulfillmentMethod === "delivery" ? "active" : ""
+                      }
+                      onClick={() => setFulfillmentMethod("delivery")}
+                    >
+                      Home delivery<small>Delivery in 4–6 working days</small>
+                    </button>
+                    <button
+                      type="button"
+                      className={fulfillmentMethod === "pickup" ? "active" : ""}
+                      onClick={() => {
+                        setFulfillmentMethod("pickup");
+                        if (!selectedPickupHubId && pickupHubs[0])
+                          setSelectedPickupHubId(pickupHubs[0].id);
+                      }}
+                      disabled={!pickupHubs.length}
+                    >
+                      Hub pickup
+                      <small>
+                        {pickupHubs.length
+                          ? "Collect from a hub"
+                          : "No hubs available"}
+                      </small>
+                    </button>
+                  </div>
+                  {fulfillmentMethod === "pickup" && pickupHubs.length > 0 && (
+                    <select
+                      aria-label="Pickup hub"
+                      value={selectedPickupHubId}
+                      onChange={(event) =>
+                        setSelectedPickupHubId(event.target.value)
+                      }
+                    >
+                      <option value="">Select pickup hub</option>
+                      {pickupHubs.map((hub) => (
+                        <option key={hub.id} value={hub.id}>
+                          {hub.name} · {hub.place}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  {fulfillmentMethod === "pickup" && !pickupHubs.length && (
+                    <small className="cart-fulfillment-help">
+                      Add a pickup hub in Admin before choosing hub pickup.
+                    </small>
+                  )}
+                </div>
+                <div className="drawer-footer">
+                  {cartStockIssues.length > 0 && (
+                    <div className="cart-stock-warning" role="alert">
+                      <strong>Remove sold out items before checkout</strong>
+                      <span>
+                        {cartHasSoldOutItems
+                          ? "This cart contains an unavailable item."
+                          : "One or more quantities are above the available stock."}
+                      </span>
+                      <button
+                        type="button"
+                        className="cart-remove-unavailable"
+                        onClick={() => {
+                          cartStockIssues.forEach((item) =>
+                            removeFromCart(item.cartKey),
+                          );
+                          announce("Unavailable items removed from cart");
+                        }}
+                      >
+                        Remove unavailable items
+                      </button>
+                    </div>
+                  )}
+                  <div>
+                    <span>Subtotal</span>
+                    <strong>{formatINR(subtotal)}</strong>
+                  </div>
+                  {cartItems.some(
+                    (item) => item.promotion?.role === "bundle",
+                  ) && (
+                    <div className="offer-total">
+                      <span>Bundle regular total</span>
+                      <strong>
+                        {formatINR(
+                          cartItems.reduce(
+                            (sum, item) =>
+                              sum +
+                              (item.promotion?.regularPrice || 0) *
+                                item.quantity,
+                            0,
+                          ),
+                        )}
+                      </strong>
+                    </div>
+                  )}
+                  {cartItems.some(
+                    (item) => item.promotion?.role === "free",
+                  ) && (
+                    <div className="offer-total">
+                      <span>Free-item discount</span>
+                      <strong>Applied</strong>
+                    </div>
+                  )}
+                  {bogoDiscount > 0 && (
+                    <div className="offer-total">
+                      <span>{onlineOffer.offerName || bogoOfferLabel} discount</span>
+                      <strong>−{formatINR(bogoDiscount)}</strong>
+                    </div>
+                  )}
+                  {couponDiscount > 0 && (
+                    <div className="offer-total">
+                      <span>Coupon discount</span>
+                      <strong>−{formatINR(couponDiscount)}</strong>
+                    </div>
+                  )}
+                  <div>
+                      <span>{onlineOffer.offerId && bogoDiscount === 0 && couponDiscount === 0 ? `${onlineOffer.offerName} · Delivery` : "Delivery"}</span>
+                    <strong>
+                      {deliveryTotal > 0 ? formatINR(deliveryTotal) : "Free"}
+                    </strong>
+                  </div>
+                  <div className="drawer-total">
+                    <span>Total</span>
+                    <strong>{formatINR(orderTotal)}</strong>
+                  </div>
+                  <p>
+                    {cartItems.some((item) => item.promotion)
+                      ? "Promotion items are linked by offer group ID for inventory, returns, and refunds."
+                      : deliveryTotal > 0
+                        ? "Delivery charge applied to this order."
+                        : deliveryCharge.freeAboveEnabled
+                          ? `Free delivery on orders above ${formatINR(deliveryCharge.freeAbove)}.`
+                          : "Complimentary shipping."}
+                  </p>
+                  <button
+                    className="button button-dark full-width"
+                    onClick={openCheckout}
+                    disabled={cartStockIssues.length > 0}
+                    title={
+                      cartStockIssues.length > 0
+                        ? "Remove unavailable items before checkout"
+                        : undefined
+                    }
+                  >
+                    Proceed to buy <span>↗</span>
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="empty-bag">
+                <div>✦</div>
+                <p>
+                  Your future favourites
+                  <br />
+                  belong here.
+                </p>
+                <button
+                  className="text-link"
+                  onClick={() => setCartOpen(false)}
+                >
+                  Continue shopping <span>↗</span>
+                </button>
+              </div>
+            )}
+          </aside>
+        </div>
+      )}
+
+      {authOpen && (
+        <div className="drawer-backdrop auth-backdrop" onClick={closeAuth}>
+          <section
+            className="auth-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="auth-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              className="modal-close"
+              aria-label="Close sign in"
+              onClick={closeAuth}
+            >
+              ×
+            </button>
+            <p className="eyebrow">SECURE MOBILE LOGIN</p>
+            <h2 id="auth-title">Continue with your mobile number.</h2>
+            <p className="auth-intro">
+              Enter your mobile number and receive a one-time code by SMS. No
+              password is required.
+            </p>
+            <div className="otp-auth-form">
+              <label>
+                Mobile number
+                <input
+                  type="tel"
+                  value={authPhone}
+                  onChange={(event) => {
+                    setAuthPhone(event.target.value);
+                    setAuthOtp("");
+                    setOtpSent(false);
+                    setOtpCooldown(0);
+                  }}
+                  placeholder="+91 98765 43210"
+                  inputMode="tel"
+                  autoComplete="tel"
+                  disabled={authLoading}
+                />
+              </label>
+              {otpSent && (
+                <label>
+                  6-digit verification code
+                  <input
+                    value={authOtp}
+                    onChange={(event) =>
+                      setAuthOtp(
+                        event.target.value.replace(/\D/g, "").slice(0, 6),
+                      )
+                    }
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    placeholder="Enter 6-digit SMS code"
+                    disabled={authLoading}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") void verifyOtp();
+                    }}
+                  />
+                </label>
+              )}
+              {otpSent ? (
+                <>
+                  <button
+                    className="google-sign-in"
+                    type="button"
+                    onClick={() => void verifyOtp()}
+                    disabled={authLoading}
+                  >
+                    <span className="email-otp-mark" aria-hidden="true">
+                      ✦
+                    </span>
+                    {authLoading ? "Please wait…" : "Verify SMS code"}
+                    <span aria-hidden="true">↗</span>
+                  </button>
+                  <div className="otp-fallback-actions">
+                    <button
+                      className="auth-resend"
+                      type="button"
+                      onClick={() => void sendOtp()}
+                      disabled={authLoading || otpCooldown > 0}
+                    >
+                      {otpCooldown > 0
+                        ? `Resend SMS in ${otpCooldown}s`
+                        : "Resend SMS OTP"}
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="otp-channel-actions">
+                  <button
+                    className="google-sign-in"
+                    type="button"
+                    onClick={() => void sendOtp()}
+                    disabled={authLoading}
+                  >
+                    <span className="email-otp-mark" aria-hidden="true">
+                      ✦
+                    </span>
+                    {authLoading ? "Please wait…" : "Send SMS code"}
+                    <span aria-hidden="true">↗</span>
+                  </button>
+                </div>
+              )}
+            </div>
+            {authMessage && (
+              <p className="auth-message" role="alert">
+                {authMessage}
+              </p>
+            )}
+            <p className="auth-note">
+              Your orders and cart are saved to this verified mobile number.
+            </p>
+          </section>
+        </div>
+      )}
 
       {checkoutOpen && (
-        <div className="drawer-backdrop checkout-backdrop" onClick={() => setCheckoutOpen(false)}>
+        <div
+          className="drawer-backdrop checkout-backdrop"
+          onClick={() => setCheckoutOpen(false)}
+        >
           <section
             className="checkout-modal"
             role="dialog"
@@ -3211,14 +7981,33 @@ export default function Home() {
             onClick={(event) => event.stopPropagation()}
           >
             <div className="drawer-header">
-              <div><p className="eyebrow">CHECKOUT</p><h2 id="checkout-title">Complete your order</h2></div>
-              <button type="button" aria-label="Close checkout" onClick={() => setCheckoutOpen(false)}>×</button>
+              <div>
+                <p className="eyebrow">CHECKOUT</p>
+                <h2 id="checkout-title">Complete your order</h2>
+              </div>
+              <button
+                type="button"
+                aria-label="Close checkout"
+                onClick={() => setCheckoutOpen(false)}
+              >
+                ×
+              </button>
             </div>
-            <p className="checkout-intro">We’ll use your WhatsApp number to confirm your order and delivery updates.</p>
+            <p className="checkout-intro">
+              We’ll use your WhatsApp number to confirm your order and delivery
+              updates.
+            </p>
             {Object.keys(checkoutErrors).length > 0 && (
               <div className="checkout-validation-summary" role="alert">
                 <strong>Complete the required details</strong>
-                <span>{checkoutErrors.name || checkoutErrors.email || checkoutErrors.phone || checkoutErrors.pickupHub || checkoutErrors.address || checkoutErrors.pincode}</span>
+                <span>
+                  {checkoutErrors.name ||
+                    checkoutErrors.email ||
+                    checkoutErrors.phone ||
+                    checkoutErrors.pickupHub ||
+                    checkoutErrors.address ||
+                    checkoutErrors.pincode}
+                </span>
               </div>
             )}
             <div className="checkout-grid">
@@ -3227,13 +8016,28 @@ export default function Home() {
                 <input
                   ref={checkoutNameRef}
                   value={checkoutForm.name}
-                  onChange={(event) => { setCheckoutForm((current) => ({ ...current, name: event.target.value })); clearCheckoutError("name"); }}
+                  onChange={(event) => {
+                    setCheckoutForm((current) => ({
+                      ...current,
+                      name: event.target.value,
+                    }));
+                    clearCheckoutError("name");
+                  }}
                   placeholder="Your full name"
                   aria-invalid={Boolean(checkoutErrors.name)}
-                  aria-describedby={checkoutErrors.name ? "checkout-name-error" : undefined}
+                  aria-describedby={
+                    checkoutErrors.name ? "checkout-name-error" : undefined
+                  }
                   required
                 />
-                {checkoutErrors.name && <small className="checkout-field-error" id="checkout-name-error">{checkoutErrors.name}</small>}
+                {checkoutErrors.name && (
+                  <small
+                    className="checkout-field-error"
+                    id="checkout-name-error"
+                  >
+                    {checkoutErrors.name}
+                  </small>
+                )}
               </label>
               <label>
                 WhatsApp number <span className="required-mark">Required</span>
@@ -3241,24 +8045,100 @@ export default function Home() {
                   ref={checkoutPhoneRef}
                   type="tel"
                   value={checkoutForm.phone}
-                  onChange={(event) => { setCheckoutForm((current) => ({ ...current, phone: event.target.value })); clearCheckoutError("phone"); }}
+                  onChange={(event) => {
+                    setCheckoutForm((current) => ({
+                      ...current,
+                      phone: event.target.value,
+                    }));
+                    clearCheckoutError("phone");
+                  }}
                   placeholder="+91 98765 43210"
                   aria-invalid={Boolean(checkoutErrors.phone)}
-                  aria-describedby={checkoutErrors.phone ? "checkout-phone-error" : undefined}
+                  aria-describedby={
+                    checkoutErrors.phone ? "checkout-phone-error" : undefined
+                  }
                   required
                 />
-                {checkoutErrors.phone && <small className="checkout-field-error" id="checkout-phone-error">{checkoutErrors.phone}</small>}
+                {checkoutErrors.phone && (
+                  <small
+                    className="checkout-field-error"
+                    id="checkout-phone-error"
+                  >
+                    {checkoutErrors.phone}
+                  </small>
+                )}
               </label>
               <label>
                 Email address <span className="required-mark">Required</span>
-                <input ref={checkoutEmailRef} type="email" value={checkoutForm.email} onChange={(event) => { setCheckoutForm((current) => ({ ...current, email: event.target.value })); clearCheckoutError("email"); }} placeholder="you@example.com" autoComplete="email" aria-invalid={Boolean(checkoutErrors.email)} aria-describedby={checkoutErrors.email ? "checkout-email-error" : undefined} required />
-                {checkoutErrors.email && <small className="checkout-field-error" id="checkout-email-error">{checkoutErrors.email}</small>}
+                <input
+                  ref={checkoutEmailRef}
+                  type="email"
+                  value={checkoutForm.email}
+                  onChange={(event) => {
+                    setCheckoutForm((current) => ({
+                      ...current,
+                      email: event.target.value,
+                    }));
+                    clearCheckoutError("email");
+                  }}
+                  placeholder="you@example.com"
+                  autoComplete="email"
+                  aria-invalid={Boolean(checkoutErrors.email)}
+                  aria-describedby={
+                    checkoutErrors.email ? "checkout-email-error" : undefined
+                  }
+                  required
+                />
+                {checkoutErrors.email && (
+                  <small
+                    className="checkout-field-error"
+                    id="checkout-email-error"
+                  >
+                    {checkoutErrors.email}
+                  </small>
+                )}
               </label>
               <div className="checkout-fulfillment checkout-wide">
-                <p className="field-label">How would you like to receive your order?</p>
+                <p className="field-label">
+                  How would you like to receive your order?
+                </p>
                 <div className="fulfillment-options">
-                  <label><input type="radio" name="fulfillment-method" checked={fulfillmentMethod === "delivery"} onChange={() => { setFulfillmentMethod("delivery"); clearCheckoutError("pickupHub"); }} /> <span>Home delivery<small>Delivery in 4–6 working days</small></span></label>
-                  <label className={!pickupHubs.length ? "disabled" : ""}><input type="radio" name="fulfillment-method" checked={fulfillmentMethod === "pickup"} onChange={() => { setFulfillmentMethod("pickup"); clearCheckoutError("address"); if (!selectedPickupHubId && pickupHubs[0]) setSelectedPickupHubId(pickupHubs[0].id); }} disabled={!pickupHubs.length} /> <span>Pick up from a hub<small>{pickupHubs.length ? "No delivery charges." : "Add a hub in Admin → Hub to enable pickup."}</small></span></label>
+                  <label>
+                    <input
+                      type="radio"
+                      name="fulfillment-method"
+                      checked={fulfillmentMethod === "delivery"}
+                      onChange={() => {
+                        setFulfillmentMethod("delivery");
+                        clearCheckoutError("pickupHub");
+                      }}
+                    />{" "}
+                    <span>
+                      Home delivery<small>Delivery in 4–6 working days</small>
+                    </span>
+                  </label>
+                  <label className={!pickupHubs.length ? "disabled" : ""}>
+                    <input
+                      type="radio"
+                      name="fulfillment-method"
+                      checked={fulfillmentMethod === "pickup"}
+                      onChange={() => {
+                        setFulfillmentMethod("pickup");
+                        clearCheckoutError("address");
+                        if (!selectedPickupHubId && pickupHubs[0])
+                          setSelectedPickupHubId(pickupHubs[0].id);
+                      }}
+                      disabled={!pickupHubs.length}
+                    />{" "}
+                    <span>
+                      Pick up from a hub
+                      <small>
+                        {pickupHubs.length
+                          ? "No delivery charges."
+                          : "Add a hub in Admin → Hub to enable pickup."}
+                      </small>
+                    </span>
+                  </label>
                 </div>
               </div>
               {fulfillmentMethod === "pickup" && pickupHubs.length > 0 && (
@@ -3267,44 +8147,107 @@ export default function Home() {
                   <select
                     ref={checkoutPickupHubRef}
                     value={selectedPickupHubId}
-                    onChange={(event) => { setSelectedPickupHubId(event.target.value); clearCheckoutError("pickupHub"); }}
+                    onChange={(event) => {
+                      setSelectedPickupHubId(event.target.value);
+                      clearCheckoutError("pickupHub");
+                    }}
                     aria-invalid={Boolean(checkoutErrors.pickupHub)}
-                    aria-describedby={checkoutErrors.pickupHub ? "checkout-hub-error" : undefined}
+                    aria-describedby={
+                      checkoutErrors.pickupHub
+                        ? "checkout-hub-error"
+                        : undefined
+                    }
                   >
                     <option value="">Select a pickup hub</option>
-                    {pickupHubs.map((hub) => <option key={hub.id} value={hub.id}>{hub.name} · {hub.place}</option>)}
+                    {pickupHubs.map((hub) => (
+                      <option key={hub.id} value={hub.id}>
+                        {hub.name} · {hub.place}
+                      </option>
+                    ))}
                   </select>
-                  {checkoutErrors.pickupHub && <small className="checkout-field-error" id="checkout-hub-error">{checkoutErrors.pickupHub}</small>}
-                  <small className="pickup-hub-details">{selectedPickupHub ? `${selectedPickupHub.name} · ${selectedPickupHub.place}` : "Choose where you will collect your order."}</small>
+                  {checkoutErrors.pickupHub && (
+                    <small
+                      className="checkout-field-error"
+                      id="checkout-hub-error"
+                    >
+                      {checkoutErrors.pickupHub}
+                    </small>
+                  )}
+                  <small className="pickup-hub-details">
+                    {selectedPickupHub
+                      ? `${selectedPickupHub.name} · ${selectedPickupHub.place}`
+                      : "Choose where you will collect your order."}
+                  </small>
                 </label>
               )}
               {fulfillmentMethod === "delivery" && (
                 <>
                   <label className="checkout-wide">
-                    Delivery address <span className="required-mark">Required</span>
+                    Delivery address{" "}
+                    <span className="required-mark">Required</span>
                     <input
                       ref={checkoutAddressRef}
                       value={checkoutForm.address}
-                      onChange={(event) => { setCheckoutForm((current) => ({ ...current, address: event.target.value })); clearCheckoutError("address"); }}
+                      onChange={(event) => {
+                        setCheckoutForm((current) => ({
+                          ...current,
+                          address: event.target.value,
+                        }));
+                        clearCheckoutError("address");
+                      }}
                       placeholder="House number, street, area, city"
                       autoComplete="street-address"
                       aria-invalid={Boolean(checkoutErrors.address)}
-                      aria-describedby={checkoutErrors.address ? "checkout-address-error" : undefined}
+                      aria-describedby={
+                        checkoutErrors.address
+                          ? "checkout-address-error"
+                          : undefined
+                      }
                       required
                     />
-                    {checkoutErrors.address && <small className="checkout-field-error" id="checkout-address-error">{checkoutErrors.address}</small>}
+                    {checkoutErrors.address && (
+                      <small
+                        className="checkout-field-error"
+                        id="checkout-address-error"
+                      >
+                        {checkoutErrors.address}
+                      </small>
+                    )}
                   </label>
                   <label>
-                    Nearby landmark <span className="required-mark">Required</span>
-                    <input value={checkoutForm.landmark} maxLength={100} required
-                      onChange={(event) => { setCheckoutForm((current) => ({ ...current, landmark: event.target.value })); clearCheckoutError("landmark"); }}
+                    Nearby landmark{" "}
+                    <span className="required-mark">Required</span>
+                    <input
+                      value={checkoutForm.landmark}
+                      maxLength={100}
+                      required
+                      onChange={(event) => {
+                        setCheckoutForm((current) => ({
+                          ...current,
+                          landmark: event.target.value,
+                        }));
+                        clearCheckoutError("landmark");
+                      }}
                       placeholder="Nearby shop, school or building"
                       aria-invalid={Boolean(checkoutErrors.landmark)}
-                      aria-describedby={checkoutErrors.landmark ? "checkout-landmark-error" : undefined} />
-                    {checkoutErrors.landmark && <small className="checkout-field-error" id="checkout-landmark-error">{checkoutErrors.landmark}</small>}
+                      aria-describedby={
+                        checkoutErrors.landmark
+                          ? "checkout-landmark-error"
+                          : undefined
+                      }
+                    />
+                    {checkoutErrors.landmark && (
+                      <small
+                        className="checkout-field-error"
+                        id="checkout-landmark-error"
+                      >
+                        {checkoutErrors.landmark}
+                      </small>
+                    )}
                   </label>
                   <label>
-                    Delivery pincode <span className="required-mark">Required</span>
+                    Delivery pincode{" "}
+                    <span className="required-mark">Required</span>
                     <input
                       ref={checkoutPincodeRef}
                       type="text"
@@ -3312,54 +8255,588 @@ export default function Home() {
                       pattern="[0-9]{6}"
                       maxLength={6}
                       value={checkoutForm.pincode}
-                      onChange={(event) => { setCheckoutForm((current) => ({ ...current, pincode: event.target.value.replace(/\D/g, "").slice(0, 6) })); clearCheckoutError("pincode"); }}
+                      onChange={(event) => {
+                        setCheckoutForm((current) => ({
+                          ...current,
+                          pincode: event.target.value
+                            .replace(/\D/g, "")
+                            .slice(0, 6),
+                        }));
+                        clearCheckoutError("pincode");
+                      }}
                       placeholder="673602"
                       autoComplete="postal-code"
                       aria-invalid={Boolean(checkoutErrors.pincode)}
-                      aria-describedby={checkoutErrors.pincode ? "checkout-pincode-error" : undefined}
+                      aria-describedby={
+                        checkoutErrors.pincode
+                          ? "checkout-pincode-error"
+                          : undefined
+                      }
                       required
                     />
-                    {checkoutErrors.pincode && <small className="checkout-field-error" id="checkout-pincode-error">{checkoutErrors.pincode}</small>}
+                    {checkoutErrors.pincode && (
+                      <small
+                        className="checkout-field-error"
+                        id="checkout-pincode-error"
+                      >
+                        {checkoutErrors.pincode}
+                      </small>
+                    )}
                   </label>
                 </>
               )}
               <div className="checkout-payment checkout-wide">
                 <p className="field-label">Payment method</p>
                 <div className="fulfillment-options">
-                  {paymentSettings.online && <label><input type="radio" name="payment-method" checked={paymentMethod === "online"} onChange={() => setPaymentMethod("online")} /> <span>Pay online<small>Secure payment through {paymentSettings.provider}</small></span></label>}
-                  {paymentSettings.cod && <label><input type="radio" name="payment-method" checked={paymentMethod === "cod"} onChange={() => setPaymentMethod("cod")} /> <span>Cash on delivery<small>{codTotal > 0 ? `Pay on arrival · ${formatINR(codTotal)} COD charge` : "Pay when your order arrives"}</small></span></label>}
+                  {paymentSettings.online && (
+                    <label>
+                      <input
+                        type="radio"
+                        name="payment-method"
+                        checked={paymentMethod === "online"}
+                        onChange={() => setPaymentMethod("online")}
+                      />{" "}
+                      <span>
+                        Pay online
+                        <small>
+                          Secure payment through {paymentSettings.provider}
+                        </small>
+                      </span>
+                    </label>
+                  )}
+                  {paymentSettings.cod && (
+                    <label>
+                      <input
+                        type="radio"
+                        name="payment-method"
+                        checked={paymentMethod === "cod"}
+                        onChange={() => setPaymentMethod("cod")}
+                      />{" "}
+                      <span>
+                        Cash on delivery
+                        <small>
+                          {codTotal > 0
+                            ? `Pay on arrival · ${formatINR(codTotal)} COD charge`
+                            : "Pay when your order arrives"}
+                        </small>
+                      </span>
+                    </label>
+                  )}
                 </div>
-                {!paymentSettings.online && !paymentSettings.cod && <small className="checkout-field-error">No payment methods are available right now.</small>}
+                {!paymentSettings.online && !paymentSettings.cod && (
+                  <small className="checkout-field-error">
+                    No payment methods are available right now.
+                  </small>
+                )}
               </div>
               <div className="checkout-coupon checkout-wide">
-                <label htmlFor="checkout-coupon-code">Coupon code <span className="optional-mark">Optional</span></label>
-                <div className="coupon-entry"><input id="checkout-coupon-code" value={couponInput} onChange={(event) => { setCouponInput(event.target.value.toUpperCase()); setAppliedCoupon(null); }} placeholder="Enter coupon code" autoCapitalize="characters" /><button className="button button-light" type="button" onClick={applyCoupon}>Apply</button></div>
-                {appliedCoupon && <p className="coupon-success">{appliedCoupon.code} applied · {appliedCoupon.discount} off</p>}
+                <label htmlFor="checkout-coupon-code">
+                  Coupon code <span className="optional-mark">Optional</span>
+                </label>
+                <div className="coupon-entry">
+                  <input
+                    id="checkout-coupon-code"
+                    value={couponInput}
+                    onChange={(event) => {
+                      setCouponInput(event.target.value.toUpperCase());
+                      setSalesCouponCode("");
+                      setAppliedCoupon(null);
+                    }}
+                    placeholder="Enter coupon code"
+                    autoCapitalize="characters"
+                  />
+                  <button
+                    className="button button-light"
+                    type="button"
+                    onClick={applyCoupon}
+                  >
+                    Apply
+                  </button>
+                </div>
+                {(appliedCoupon || salesCouponCode) && (
+                  <p className="coupon-success">
+                    {salesCouponCode || appliedCoupon?.code} applied{couponDiscount > 0 ? ` · ${formatINR(couponDiscount)} off` : " · the best eligible offer will apply"}
+                  </p>
+                )}
+                {!onlineOffersReady && <p className="coupon-success" role="status">Checking current offers before checkout…</p>}
               </div>
             </div>
-            {bogoDiscount > 0 && <div className="checkout-total coupon-total"><span>{bogoOfferLabel} discount</span><strong>−{formatINR(bogoDiscount)}</strong></div>}
-            {couponDiscount > 0 && <div className="checkout-total coupon-total"><span>Coupon discount</span><strong>−{formatINR(couponDiscount)}</strong></div>}
-            <div className="checkout-total"><span>{fulfillmentMethod === "pickup" ? "Pickup" : "Delivery"}</span><strong>{fulfillmentMethod === "pickup" ? "Free" : deliveryTotal > 0 ? formatINR(deliveryTotal) : "Free"}</strong></div>
-            {codTotal > 0 && <div className="checkout-total"><span>COD charge</span><strong>{formatINR(codTotal)}</strong></div>}
-            <div className="checkout-total"><span>Order total</span><strong>{formatINR(orderTotal)}</strong></div>
-            <div className="checkout-actions">
-              <button className="button button-dark" type="button" onClick={submitCheckout} disabled={isPaying}>{isPaying ? (paymentMethod === "cod" ? "Confirming COD…" : "Opening payment…") : paymentMethod === "cod" ? "Place COD order" : "Pay securely"} <span>↗</span></button>
-              <button className="save-text" type="button" onClick={() => setCheckoutOpen(false)} disabled={isPaying}>Back to cart</button>
+            {bogoDiscount > 0 && (
+              <div className="checkout-total coupon-total">
+                <span>{onlineOffer.offerName || bogoOfferLabel} discount</span>
+                <strong>−{formatINR(bogoDiscount)}</strong>
+              </div>
+            )}
+            {couponDiscount > 0 && (
+              <div className="checkout-total coupon-total">
+                <span>Coupon discount</span>
+                <strong>−{formatINR(couponDiscount)}</strong>
+              </div>
+            )}
+            <div className="checkout-total">
+              <span>
+                {fulfillmentMethod === "pickup" ? "Pickup" : onlineOffer.offerId && bogoDiscount === 0 && couponDiscount === 0 ? `${onlineOffer.offerName} · Delivery` : "Delivery"}
+              </span>
+              <strong>
+                {fulfillmentMethod === "pickup"
+                  ? "Free"
+                  : deliveryTotal > 0
+                    ? formatINR(deliveryTotal)
+                    : "Free"}
+              </strong>
             </div>
-            {isPaying && <p className="checkout-payment-status" role="status">{paymentMethod === "cod" ? "Saving your COD order and preparing the shipment…" : "Saving your order and opening secure payment…"}</p>}
+            {codTotal > 0 && (
+              <div className="checkout-total">
+                <span>COD charge</span>
+                <strong>{formatINR(codTotal)}</strong>
+              </div>
+            )}
+            <div className="checkout-total">
+              <span>Order total</span>
+              <strong>{formatINR(orderTotal)}</strong>
+            </div>
+            <div className="checkout-actions">
+              <button
+                className="button button-dark"
+                type="button"
+                onClick={submitCheckout}
+                disabled={isPaying || !onlineOffersReady}
+              >
+                {isPaying
+                  ? paymentMethod === "cod"
+                    ? "Confirming COD…"
+                    : "Opening payment…"
+                  : paymentMethod === "cod"
+                    ? "Place COD order"
+                    : "Pay securely"}{" "}
+                <span>↗</span>
+              </button>
+              <button
+                className="save-text"
+                type="button"
+                onClick={() => { setCheckoutOpen(false); openCart(); }}
+                disabled={isPaying || !onlineOffersReady}
+              >
+                Back to cart
+              </button>
+            </div>
+            {isPaying && (
+              <p className="checkout-payment-status" role="status">
+                {paymentMethod === "cod"
+                  ? "Saving your COD order and preparing the shipment…"
+                  : "Saving your order and opening secure payment…"}
+              </p>
+            )}
           </section>
         </div>
       )}
 
+      {quickProduct && (
+        <div className="drawer-backdrop" onClick={closeQuickProduct}>
+          <div
+            className="quick-modal"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              className="modal-close"
+              aria-label="Close quick view"
+              onClick={closeQuickProduct}
+            >
+              ×
+            </button>
+            <div
+              className="quick-image"
+              onClick={() =>
+                setZoomedImage({
+                  src:
+                    quickProductImageOverride ||
+                    selectedVariant?.image ||
+                    quickProduct.image,
+                  alt: selectedVariant?.name
+                    ? `${quickProduct.name} - ${selectedVariant.name}`
+                    : quickProduct.name,
+                  adjustments: quickProductImageOverride
+                    ? undefined
+                    : selectedVariant?.adjustments ||
+                      quickProduct.imageAdjustments,
+                })
+              }
+              title="Click to zoom"
+            >
+              <img
+                src={
+                  quickProductImageOverride ||
+                  selectedVariant?.image ||
+                  quickProduct.image
+                }
+                alt={
+                  selectedVariant?.name
+                    ? `${quickProduct.name} - ${selectedVariant.name}`
+                    : quickProduct.name
+                }
+                style={imageAdjustmentStyle(
+                  quickProductImageOverride
+                    ? undefined
+                    : selectedVariant?.adjustments ||
+                        quickProduct.imageAdjustments,
+                )}
+              />
+            </div>
+            <div className="quick-copy">
+              <p className="eyebrow">{quickProduct.category}</p>
+              <h2>{quickProduct.name}</h2>
+              <div className="price-row">
+                <span>{formatINR(websiteProductOffer(onlineSalesPromotions, { productId: quickProduct.sku || quickProduct.id, category: quickProduct.category, price: quickProduct.price }, onlineOfferTime).price)}</span>
+                <del>{formatINR(websiteProductOffer(onlineSalesPromotions, { productId: quickProduct.sku || quickProduct.id, category: quickProduct.category, price: quickProduct.price }, onlineOfferTime).name ? quickProduct.price : getComparePrice(quickProduct))}</del>
+              </div>
+              {getProductVariantType(quickProduct) === "normal" &&
+              quickProduct.variants?.length ? (
+                <div className="variant-picker">
+                  <span>Choose colour / series / model</span>
+                  <div>
+                    {quickProduct.variants.map((variant, index) => {
+                      const variantStock = getVariantStock(
+                        quickProduct,
+                        variant,
+                      );
+                      return (
+                        <button
+                          key={`${quickProduct.id}-${variant.name || index}`}
+                          disabled={variantStock <= 0}
+                          className={`${selectedVariant?.name === variant.name && selectedVariant?.image === variant.image ? "active" : ""} ${variantStock <= 0 ? "sold-out" : ""}`}
+                          onClick={() => {
+                            setQuickProductImageOverride(null);
+                            setSelectedVariant(variant);
+                          }}
+                        >
+                          <img
+                            src={variant.image || quickProduct.image}
+                            alt=""
+                            style={imageAdjustmentStyle(variant.adjustments)}
+                          />
+                          <span>
+                            {variant.name || `Option ${index + 1}`} ·{" "}
+                            {variantStock > 0
+                              ? `${variantStock} available`
+                              : "Sold out"}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+              {getProductVariantType(quickProduct) === "size" &&
+              getProductSizes(quickProduct).length ? (
+                <div className="size-picker">
+                  <span>Choose size</span>
+                  <div>
+                    {getProductSizes(quickProduct).map((size) => {
+                      const sizeVariant = getSizeVariant(quickProduct, size);
+                      const stock = getSelectionStock(
+                        quickProduct,
+                        selectedVariant,
+                        size,
+                      );
+                      return (
+                        <button
+                          type="button"
+                          key={size}
+                          disabled={stock <= 0}
+                          className={`${selectedSize === size ? "active" : ""} ${stock <= 0 ? "sold-out" : ""}`}
+                          onClick={() => {
+                            setQuickProductImageOverride(null);
+                            setSelectedSize(size);
+                          }}
+                        >
+                          {sizeVariant?.image ? (
+                            <img src={sizeVariant.image} alt="" />
+                          ) : null}
+                          Size {size} ·{" "}
+                          {stock > 0 ? `${stock} available` : "Sold out"}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+              {quickOffers.length > 0 && (
+                <div className="storefront-promotion-picker">
+                  <span className="promotion-picker-label">
+                    Special offer available
+                  </span>
+                  <div className="storefront-promotion-tabs">
+                    {quickOffers.map((offer) => (
+                      <button
+                        key={offer.id}
+                        className={
+                          activeQuickOffer?.id === offer.id ? "active" : ""
+                        }
+                        onClick={() => {
+                          setSelectedPromotion(offer);
+                          setSelectedFreeSelections([]);
+                          setSelectedBundleSelections([]);
+                        }}
+                      >
+                        {offerTypeLabel(offer)}
+                      </button>
+                    ))}
+                  </div>
+                  {activeQuickOffer?.type === "bundle" ? (
+                    <div className="promotion-selection-panel">
+                      <strong>
+                        Select Any {activeQuickOffer.bundleQuantity} Items for ₹
+                        {activeQuickOffer.fixedBundlePrice.toLocaleString(
+                          "en-IN",
+                        )}
+                      </strong>
+                      <small>
+                        {selectedBundleSelections.length} of{" "}
+                        {activeQuickOffer.bundleQuantity} selected · regular
+                        prices are allocated proportionally
+                      </small>
+                      <div className="promotion-choice-grid">
+                        {quickBundleChoices
+                          .filter((selection) =>
+                            isSelectionEligible(
+                              activeQuickOffer,
+                              selection,
+                              "paid",
+                            ),
+                          )
+                          .map((selection, index) => {
+                            const product = products.find(
+                              (item) => item.id === selection.productId,
+                            );
+                            const active = selectedBundleSelections.some(
+                              (item) =>
+                                selectionKey(item) === selectionKey(selection),
+                            );
+                            const stock = selection.stock || 0;
+                            return (
+                              <button
+                                key={`${selectionKey(selection)}-${index}`}
+                                disabled={
+                                  stock <= 0 ||
+                                  (!active &&
+                                    selectedBundleSelections.length >=
+                                      activeQuickOffer.bundleQuantity)
+                                }
+                                className={active ? "active" : ""}
+                                onClick={() =>
+                                  setSelectedBundleSelections((current) =>
+                                    active
+                                      ? current.filter(
+                                          (item) =>
+                                            selectionKey(item) !==
+                                            selectionKey(selection),
+                                        )
+                                      : [...current, selection],
+                                  )
+                                }
+                              >
+                                <img
+                                  src={
+                                    product?.variants?.find(
+                                      (variant) =>
+                                        variant.name === selection.variantName,
+                                    )?.image ||
+                                    product?.image ||
+                                    quickProduct.image
+                                  }
+                                  alt=""
+                                />
+                                <span>
+                                  {product?.name || quickProduct.name}
+                                  {selection.variantName
+                                    ? ` · ${selection.variantName}`
+                                    : ""}
+                                  <small>
+                                    {stock > 0
+                                      ? `${stock} available · ₹${(selection.price || 0).toLocaleString("en-IN")}`
+                                      : "Out of stock"}
+                                  </small>
+                                </span>
+                              </button>
+                            );
+                          })}
+                      </div>
+                      <button
+                        className="button button-dark full-width"
+                        disabled={
+                          selectedBundleSelections.length !==
+                          activeQuickOffer.bundleQuantity
+                        }
+                        onClick={() => addPromotionToCart(activeQuickOffer)}
+                      >
+                        Add Bundle to Cart
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="promotion-selection-panel">
+                      <strong>
+                        Select Your {activeQuickOffer?.freeQuantity || 1} Free
+                        Variant
+                        {(activeQuickOffer?.freeQuantity || 1) > 1 ? "s" : ""}
+                      </strong>
+                      <small>
+                        {selectedFreeSelections.length} of{" "}
+                        {activeQuickOffer?.freeQuantity || 1} selected · paid
+                        item: {selectedVariant?.name || quickProduct.name}
+                      </small>
+                      <div className="promotion-choice-grid">
+                        {quickFreeChoices
+                          .filter((selection) =>
+                            activeQuickOffer
+                              ? isSelectionEligible(
+                                  activeQuickOffer,
+                                  selection,
+                                  "free",
+                                )
+                              : true,
+                          )
+                          .map((selection, index) => {
+                            const active = selectedFreeSelections.some(
+                              (item) =>
+                                selectionKey(item) === selectionKey(selection),
+                            );
+                            const stock = selection.stock || 0;
+                            return (
+                              <button
+                                key={`${selectionKey(selection)}-${index}`}
+                                disabled={
+                                  stock <= 0 ||
+                                  (!active &&
+                                    selectedFreeSelections.length >=
+                                      (activeQuickOffer?.freeQuantity || 1))
+                                }
+                                className={active ? "active" : ""}
+                                onClick={() =>
+                                  setSelectedFreeSelections((current) =>
+                                    current.length >=
+                                    (activeQuickOffer?.freeQuantity || 1)
+                                      ? current.filter(
+                                          (item, itemIndex) =>
+                                            itemIndex !==
+                                            current.findLastIndex(
+                                              (item) =>
+                                                selectionKey(item) ===
+                                                selectionKey(selection),
+                                            ),
+                                        )
+                                      : [...current, selection],
+                                  )
+                                }
+                              >
+                                <img
+                                  src={
+                                    quickProduct.variants?.find(
+                                      (variant) =>
+                                        variant.name === selection.variantName,
+                                    )?.image || quickProduct.image
+                                  }
+                                  alt=""
+                                />
+                                <span>
+                                  {selection.variantName ||
+                                    (selection.size
+                                      ? `Size ${selection.size}`
+                                      : quickProduct.name)}
+                                  <small>
+                                    {stock > 0
+                                      ? `${stock} available`
+                                      : "Out of stock"}{" "}
+                                    · FREE
+                                  </small>
+                                </span>
+                              </button>
+                            );
+                          })}
+                      </div>
+                      <button
+                        className="button button-dark full-width"
+                        disabled={
+                          selectedFreeSelections.length !==
+                            (activeQuickOffer?.freeQuantity || 1) ||
+                          selectedVariantStock <= 0
+                        }
+                        onClick={() =>
+                          activeQuickOffer &&
+                          addPromotionToCart(activeQuickOffer)
+                        }
+                      >
+                        Add {offerTypeLabel(activeQuickOffer || quickOffers[0])}{" "}
+                        to Cart
+                      </button>
+                    </div>
+                  )}{" "}
+                </div>
+              )}
+              {
+                <div className="quick-actions">
+                  <button
+                    className="button button-dark full-width"
+                    type="button"
+                    disabled={selectedVariantStock <= 0}
+                    onClick={() => {
+                      addToCart(
+                        quickProduct,
+                        getProductVariantType(quickProduct) === "normal"
+                          ? selectedVariant
+                          : null,
+                        getProductVariantType(quickProduct) === "size"
+                          ? selectedSize
+                          : null,
+                      );
+                    }}
+                  >
+                    {selectedVariantStock > 0 ? "Buy now" : "Sold out"}{" "}
+                    <span>↗</span>
+                  </button>
+                </div>
+              }
+              <p>
+                Designed to become part of your everyday ritual. Hand-finished
+                in small batches with a soft, lasting glow.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+      {zoomedImage && (
+        <div
+          className="drawer-backdrop image-zoom-backdrop"
+          onClick={() => setZoomedImage(null)}
+        >
+          <section
+            className="image-zoom-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Zoomed view of ${zoomedImage.alt}`}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              className="modal-close"
+              onClick={() => setZoomedImage(null)}
+              aria-label="Close image zoom"
+            >
+              ×
+            </button>
+            <img
+              src={zoomedImage.src}
+              alt={zoomedImage.alt}
+              style={imageAdjustmentStyle(zoomedImage.adjustments)}
+            />
+          </section>
+        </div>
+      )}
 
-      {quickProduct && <div className="drawer-backdrop" onClick={closeQuickProduct}><div className="quick-modal" onClick={(event) => event.stopPropagation()}><button className="modal-close" aria-label="Close quick view" onClick={closeQuickProduct}>×</button><div className="quick-image" onClick={() => setZoomedImage({ src: quickProductImageOverride || selectedVariant?.image || quickProduct.image, alt: selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name, adjustments: quickProductImageOverride ? undefined : selectedVariant?.adjustments || quickProduct.imageAdjustments })} title="Click to zoom"><img src={quickProductImageOverride || selectedVariant?.image || quickProduct.image} alt={selectedVariant?.name ? `${quickProduct.name} - ${selectedVariant.name}` : quickProduct.name} style={imageAdjustmentStyle(quickProductImageOverride ? undefined : selectedVariant?.adjustments || quickProduct.imageAdjustments)} /></div><div className="quick-copy"><p className="eyebrow">{quickProduct.category}</p><h2>{quickProduct.name}</h2><div className="price-row"><span>{formatINR(getCustomerPrice(quickProduct))}</span><del>{formatINR(getComparePrice(quickProduct))}</del></div>{getProductVariantType(quickProduct) === "normal" && quickProduct.variants?.length ? <div className="variant-picker"><span>Choose colour / series / model</span><div>{quickProduct.variants.map((variant, index) => { const variantStock = getVariantStock(quickProduct, variant); return <button key={`${quickProduct.id}-${variant.name || index}`} disabled={variantStock <= 0} className={`${selectedVariant?.name === variant.name && selectedVariant?.image === variant.image ? "active" : ""} ${variantStock <= 0 ? "sold-out" : ""}`} onClick={() => { setQuickProductImageOverride(null); setSelectedVariant(variant); }}><img src={variant.image || quickProduct.image} alt="" style={imageAdjustmentStyle(variant.adjustments)} /><span>{variant.name || `Option ${index + 1}`} · {variantStock > 0 ? `${variantStock} available` : "Sold out"}</span></button>; })}</div></div> : null}{getProductVariantType(quickProduct) === "size" && getProductSizes(quickProduct).length ? <div className="size-picker"><span>Choose size</span><div>{getProductSizes(quickProduct).map((size) => { const sizeVariant = getSizeVariant(quickProduct, size); const stock = getSelectionStock(quickProduct, selectedVariant, size); return <button type="button" key={size} disabled={stock <= 0} className={`${selectedSize === size ? "active" : ""} ${stock <= 0 ? "sold-out" : ""}`} onClick={() => { setQuickProductImageOverride(null); setSelectedSize(size); }}>{sizeVariant?.image ? <img src={sizeVariant.image} alt="" /> : null}Size {size} · {stock > 0 ? `${stock} available` : "Sold out"}</button>; })}</div></div> : null}{quickOffers.length > 0 && <div className="storefront-promotion-picker"><span className="promotion-picker-label">Special offer available</span><div className="storefront-promotion-tabs">{quickOffers.map((offer) => <button key={offer.id} className={activeQuickOffer?.id === offer.id ? "active" : ""} onClick={() => { setSelectedPromotion(offer); setSelectedFreeSelections([]); setSelectedBundleSelections([]); }}>{offerTypeLabel(offer)}</button>)}</div>{activeQuickOffer?.type === "bundle" ? <div className="promotion-selection-panel"><strong>Select Any {activeQuickOffer.bundleQuantity} Items for ₹{activeQuickOffer.fixedBundlePrice.toLocaleString("en-IN")}</strong><small>{selectedBundleSelections.length} of {activeQuickOffer.bundleQuantity} selected · regular prices are allocated proportionally</small><div className="promotion-choice-grid">{quickBundleChoices.filter((selection) => isSelectionEligible(activeQuickOffer, selection, "paid")).map((selection, index) => { const product = products.find((item) => item.id === selection.productId); const active = selectedBundleSelections.some((item) => selectionKey(item) === selectionKey(selection)); const stock = selection.stock || 0; return <button key={`${selectionKey(selection)}-${index}`} disabled={stock <= 0 || (!active && selectedBundleSelections.length >= activeQuickOffer.bundleQuantity)} className={active ? "active" : ""} onClick={() => setSelectedBundleSelections((current) => active ? current.filter((item) => selectionKey(item) !== selectionKey(selection)) : [...current, selection])}><img src={product?.variants?.find((variant) => variant.name === selection.variantName)?.image || product?.image || quickProduct.image} alt="" /><span>{product?.name || quickProduct.name}{selection.variantName ? ` · ${selection.variantName}` : ""}<small>{stock > 0 ? `${stock} available · ₹${(selection.price || 0).toLocaleString("en-IN")}` : "Out of stock"}</small></span></button>; })}</div><button className="button button-dark full-width" disabled={selectedBundleSelections.length !== activeQuickOffer.bundleQuantity} onClick={() => addPromotionToCart(activeQuickOffer)}>Add Bundle to Cart</button></div> : <div className="promotion-selection-panel"><strong>Select Your {activeQuickOffer?.freeQuantity || 1} Free Variant{(activeQuickOffer?.freeQuantity || 1) > 1 ? "s" : ""}</strong><small>{selectedFreeSelections.length} of {activeQuickOffer?.freeQuantity || 1} selected · paid item: {selectedVariant?.name || quickProduct.name}</small><div className="promotion-choice-grid">{quickFreeChoices.filter((selection) => activeQuickOffer ? isSelectionEligible(activeQuickOffer, selection, "free") : true).map((selection, index) => { const active = selectedFreeSelections.some((item) => selectionKey(item) === selectionKey(selection)); const stock = selection.stock || 0; return <button key={`${selectionKey(selection)}-${index}`} disabled={stock <= 0 || (!active && selectedFreeSelections.length >= (activeQuickOffer?.freeQuantity || 1))} className={active ? "active" : ""} onClick={() => setSelectedFreeSelections((current) => current.length >= (activeQuickOffer?.freeQuantity || 1) ? current.filter((item, itemIndex) => itemIndex !== current.findLastIndex((item) => selectionKey(item) === selectionKey(selection))) : [...current, selection])}><img src={quickProduct.variants?.find((variant) => variant.name === selection.variantName)?.image || quickProduct.image} alt="" /><span>{selection.variantName || (selection.size ? `Size ${selection.size}` : quickProduct.name)}<small>{stock > 0 ? `${stock} available` : "Out of stock"} · FREE</small></span></button>; })}</div><button className="button button-dark full-width" disabled={selectedFreeSelections.length !== (activeQuickOffer?.freeQuantity || 1) || selectedVariantStock <= 0} onClick={() => activeQuickOffer && addPromotionToCart(activeQuickOffer)}>Add {offerTypeLabel(activeQuickOffer || quickOffers[0])} to Cart</button></div>} </div>}{<div className="quick-actions"><button className="button button-dark full-width" type="button" disabled={selectedVariantStock <= 0} onClick={() => { addToCart(quickProduct, getProductVariantType(quickProduct) === "normal" ? selectedVariant : null, getProductVariantType(quickProduct) === "size" ? selectedSize : null); }}>{selectedVariantStock > 0 ? "Buy now" : "Sold out"} <span>↗</span></button></div>}<p>Designed to become part of your everyday ritual. Hand-finished in small batches with a soft, lasting glow.</p></div></div></div>}
-      {zoomedImage && <div className="drawer-backdrop image-zoom-backdrop" onClick={() => setZoomedImage(null)}><section className="image-zoom-modal" role="dialog" aria-modal="true" aria-label={`Zoomed view of ${zoomedImage.alt}`} onClick={(event) => event.stopPropagation()}><button className="modal-close" onClick={() => setZoomedImage(null)} aria-label="Close image zoom">×</button><img src={zoomedImage.src} alt={zoomedImage.alt} style={imageAdjustmentStyle(zoomedImage.adjustments)} /></section></div>}
-
-      {toast && <div className="toast">{toast}<span>✦</span></div>}
+      {toast && (
+        <div className="toast">
+          {toast}
+          <span>✦</span>
+        </div>
+      )}
     </main>
   );
 }
-
-
-
-

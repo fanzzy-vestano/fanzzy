@@ -1,4 +1,4 @@
-import { clearPendingOtpCookie, consumeOtpVerifyRateLimit, createCustomerSessionCookie, getPendingOtp, matchesPendingOtp } from "../../../../lib/customer-sms-auth";
+import { clearPendingOtpCookie, consumeOtpVerifyRateLimit, createCustomerSessionCookie, createCustomerSessionToken, getPendingOtp, matchesPendingOtp } from "../../../../lib/customer-sms-auth";
 
 const json = (body: Record<string, unknown>, status = 200, headers?: HeadersInit) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
@@ -29,7 +29,10 @@ export async function POST(request: Request) {
     return json({ error: "Invalid OTP. Please try again." }, 401);
   }
 
-  return new Response(JSON.stringify({ user: { id: `phone:${pending.phone}`, phone: `+${pending.phone}` } }), {
+  return new Response(JSON.stringify({
+    user: { id: `phone:${pending.phone}`, phone: `+${pending.phone}` },
+    sessionToken: createCustomerSessionToken(pending.phone),
+  }), {
     status: 200,
     headers: sessionHeaders(pending.phone),
   });

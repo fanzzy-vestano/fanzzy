@@ -16,6 +16,7 @@ type TrackingResult = {
   trackingUrl?: string;
   scans: TrackingScan[];
   shipmentAvailable: boolean;
+  deliveryAddress?: string;
 };
 
 const displayStatus = (status: string) => /^manifested$/i.test(status.trim()) ? "Confirmed" : status || "Order received";
@@ -119,13 +120,13 @@ export default function TrackOrderPage() {
         </form>
         {message && <p className="tracking-message" role="alert">{message}</p>}
         {result && <section className="tracking-result" aria-live="polite">
-          <div className="tracking-result-head"><div><p className="eyebrow">ORDER {result.orderId.replace(/^#/, "")}</p><h2>{displayStatus(result.status)}</h2>{result.location && <p className="tracking-location">Last update from {result.location}</p>}</div><span className="tracking-status-pill">{result.statusType || "Live update"}</span></div>
+          <div className="tracking-result-head"><div><p className="eyebrow">ORDER {result.orderId.replace(/^#/, "")}</p><h2>{displayStatus(result.status)}</h2>{result.deliveryAddress && <p className="tracking-destination">Delivering to {result.deliveryAddress}</p>}{result.location && <p className="tracking-location">Last update from {result.location}</p>}</div><span className="tracking-status-pill">{result.statusType || "Live update"}</span></div>
           <div className="tracking-meta"><span>Placed {displayDate(result.placedOn)}</span>{result.statusDate && <span>Updated {displayDate(result.statusDate)}</span>}<span>Live refresh every 60 seconds</span></div>
-          <ol className="tracking-stage-list" aria-label="Order delivery progress">{trackingStages.map((stage, index) => { const currentStage = activeTrackingStage(result.status); const current = index === currentStage; const completed = index < currentStage; const scan = result.scans.find((candidate) => stage.match.test(`${candidate.status} ${candidate.instructions || ""}`)); const date = scan?.date || (completed || current) && (current && result.statusDate ? result.statusDate : result.placedOn); return <li className={`${completed ? "completed " : ""}${current ? "current" : "upcoming"}`} aria-current={current ? "step" : undefined} key={stage.key}><span className="tracking-stage-dot" /><div><strong>{stage.label}</strong><small>{stageDetail(index, current, result)}</small>{date && (completed || current) && <time>{displayDate(date)}</time>}{scan?.location && <small>{scan.location}{scan.instructions ? ` · ${scan.instructions}` : ""}</small>}</div></li>; })}</ol>
           {result.shipmentAvailable ? <>
+            <ol className="tracking-stage-list" aria-label="Delhivery delivery progress">{trackingStages.map((stage, index) => { const currentStage = activeTrackingStage(result.status); const current = index === currentStage; const completed = index < currentStage; const scan = result.scans.find((candidate) => stage.match.test(`${candidate.status} ${candidate.instructions || ""}`)); const date = scan?.date || (completed || current) && (current && result.statusDate ? result.statusDate : result.placedOn); return <li className={`${completed ? "completed " : ""}${current ? "current" : "upcoming"}`} aria-current={current ? "step" : undefined} key={stage.key}><span className="tracking-stage-dot" /><div><strong>{stage.label}</strong><small>{stageDetail(index, current, result)}</small>{date && (completed || current) && <time>{displayDate(date)}</time>}{scan?.location && <small>{scan.location}{scan.instructions ? ` · ${scan.instructions}` : ""}</small>}</div></li>; })}</ol>
             <div className="tracking-shipment"><div><small>DELHIVERY SHIPMENT</small><strong>{result.waybill}</strong></div>{result.trackingUrl && <a href={result.trackingUrl} target="_blank" rel="noreferrer">Open Delhivery ↗</a>}</div>
             {result.scans.length > 0 ? <div className="tracking-scan-summary"><strong>Latest courier scan</strong><span>{displayStatus(result.scans[0].status)}{result.scans[0].location ? ` · ${result.scans[0].location}` : ""}</span>{result.scans[0].date && <time>{displayDate(result.scans[0].date)}</time>}</div> : <p className="tracking-pending">Your shipment is confirmed. Detailed movement updates will appear after Delhivery scans the parcel.</p>}
-          </> : <p className="tracking-pending">Your order is confirmed. Delhivery tracking will appear here as soon as the shipment is prepared.</p>}
+          </> : <div className="tracking-pending"><strong>Order status</strong><span>{displayStatus(result.status)}</span><p>Your order is being prepared. Courier tracking will appear here after it is handed over to Delhivery.</p></div>}
         </section>}
       </section>
       <p className="tracking-privacy">For your privacy, tracking requires both your Fanzzy order number and checkout mobile number.</p>

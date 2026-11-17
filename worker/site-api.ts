@@ -1,10 +1,21 @@
 import paymentWorker from "./razorpay-api";
+import * as customerOrdersRoute from "../app/api/orders/route";
+import * as websitePendingRoute from "../app/api/orders/pending/route";
+import * as customerOffersRoute from "../app/api/offers/route";
+import * as adminOrdersRoute from "../app/api/admin/orders/route";
+import * as paymentOrderRoute from "../app/api/razorpay/order/route";
+import * as paymentVerifyRoute from "../app/api/razorpay/verify/route";
+import * as paymentWebhookRoute from "../app/api/razorpay/webhook/route";
 import { createAdminSessionCookie } from "../lib/admin-auth";
 import * as publicVendorsRoute from "../app/api/vendors/route";
 import * as publicVendorRoute from "../app/api/vendors/[slug]/route";
 import * as vendorLoginRoute from "../app/api/vendor-auth/login/route";
 import * as vendorLogoutRoute from "../app/api/vendor-auth/logout/route";
 import * as vendorSessionRoute from "../app/api/vendor-auth/session/route";
+import * as customerSendOtpRoute from "../app/api/customer-auth/send-otp/route";
+import * as customerVerifyOtpRoute from "../app/api/customer-auth/verify-otp/route";
+import * as customerSessionRoute from "../app/api/customer-auth/session/route";
+import * as customerSignOutRoute from "../app/api/customer-auth/sign-out/route";
 import * as vendorDashboardRoute from "../app/api/vendor/dashboard/route";
 import * as vendorCategoriesRoute from "../app/api/vendor/categories/route";
 import * as vendorProductsRoute from "../app/api/vendor/products/route";
@@ -22,13 +33,20 @@ import * as adminVendorPayoutsRoute from "../app/api/admin/vendor-payouts/route"
 import * as adminVendorReportsRoute from "../app/api/admin/vendor-reports/route";
 import * as adminDelhiveryConfigRoute from "../app/api/admin/delhivery/config/route";
 import * as adminDelhiveryCreateRoute from "../app/api/admin/delhivery/create/route";
+import * as adminReturnsRoute from "../app/api/admin/returns/route";
 import * as confirmCodRoute from "../app/api/orders/confirm-cod/route";
+import * as mobilePendingOrderRoute from "../app/api/orders/mobile/pending/route";
 import * as orderTrackingRoute from "../app/api/orders/track/route";
+import * as orderHistoryRoute from "../app/api/orders/history/route";
 import * as delhiveryTrackingRoute from "../app/api/delhivery/track/route";
 import * as restorePaymentRoute from "../app/api/razorpay/restore-order-details/route";
 import * as syncPaymentsRoute from "../app/api/razorpay/sync-payments/route";
+import { assertLocalTestServerSafety, isLocalTestEnvironment } from "../lib/runtime-safety";
 
 type WorkerEnv = {
+  [key: string]: string | undefined;
+  FANZZY_ENV?: string;
+  NEXT_PUBLIC_FANZZY_ENV?: string;
   RAZORPAY_KEY_ID: string;
   RAZORPAY_KEY_SECRET: string;
   SUPABASE_URL?: string;
@@ -43,6 +61,15 @@ type WorkerEnv = {
   VENDOR_DATA_ENCRYPTION_KEY?: string;
   CUSTOMER_AUTH_SECRET?: string;
   DELHIVERY_API_TOKEN?: string;
+  D1_CLIENT_ID?: string;
+  D1_CLIENT_SECRET?: string;
+  D1_AUTH_URL?: string;
+  D1_REALM?: string;
+  D1_CLIENT_CMS?: string;
+  D1_MCP_URL?: string;
+  DELHIVERY_MODE?: string;
+  DELHIVERY_API_BASE_URL?: string;
+  LOCAL_TEST_OTP_CODE?: string;
   DELHIVERY_CLIENT_NAME?: string;
   DELHIVERY_PICKUP_NAME?: string;
   DELHIVERY_PICKUP_LOCATION?: string;
@@ -70,7 +97,7 @@ const corsHeaders = (request: Request) => ({
   "access-control-allow-origin": allowedOrigins.has(request.headers.get("origin") || "")
     ? request.headers.get("origin") || "https://fanzzy.in"
     : "https://fanzzy.in",
-  "access-control-allow-headers": "authorization, content-type",
+  "access-control-allow-headers": "authorization, content-type, idempotency-key",
   "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
   "access-control-allow-credentials": "true",
   "access-control-max-age": "86400",
@@ -97,8 +124,8 @@ const methodHandler = (
   return handler(request, context as never);
 };
 
-const supabaseUrl = (env: WorkerEnv) => (env.NEXT_PUBLIC_SUPABASE_URL || env.SUPABASE_URL || "https://pdrcrkxeyqxqgpwfxqpu.supabase.co").replace(/\/$/, "");
-const supabasePublishableKey = (env: WorkerEnv) => env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || env.SUPABASE_PUBLISHABLE_KEY || "sb_publishable_OTSfS6G2tlrAGINfyY3VGA_yi_3BPAV";
+const supabaseUrl = (env: WorkerEnv) => (env.NEXT_PUBLIC_SUPABASE_URL || env.SUPABASE_URL || (isLocalTestEnvironment(env) ? "" : "https://pdrcrkxeyqxqgpwfxqpu.supabase.co")).replace(/\/$/, "");
+const supabasePublishableKey = (env: WorkerEnv) => env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || env.SUPABASE_PUBLISHABLE_KEY || (isLocalTestEnvironment(env) ? "" : "sb_publishable_OTSfS6G2tlrAGINfyY3VGA_yi_3BPAV");
 
 const authorizeAdmin = async (request: Request, env: WorkerEnv) => {
   const token = request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1] || "";
@@ -136,6 +163,11 @@ const routeRequest = async (request: Request, env: WorkerEnv): Promise<Response>
 
   if (path === "/" && request.method === "GET") return Response.json({ ok: true, service: "fanzzy-site-api" });
 
+  if (path === "/razorpay/order" || path === "/order") return methodHandler(request, paymentOrderRoute);
+  if (path === "/razorpay/verify" || path === "/verify") return methodHandler(request, paymentVerifyRoute);
+  if (path === "/razorpay/webhook") return methodHandler(request, paymentWebhookRoute);
+  if (["/razorpay/reserve-stock", "/razorpay/release-stock"].includes(path)) return paymentWorker.fetch(request, env);
+
   if (["/order", "/verify", "/reserve-stock", "/release-stock", "/pos-qr"].includes(path)) {
     return paymentWorker.fetch(request, env);
   }
@@ -148,6 +180,10 @@ const routeRequest = async (request: Request, env: WorkerEnv): Promise<Response>
   if (path === "/vendor-auth/login") return methodHandler(request, vendorLoginRoute);
   if (path === "/vendor-auth/logout") return methodHandler(request, vendorLogoutRoute);
   if (path === "/vendor-auth/session") return methodHandler(request, vendorSessionRoute);
+  if (path === "/customer-auth/send-otp") return methodHandler(request, customerSendOtpRoute);
+  if (path === "/customer-auth/verify-otp") return methodHandler(request, customerVerifyOtpRoute);
+  if (path === "/customer-auth/session") return methodHandler(request, customerSessionRoute);
+  if (path === "/customer-auth/sign-out") return methodHandler(request, customerSignOutRoute);
   if (path === "/vendor/dashboard") return methodHandler(request, vendorDashboardRoute);
   if (path === "/vendor/categories") return methodHandler(request, vendorCategoriesRoute);
   if (path === "/vendor/products") return methodHandler(request, vendorProductsRoute);
@@ -160,8 +196,14 @@ const routeRequest = async (request: Request, env: WorkerEnv): Promise<Response>
   }
   if (path === "/vendor/payouts") return methodHandler(request, vendorPayoutsRoute);
 
+  if (path === "/orders") return methodHandler(request, customerOrdersRoute);
+  if (path === "/orders/pending") return methodHandler(request, websitePendingRoute);
+  if (path === "/offers") return methodHandler(request, customerOffersRoute);
+  if (path === "/admin/orders") return adminRoute(request, env, adminOrdersRoute);
   if (path === "/orders/confirm-cod") return methodHandler(request, confirmCodRoute);
+  if (path === "/orders/mobile/pending") return methodHandler(request, mobilePendingOrderRoute);
   if (path === "/orders/track") return methodHandler(request, orderTrackingRoute);
+  if (path === "/orders/history") return methodHandler(request, orderHistoryRoute);
   if (path === "/delhivery/track") return methodHandler(request, delhiveryTrackingRoute);
 
   if (path === "/razorpay/restore-order-details") {
@@ -171,7 +213,7 @@ const routeRequest = async (request: Request, env: WorkerEnv): Promise<Response>
       : Response.json({ error: "Admin authentication required." }, { status: 401 });
   }
   if (path === "/razorpay/sync-payments") {
-    return methodHandler(request, syncPaymentsRoute);
+    return adminRoute(request, env, syncPaymentsRoute);
   }
 
   if (path === "/admin/vendors") return adminRoute(request, env, adminVendorsRoute);
@@ -180,6 +222,7 @@ const routeRequest = async (request: Request, env: WorkerEnv): Promise<Response>
   if (path === "/admin/vendor-reports") return adminRoute(request, env, adminVendorReportsRoute);
   if (path === "/admin/delhivery/config") return adminRoute(request, env, adminDelhiveryConfigRoute);
   if (path === "/admin/delhivery/create") return adminRoute(request, env, adminDelhiveryCreateRoute);
+  if (path === "/admin/returns") return adminRoute(request, env, adminReturnsRoute);
   if (segments[0] === "admin" && segments[1] === "vendors" && segments.length === 3) {
     return adminRoute(request, env, adminVendorRoute, { params: Promise.resolve({ id: segments[2] }) });
   }
@@ -200,6 +243,7 @@ export default {
   async fetch(request: Request, env: WorkerEnv) {
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders(request) });
     try {
+      assertLocalTestServerSafety(env);
       return withCors(request, await routeRequest(request, env));
     } catch (error) {
       return json(request, { error: error instanceof Error ? error.message : "The Fanzzy API is temporarily unavailable." }, 500);

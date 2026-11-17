@@ -1,5 +1,7 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, timingSafeEqual, createHash } from "node:crypto";
 import { finalizeRazorpayPayment, type RazorpayPayment } from "../../../../lib/razorpay-payment-sync";
+
+import { checkoutRpc, readTransactionalOrders } from "../../../../lib/transactional-checkout";
 
 const json = (body: Record<string, unknown>, status = 200) => new Response(JSON.stringify(body), {
   status,
@@ -7,7 +9,7 @@ const json = (body: Record<string, unknown>, status = 200) => new Response(JSON.
 });
 
 export async function POST(request: Request) {
-  const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || process.env.RAZORPAY_KEY_SECRET;
+  const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
   if (!webhookSecret) return json({ error: "Razorpay webhook is not configured" }, 503);
   const signature = request.headers.get("x-razorpay-signature") || "";
   const rawBody = await request.text();
@@ -22,10 +24,20 @@ export async function POST(request: Request) {
       event?: string;
       payload?: { payment?: { entity?: RazorpayPayment }; order?: { entity?: { receipt?: string } } };
     };
-    if (event.event !== "payment.captured" && event.event !== "order.paid") return json({ received: true });
+    if (!["payment.captured", "order.paid", "payment.failed"].includes(event.event || "")) return json({ received: true });
     const payment = event.payload?.payment?.entity;
     if (!payment?.id) return json({ error: "Webhook payment data is incomplete" }, 400);
-    await finalizeRazorpayPayment(payment, event.payload?.order?.entity?.receipt);
+    const hash = createHash("sha256").update(rawBody).digest("hex");
+    const eventId = request.headers.get("x-razorpay-event-id") || hash;
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(eventId)) return json({ error: "Invalid callback identity" }, 400);
+    const callback = { key: "webhook:" + eventId, hash };
+    if (event.event === "payment.failed") {
+      const order = (await readTransactionalOrders()).find((row) => row.razorpayOrderId && row.razorpayOrderId === payment.order_id);
+      if (order) await checkoutRpc("payment_failed", order.id, "", { payment, eventKey: callback.key, eventHash: callback.hash });
+      return json({ received: true });
+    }
+    const order = await finalizeRazorpayPayment(payment, event.payload?.order?.entity?.receipt, callback);
+    if (!order) return json({ error: "Saved order is awaiting reconciliation." }, 409);
     return json({ received: true });
   } catch (error) {
     return json({ error: error instanceof Error ? error.message : "Could not process Razorpay webhook" }, 500);

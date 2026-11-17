@@ -1,5 +1,5 @@
 import { randomInt } from "node:crypto";
-import { consumeOtpSendRateLimit, createPendingOtpCookie, getCustomerAuthSecret, normalizeMobileNumber, OTP_EXPIRES_MS, OTP_RESEND_COOLDOWN_SECONDS } from "../../../../lib/customer-sms-auth";
+import { consumeOtpSendRateLimit, createPendingOtpCookie, createPendingOtpToken, getCustomerAuthSecret, normalizeMobileNumber, OTP_EXPIRES_MS, OTP_RESEND_COOLDOWN_SECONDS } from "../../../../lib/customer-sms-auth";
 import { isSangamamSmsConfigured, SangamamSmsError, sendSangamamOtp } from "../../../../lib/sangamam-sms";
 
 const json = (body: Record<string, unknown>, status = 200, headers?: HeadersInit) =>
@@ -22,19 +22,33 @@ export async function POST(request: Request) {
       { "retry-after": String(rateLimit.retryAfter) },
     );
   }
-  if (!getCustomerAuthSecret() || !isSangamamSmsConfigured()) {
+  const localTestCode = process.env.FANZZY_ENV === "local-test" ? process.env.LOCAL_TEST_OTP_CODE?.trim() : "";
+  if (process.env.FANZZY_ENV === "local-test" && !/^\d{6}$/.test(localTestCode || "")) {
+    return json({ error: "Local test OTP is not configured." }, 503);
+  }
+  if (!getCustomerAuthSecret() || (!localTestCode && !isSangamamSmsConfigured())) {
     return json({ error: "Sangamam FastSMS login is not configured." }, 503);
   }
 
   try {
-    const code = String(randomInt(100000, 1_000_000));
-    await sendSangamamOtp(phone, code);
+    const code = /^\d{6}$/.test(localTestCode || "") ? localTestCode! : String(randomInt(100000, 1_000_000));
+    if (!localTestCode) await sendSangamamOtp(phone, code);
     console.info("otp.provider.send", {
-      provider: "Sangamam FastSMS",
+      provider: localTestCode ? "Local test OTP" : "Sangamam FastSMS",
       channel: "SMS",
       status: "success",
     });
-    return json({ sent: true, channel: "sms" }, 200, { "set-cookie": createPendingOtpCookie({ phone, code, expiresAt: Date.now() + OTP_EXPIRES_MS }) });
+    const pending = { phone, code, expiresAt: Date.now() + OTP_EXPIRES_MS };
+    return json(
+      {
+        sent: true,
+        channel: localTestCode ? "local-test" : "sms",
+        pendingToken: createPendingOtpToken(pending),
+        ...(localTestCode ? { testCode: localTestCode } : {}),
+      },
+      200,
+      { "set-cookie": createPendingOtpCookie(pending) },
+    );
   } catch (error) {
     if (error instanceof SangamamSmsError && error.kind === "send") {
       return json({ error: error.message }, 502);

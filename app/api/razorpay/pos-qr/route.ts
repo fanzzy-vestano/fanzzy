@@ -1,6 +1,11 @@
+import { assertLocalTestServerSafety } from "../../../../lib/runtime-safety";
+
+assertLocalTestServerSafety(process.env);
+
 type CreatePosQrRequest = {
   amount?: unknown;
   reference?: unknown;
+  orderId?: unknown;
 };
 
 type RazorpayQrPayment = {
@@ -56,6 +61,9 @@ export async function POST(request: Request) {
   const reference = typeof body.reference === "string" && body.reference.trim()
     ? body.reference.trim().replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40)
     : `POS-${Date.now()}`;
+  const orderId = typeof body.orderId === "string" && /^#FZ-POS-[A-Z0-9-]+$/i.test(body.orderId.trim())
+    ? body.orderId.trim()
+    : "";
   const closeBy = Math.floor(Date.now() / 1000) + 20 * 60;
 
   try {
@@ -71,7 +79,7 @@ export async function POST(request: Request) {
         payment_amount: amount,
         description: `Fanzzy counter sale ${reference}`,
         close_by: closeBy,
-        notes: { fanzzy_pos_reference: reference },
+        notes: { fanzzy_pos_reference: reference, ...(orderId ? { fanzzy_order_id: orderId } : {}) },
       }),
     });
     const result = await response.json() as {
@@ -109,7 +117,7 @@ export async function POST(request: Request) {
         expire_by: closeBy,
         notify: { sms: false, email: false },
         reminder_enable: false,
-        notes: { fanzzy_pos_reference: reference, fanzzy_payment_source: "pos_qr_fallback" },
+        notes: { fanzzy_pos_reference: reference, fanzzy_payment_source: "pos_qr_fallback", ...(orderId ? { fanzzy_order_id: orderId } : {}) },
       }),
     });
     const fallback = await fallbackResponse.json() as {

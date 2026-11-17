@@ -188,7 +188,17 @@ const sendOtp = async (phone: string) => {
 const route = async (request: Request) => {
   const origin = request.headers.get("origin");
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders(origin) });
-  if (request.method === "GET") return response({ ok: true, service: "customer-auth" }, 200, origin);
+  // The mobile app uses GET /session to restore a verified SMS login. Handle
+  // that route before the generic health response so the session token is
+  // actually validated and returned to the client.
+  if (request.method === "GET") {
+    const action = new URL(request.url).pathname.split("/").filter(Boolean).at(-1) || "";
+    if (action === "session") {
+      const session = await readToken<CustomerSession>(request, "session");
+      return response({ user: session ? { id: session.id, phone: session.phone } : null }, 200, origin);
+    }
+    return response({ ok: true, service: "customer-auth" }, 200, origin);
+  }
   if (request.method !== "POST") return response({ error: "Method not allowed" }, 405, origin);
 
   const action = new URL(request.url).pathname.split("/").filter(Boolean).at(-1) || "";

@@ -1,9 +1,12 @@
 import { reserveOrderInventory } from "../../../../lib/razorpay-payment-sync";
+import { getCustomerSession } from "../../../../lib/customer-sms-auth";
 
 const json = (body: Record<string, unknown>, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 export async function POST(request: Request) {
+  const identity = getCustomerSession(request);
+  if (!identity) return json({ error: "Customer authentication required." }, 401);
   let body: { fanzzyOrderId?: unknown };
   try {
     body = await request.json() as { fanzzyOrderId?: unknown };
@@ -15,7 +18,7 @@ export async function POST(request: Request) {
   if (!/^#FZ-[A-Z0-9-]+$/i.test(orderId)) return json({ error: "A valid order id is required" }, 400);
 
   try {
-    const order = await reserveOrderInventory(orderId);
+    const order = await reserveOrderInventory(orderId, identity);
     return json({ reserved: order.inventoryReserved === true, reservedAt: order.inventoryReservedAt });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Could not reserve product stock";

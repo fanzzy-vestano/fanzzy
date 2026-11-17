@@ -66,3 +66,9 @@ test("production worker exposes vendor order details and tracking", async () => 
   assert.match(worker, /segments\[0\] === "vendor" && segments\[1\] === "orders" && segments\[3\] === "tracking" && segments\.length === 4/);
   assert.match(worker, /params: Promise\.resolve\(\{ id: segments\[2\] \}\)/);
 });
+
+test("production worker exposes mobile pending order handoff", async () => {
+  const worker = await readFile(new URL("../worker/site-api.ts", import.meta.url), "utf8");
+  assert.match(worker, /mobilePendingOrderRoute/);
+  assert.match(worker, /path === "\/orders\/mobile\/pending"\) return methodHandler\(request, mobilePendingOrderRoute\)/);
+});

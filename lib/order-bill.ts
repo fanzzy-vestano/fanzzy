@@ -9,6 +9,7 @@ export type BillOrder = {
   address?: string;
   coupon?: string;
   couponDiscount?: number;
+  promotionDiscount?: number;
   items?: Array<{ name: string; quantity: number; price: string; supplierName?: string }>;
 };
 
@@ -108,7 +109,8 @@ const printableBillMarkup = (order: BillOrder, design: BillDesignSettings, origi
   const couponDiscount = Math.max(0, Number(order.couponDiscount) || 0);
   const couponPercent = itemSubtotal > 0 && couponDiscount > 0 ? (couponDiscount / itemSubtotal) * 100 : 0;
   const couponApplied = Boolean(order.coupon && couponDiscount > 0);
-  const couponLine = `<div class="discount-row"><span>Coupon: ${couponApplied ? `${escapeHtml(order.coupon)}${couponPercent > 0 ? ` (${escapeHtml(formatBillPercent(couponPercent))})` : ""}` : "Not applied"}</span><strong>${couponApplied ? "−" : ""}${escapeHtml(formatBillMoney(couponDiscount))}</strong></div>`;
+  const promotionDiscount = Math.max(0, Number(order.promotionDiscount) || 0);
+  const couponLine = `<div class="discount-row"><span>Coupon: ${couponApplied ? `${escapeHtml(order.coupon)}${couponPercent > 0 ? ` (${escapeHtml(formatBillPercent(couponPercent))})` : ""}` : "Not applied"}</span><strong>${couponApplied ? "−" : ""}${escapeHtml(formatBillMoney(couponDiscount))}</strong></div>${promotionDiscount > 0 ? `<div class="discount-row"><span>Offer discount</span><strong>−${escapeHtml(formatBillMoney(promotionDiscount))}</strong></div>` : ""}`;
   const items = (order.items || []).map((item) => {
     const quantity = Math.max(1, Math.floor(Number(item.quantity) || 1));
     const unitValue = parseBillMoney(item.price);

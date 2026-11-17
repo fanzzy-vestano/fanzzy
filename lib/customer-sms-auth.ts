@@ -4,7 +4,8 @@ export type CustomerSmsIdentity = { id: string; phone: string };
 
 type PendingOtp = { phone: string; codeHash: string; expiresAt: number };
 type PendingOtpInput = { phone: string; code: string; expiresAt: number };
-type SignedValue = CustomerSmsIdentity | PendingOtp;
+type CustomerSession = CustomerSmsIdentity & { kind: "session"; expiresAt: number };
+type SignedValue = CustomerSession | PendingOtp;
 
 const pendingCookie = "fanzzy_customer_otp";
 const sessionCookie = "fanzzy_customer_session";
@@ -41,8 +42,8 @@ const encode = (value: SignedValue) => {
 
 const decode = <T extends SignedValue>(value?: string): T | null => {
   if (!value || !secret()) return null;
-  const [payload, signature] = value.split(".");
-  if (!payload || !signature) return null;
+  const [payload, signature, extra] = value.split(".");
+  if (!payload || !signature || extra !== undefined) return null;
   const expected = Buffer.from(sign(payload));
   const received = Buffer.from(signature);
   if (expected.length !== received.length || !timingSafeEqual(expected, received)) return null;
@@ -155,16 +156,20 @@ export const consumeOtpVerifyRateLimit = (request: Request, phone: string) => co
 
 export const displayMobileNumber = (phone: string) => `+${phone}`;
 
+export const createPendingOtpToken = (pending: PendingOtpInput) =>
+  encode({ phone: pending.phone, codeHash: hashOtp(pending), expiresAt: pending.expiresAt });
+
 export const createPendingOtpCookie = (pending: PendingOtpInput) =>
   cookie(
     pendingCookie,
-    encode({ phone: pending.phone, codeHash: hashOtp(pending), expiresAt: pending.expiresAt }),
+    createPendingOtpToken(pending),
     Math.max(1, Math.ceil((pending.expiresAt - Date.now()) / 1000)),
   );
 
 export const getPendingOtp = (request: Request) => {
-  const pending = decode<PendingOtp>(getCookie(request, pendingCookie));
-  return pending && pending.expiresAt > Date.now() ? pending : null;
+  const pending = decode<PendingOtp>(getBearerToken(request) || getCookie(request, pendingCookie));
+  return pending && typeof pending.phone === "string" && typeof pending.codeHash === "string"
+    && Number.isFinite(pending.expiresAt) && pending.expiresAt > Date.now() ? pending : null;
 };
 
 export const matchesPendingOtp = (pending: PendingOtp, code: string) => {
@@ -174,8 +179,11 @@ export const matchesPendingOtp = (pending: PendingOtp, code: string) => {
   return expected.length === received.length && timingSafeEqual(expected, received);
 };
 
+export const createCustomerSessionToken = (phone: string) =>
+  encode({ id: `phone:${phone}`, phone: displayMobileNumber(phone), kind: "session", expiresAt: Date.now() + CUSTOMER_SESSION_MAX_AGE_SECONDS * 1000 });
+
 export const createCustomerSessionCookie = (phone: string) =>
-  cookie(sessionCookie, encode({ id: `phone:${phone}`, phone: displayMobileNumber(phone) }), CUSTOMER_SESSION_MAX_AGE_SECONDS);
+  cookie(sessionCookie, createCustomerSessionToken(phone), CUSTOMER_SESSION_MAX_AGE_SECONDS);
 
 export const clearPendingOtpCookie = () => cookie(pendingCookie, "", 0);
 
@@ -185,7 +193,12 @@ export const clearCustomerAuthCookies = () => [
 ];
 
 export const getCustomerSession = (request: Request) => {
-  const decoded = decode<CustomerSmsIdentity & { kind?: string; expiresAt?: number }>(getBearerToken(request) || getCookie(request, sessionCookie));
-  if (!decoded || (decoded.expiresAt !== undefined && decoded.expiresAt <= Date.now())) return null;
+  const decoded = decode<CustomerSession>(getBearerToken(request) || getCookie(request, sessionCookie));
+  if (!decoded || decoded.kind !== "session" || !Number.isFinite(decoded.expiresAt) || decoded.expiresAt <= Date.now()) return null;
+  // Pending OTP tokens share the signer but do not prove phone ownership.
+  // Require the complete identity issued only after successful verification.
+  if (typeof decoded.id !== "string" || typeof decoded.phone !== "string") return null;
+  const phone = normalizeMobileNumber(decoded.phone);
+  if (!phone || decoded.id !== `phone:${phone}`) return null;
   return { id: decoded.id, phone: decoded.phone };
 };

@@ -43,7 +43,7 @@ export default function CollectionsPage() {
     const syncCollections = async () => {
       const stored = window.localStorage.getItem("fanzzy-categories");
       // Counts should never delay downloading and displaying category images.
-      void fetchCatalogProducts().then((result) => {
+      void fetchCatalogProducts("general").then((result) => {
         if (active && result.data) setProductCounts(countCatalogProductsByCategory(result.data));
       }).catch(() => undefined);
       let localCollections: Collection[] = [];

@@ -1,9 +1,15 @@
-﻿"use client";
+"use client";
 /* eslint-disable react-hooks/set-state-in-effect, react-hooks/refs */
 
 import { Component, memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ErrorInfo } from "react";
 import { Eye, Pencil, Printer, Trash2 } from "lucide-react";
 import QRCode from "react-qr-code";
+import DelhiveryPickupSelect from "./DelhiveryPickupSelect";
+import OffersDashboard from "./OffersManager";
+import { evaluateSalesPromotions, type SalesPromotion } from "../../lib/sales-promotions";
+import { loadSalesPromotions } from "../../lib/sales-promotions-store";
+import { websitePromotionClock } from "../../lib/website-sales-promotions";
+import { isPosOrder, orderNeedsDelivery } from "../../lib/order-fulfillment";
 import { createReportWorkbook } from "../../lib/report-workbook";
 import { createProductCategoryResolver, mergeCatalogCategories } from "../../lib/catalog-categories";
 import {
@@ -32,6 +38,7 @@ import { defaultBillDesignSettings, printOrderBill, type BillDesignSettings } fr
 import { printProductBarcode, printProductBarcodes } from "../../lib/barcode-printer";
 import { supabase } from "../../lib/supabase/client";
 import { adminApiFetch, usesExternalSiteApi } from "../../lib/site-api-client";
+import type { CustomerCancellationRecord } from "../../lib/customer-cancellation";
 import {
   defaultPromotionForm,
   isPromotionLive,
@@ -42,12 +49,16 @@ import {
   type PromotionOfferStatus,
   type PromotionSelection,
 } from "../../lib/promotional-offers";
+import { parseMoneyValue, refundAmountForLineQuantity, returnReasons, summarizeReturnableOrder, type ReturnOrderSummary, type WalkInReturnRecord } from "../../lib/walk-in-returns";
+import { onlineRefundChoices, selectOnlineRefundItems, type OnlineRefundSelection } from "../../lib/online-refund-selection";
 import "../globals.css";
 import "../brand-polish.css";
 import "./admin.css";
 import "./admin-polish.css";
 import AdminVendorsWorkspace from "./vendors-workspace";
 import { AdminInstallButton } from "./admin-install";
+
+const isLocalTestPreview = process.env.NEXT_PUBLIC_FANZZY_ENV === "local-test";
 
 type AdminProduct = {
   name: string;
@@ -125,16 +136,18 @@ type AdminPermission =
   | "Categories"
   | "Collections"
    | "Orders"
+   | "Cancelled orders"
    | "Refund requests"
    | "Customers"
   | "Agents"
   | "Marketing"
-  | "Buy 1 Get X Free"
+  | "Offers"
   | "Homepage"
   | "Delivery charge"
   | "Hub"
   | "Reports"
   | "Announcement"
+  | "Damaged Products"
   | "Settings"
   | "Vendors"
   | "Suppliers"
@@ -168,16 +181,18 @@ const allAdminPermissions: AdminPermission[] = [
   "Categories",
   "Collections",
   "Orders",
+  "Cancelled orders",
   "Refund requests",
   "Customers",
   "Agents",
   "Marketing",
-  "Buy 1 Get X Free",
+  "Offers",
   "Homepage",
   "Delivery charge",
   "Hub",
   "Reports",
   "Announcement",
+  "Damaged Products",
   "Settings",
   "Vendors",
   "Suppliers",
@@ -221,6 +236,10 @@ type RefundRequest = {
   reason: string;
   createdAt: string;
   updatedAt?: string;
+  selection?: OnlineRefundSelection;
+  selections?: OnlineRefundSelection[];
+  requestedItemIds?: string[];
+  requestedItems?: Array<{ orderItemId: string; quantity: number }>;
 };
 const parseRefundRequests = (value: string | null | undefined): RefundRequest[] => {
   if (!value) return [];
@@ -240,6 +259,31 @@ const parseRefundRequests = (value: string | null | undefined): RefundRequest[] 
         reason: typeof request.reason === "string" ? request.reason : "Customer requested a refund",
         createdAt: typeof request.createdAt === "string" ? request.createdAt : new Date().toISOString(),
         updatedAt: typeof request.updatedAt === "string" ? request.updatedAt : undefined,
+        selection: request.selection && typeof request.selection.orderItemId === "string" && Number.isFinite(request.selection.quantity)
+          ? request.selection
+          : undefined,
+        selections: Array.isArray(request.selections)
+          ? request.selections.filter((selection): selection is OnlineRefundSelection => Boolean(selection && typeof selection.orderItemId === "string" && Number.isFinite(selection.quantity)))
+          : undefined,
+        requestedItemIds: Array.isArray(request.requestedItemIds)
+          ? request.requestedItemIds.filter(
+              (itemId): itemId is string =>
+                typeof itemId === "string" && itemId.trim().length > 0,
+            )
+          : undefined,
+        requestedItems: Array.isArray(request.requestedItems)
+          ? request.requestedItems.filter(
+              (item): item is { orderItemId: string; quantity: number } =>
+                Boolean(
+                  item &&
+                    typeof item === "object" &&
+                    typeof item.orderItemId === "string" &&
+                    item.orderItemId.trim() &&
+                    Number.isInteger(item.quantity) &&
+                    item.quantity > 0,
+                ),
+            )
+          : undefined,
       }))
       .filter((request) => request.orderId && request.userId);
   } catch {
@@ -394,6 +438,8 @@ const parseAdminPickupHubs = (value: string | null | undefined): PickupHub[] => 
   }
 };
 const formatAdminCurrency = (value: number) => `₹${Math.max(0, Math.round(value)).toLocaleString("en-IN")}`;
+const razorpayPaymentDashboardUrl = (paymentId: string) =>
+  `https://dashboard.razorpay.com/app/payments/${encodeURIComponent(paymentId)}?init_page=Payments`;
 const defaultMarketingRecords: MarketingRecord[] = [];
 const defaultImageAdjustments: ImageAdjustments = { zoom: 1, x: 0, y: 0, rotate: 0 };
 const normalizeImageAdjustments = (value: unknown): ImageAdjustments => {
@@ -514,14 +560,16 @@ type OrderStatus =
   | "Shipped"
   | "Delivered"
   | "Cancelled";
-type OrderStatusFilter = "all" | OrderStatus;
+type OrderReturnStatus = "Refunded";
+type OrderStatusFilter = "all" | OrderStatus | OrderReturnStatus;
 type PromotionCartLine = { groupId: string; offerId: string; role: "paid" | "free" | "bundle"; label: string; regularPrice: number; linePrice: number };
-type OrderItem = { name: string; productName?: string; quantity: number; price: string; productId?: string; image?: string; variantName?: string; variantImage?: string; size?: string; promotion?: PromotionCartLine };
+type OrderItem = { name: string; productName?: string; quantity: number; price: string; productId?: string; image?: string; variantName?: string; variantImage?: string; size?: string; cancelled?: boolean; promotion?: PromotionCartLine };
 type DelhiveryScan = { status: string; date?: string; location?: string; instructions?: string };
 type PosPaymentMethod = "Cash" | "UPI" | "Card";
 type PosQrState = {
   status: "idle" | "loading" | "ready" | "paid" | "error";
   id?: string;
+  orderId?: string;
   imageUrl?: string;
   paymentUrl?: string;
   mode?: "native_qr" | "payment_link";
@@ -536,6 +584,8 @@ type OrderRecord = {
   date: string;
   createdAt?: string;
   status: OrderStatus;
+  returnStatus?: OrderReturnStatus;
+  refundStatus?: string;
   total: string;
   customerName: string;
   userId?: string;
@@ -558,7 +608,15 @@ type OrderRecord = {
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
   razorpayQrCodeId?: string;
+  /** Present only on an isolated localhost fixture, never a provider payment. */
+  localTestOrder?: boolean;
   inventoryAdjusted?: boolean;
+  cancelledAt?: string;
+  cancelledBy?: "customer" | "admin";
+  cancellationReason?: string;
+  cancellationDescription?: string;
+  cancellationRecords?: CustomerCancellationRecord[];
+  refundReference?: string;
   delhiveryAwb?: string;
   delhiveryTrackingUrl?: string;
   delhiveryShipmentStatus?: "awaiting_weight" | "pending" | "created" | "failed" | "skipped";
@@ -585,6 +643,18 @@ const isDemoOrder = (order: { id?: string }) => /^#FZ-104[4-8]$/.test(String(ord
 // Only verified payments belong in the operational Orders and Reports views.
 // Pending checkout records remain stored for payment recovery but stay hidden.
 const hasConfirmedPayment = (order: Pick<OrderRecord, "paymentStatus" | "razorpayPaymentId">) => order.paymentStatus === "paid" || order.paymentStatus === "cod_pending" || order.paymentStatus === "cod_collected" || Boolean(order.razorpayPaymentId);
+// A `pay_local_` value belongs to an old local placeholder, never to a
+// Razorpay Test/Live payment. It must not appear in an actionable refund queue.
+const isLocalRazorpayPlaceholder = (paymentId?: string) => /^pay_local_/i.test(String(paymentId || "").trim());
+const needsCancellationRefund = (order: Pick<OrderRecord, "status" | "paymentMethod" | "paymentStatus" | "razorpayPaymentId" | "refundStatus" | "cancellationRecords">) =>
+  !isLocalRazorpayPlaceholder(order.razorpayPaymentId) &&
+  (Boolean(order.cancellationRecords?.some((record) => record.refundStatus !== "Not applicable")) ||
+    (order.status === "Cancelled" &&
+      order.paymentMethod !== "cod" &&
+      (order.paymentStatus === "paid" || Boolean(order.razorpayPaymentId)) &&
+      order.refundStatus !== "Not applicable"));
+const hasCompletedCancellationRefund = (order: Pick<OrderRecord, "refundStatus">) =>
+  order.refundStatus === "Completed" || order.refundStatus === "Refunded";
 const orderPaymentLabel = (order: Pick<OrderRecord, "paymentMethod" | "posPaymentMethod">) => order.posPaymentMethod ? `POS · ${order.posPaymentMethod}` : order.paymentMethod === "cod" ? "COD" : "Online payment";
 const orderPaymentMethodDetail = (order: Pick<OrderRecord, "paymentMethod" | "posPaymentMethod">) => order.posPaymentMethod ? `POS · ${order.posPaymentMethod}` : order.paymentMethod === "cod" ? "COD · Cash on delivery" : "Online payment";
 const orderPaymentStatusDetail = (order: Pick<OrderRecord, "paymentMethod" | "paymentStatus">) => order.paymentMethod === "cod"
@@ -614,6 +684,11 @@ const delhiveryTimelineDate = (value?: string) => {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
 };
 const safeOrderStatus = (value: unknown): OrderStatus => value === "Packed" || value === "Shipped" || value === "Delivered" || value === "Cancelled" ? value : "Processing";
+const orderListStatus = (order: OrderRecord): OrderStatus | OrderReturnStatus =>
+  order.returnStatus ||
+  (order.status === "Cancelled" && (order.refundStatus === "Completed" || order.refundStatus === "Refunded")
+    ? "Refunded"
+    : safeOrderStatus(order.status));
 const orderListsEqual = (left: OrderRecord[], right: OrderRecord[]) => left.length === right.length && left.every((order, index) => order.id === right[index]?.id && JSON.stringify(order) === JSON.stringify(right[index]));
 const safeOrderString = (value: unknown, fallback = "") => typeof value === "string" ? value : typeof value === "number" || typeof value === "boolean" ? String(value) : fallback;
 const safeOrderNumber = (value: unknown, fallback = 0) => {
@@ -684,12 +759,48 @@ const normalizeOrderRecordForDisplay = (value: unknown): OrderRecord | null => {
       };
     }).filter((scan) => scan.status)
     : [];
+  const cancellationRecords = Array.isArray(source.cancellationRecords)
+    ? source.cancellationRecords
+        .map((raw): CustomerCancellationRecord | null => {
+          const record = raw && typeof raw === "object" ? raw as Record<string, unknown> : null;
+          const id = safeOrderString(record?.id);
+          const createdAt = safeOrderString(record?.createdAt);
+          const reason = safeOrderString(record?.reason);
+          const refundStatus = safeOrderString(record?.refundStatus);
+          const description = safeOrderString(record?.description);
+          const refundReference = safeOrderString(record?.refundReference);
+          const itemIndexes = Array.isArray(record?.itemIndexes)
+            ? record.itemIndexes.filter((index): index is number => Number.isInteger(index) && index >= 0)
+            : [];
+          if (!id || !createdAt || !reason || !itemIndexes.length || !["Not applicable", "Pending", "Completed"].includes(refundStatus)) return null;
+          return {
+            id,
+            itemIndexes,
+            refundAmount: Math.max(0, safeOrderNumber(record?.refundAmount)),
+            refundStatus: refundStatus as CustomerCancellationRecord["refundStatus"],
+            reason: reason as CustomerCancellationRecord["reason"],
+            createdAt,
+            fullOrder: record?.fullOrder === true,
+            ...(description ? { description } : {}),
+            ...(refundReference ? { refundReference } : {}),
+          };
+        })
+        .filter((record): record is CustomerCancellationRecord => Boolean(record))
+    : undefined;
   return {
     id,
     invoiceNumber: safeOrderString(source.invoiceNumber) || undefined,
     date: safeOrderString(source.date, new Date().toISOString().slice(0, 10)),
     createdAt: safeOrderString(source.createdAt) || undefined,
     status: safeOrderStatus(source.status),
+    returnStatus: source.returnStatus === "Refunded" || source.returnStatus === "Returned" || source.returnStatus === "Partially refunded" || source.returnStatus === "Partially returned" ? "Refunded" : undefined,
+    refundStatus: safeOrderString(source.refundStatus) || undefined,
+    refundReference: safeOrderString(source.refundReference) || undefined,
+    cancelledAt: safeOrderString(source.cancelledAt) || undefined,
+    cancelledBy: source.cancelledBy === "customer" || source.cancelledBy === "admin" ? source.cancelledBy : undefined,
+    cancellationReason: safeOrderString(source.cancellationReason) || undefined,
+    cancellationDescription: safeOrderString(source.cancellationDescription) || undefined,
+    cancellationRecords,
     total: typeof source.total === "string" ? source.total : formatAdminCurrency(safeOrderNumber(source.total)),
     customerName: safeOrderString(source.customerName, "Customer"),
     userId: safeOrderString(source.userId) || undefined,
@@ -1064,7 +1175,7 @@ const ProductLibraryRow = memo(function ProductLibraryRow({
       </div>}
       <button className="product-list-main" onClick={() => onAction("open", product)}>
         <span className="module-row-number">{String(index + 1).padStart(2, "0")}</span>
-        <span className="product-row-thumb"><img src={product.image} alt="" /></span>
+        <span className="product-row-thumb">{product.image ? <img src={product.image} alt="" /> : <i aria-hidden="true">✦</i>}</span>
         <span className="product-row-copy">
           <strong>{product.name}</strong>
           <small>{product.stock === 0 ? "Draft" : `${product.stock} in stock`} · {product.category} · SKU {product.sku}</small>
@@ -1192,16 +1303,18 @@ const menu = [
   { label: "Categories", icon: "▦" },
   { label: "Collections", icon: "✧" },
   { label: "Orders", icon: "↗" },
+  { label: "Cancelled orders", icon: "⊘" },
   { label: "Refund requests", icon: "↩" },
   { label: "Customers", icon: "♧" },
   { label: "Agents", icon: "✦" },
   { label: "Marketing", icon: "◈" },
-  { label: "Buy 1 Get X Free", icon: "✦" },
+  { label: "Offers", icon: "✦" },
   { label: "Homepage", icon: "⌂" },
   { label: "Delivery charge", icon: "₹" },
   { label: "Hub", icon: "⌖" },
   { label: "Reports", icon: "▥" },
   { label: "Announcement", icon: "▤" },
+  { label: "Damaged Products", icon: "▧" },
   { label: "Vendors", icon: "♢" },
 ];
 
@@ -1476,6 +1589,10 @@ function AdminDashboard() {
   const [dashboardProducts, setDashboardProducts] = useState<AdminProduct[]>(adminProducts);
   const [productFilter, setProductFilter] = useState<ProductFilter>("all");
   const [categoryFilter, setCategoryFilter] = useState("All categories");
+  const [pendingRefundRequestCount, setPendingRefundRequestCount] = useState(0);
+  useEffect(() => {
+    if (isLocalTestPreview) window.localStorage.removeItem("fanzzy-orders");
+  }, []);
   useEffect(() => {
     const timer = window.setInterval(() => setLiveDate(new Date()), 60 * 1000);
     return () => window.clearInterval(timer);
@@ -1514,6 +1631,7 @@ function AdminDashboard() {
   const activeRole = adminRoles.find((role) => role.id === activeRoleId) ?? defaultAdminRoles[0];
   const canAccess = (section: string) => activeRole.permissions.includes(section as AdminPermission);
   const visibleMenu = menu.filter((item) => canAccess(item.label));
+  const cancelledOrderCount = dashboardOrders.filter(needsCancellationRefund).length;
 
   useEffect(() => {
     let active = true;
@@ -1576,14 +1694,16 @@ function AdminDashboard() {
       const remote = await fetchStoreOrders<OrderRecord>();
       const merged = new Map<string, OrderRecord>();
       remote.data?.forEach((order) => { if (order?.id && !isDemoOrder(order)) merged.set(order.id, order); });
-      try {
-        const stored = window.localStorage.getItem("fanzzy-orders");
-        const parsed = stored ? JSON.parse(stored) as OrderRecord[] : [];
-        if (Array.isArray(parsed)) parsed.forEach((order) => {
-          if (order?.id && !isDemoOrder(order) && !merged.has(order.id)) merged.set(order.id, order);
-        });
-      } catch {
-        window.localStorage.removeItem("fanzzy-orders");
+      if (!isLocalTestPreview) {
+        try {
+          const stored = window.localStorage.getItem("fanzzy-orders");
+          const parsed = stored ? JSON.parse(stored) as OrderRecord[] : [];
+          if (Array.isArray(parsed)) parsed.forEach((order) => {
+            if (order?.id && !isDemoOrder(order) && !merged.has(order.id)) merged.set(order.id, order);
+          });
+        } catch {
+          window.localStorage.removeItem("fanzzy-orders");
+        }
       }
       setDashboardOrders(Array.from(merged.values()).filter((order) => order?.date && order?.total && !isDemoOrder(order) && hasConfirmedPayment(order)));
     };
@@ -1597,6 +1717,48 @@ function AdminDashboard() {
       unsubscribeFromDashboardOrders();
       window.removeEventListener("storage", syncDashboardOrders);
       window.removeEventListener("fanzzy-orders-updated", syncDashboardOrders);
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const setPendingCount = (requests: RefundRequest[]) => {
+      if (active) setPendingRefundRequestCount(requests.filter((request) => request.status === "Requested").length);
+    };
+    const syncRefundRequestCount = async () => {
+      const remote = await fetchStoreSetting("refundRequests");
+      if (!active) return;
+      const localRequests = parseRefundRequests(window.localStorage.getItem("fanzzy-refund-requests"));
+      setPendingCount(remote.error ? localRequests : parseRefundRequests(remote.value));
+    };
+    // Do not briefly apply browser-cache data before every server poll. A
+    // stale cache made the sidebar count (and the refund list below) flicker.
+    const refresh = () => { void syncRefundRequestCount().catch(() => undefined); };
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === "fanzzy-refund-requests") refresh();
+    };
+    const channel = typeof BroadcastChannel !== "undefined"
+      ? new BroadcastChannel("fanzzy-refund-requests")
+      : null;
+    channel?.addEventListener("message", (event) => {
+      const incoming = event.data && typeof event.data === "object" && Array.isArray(event.data.requests)
+        ? parseRefundRequests(JSON.stringify(event.data.requests))
+        : [];
+      if (incoming.length) setPendingCount(incoming);
+      refresh();
+    });
+    refresh();
+    const timer = window.setInterval(refresh, 1000);
+    const unsubscribe = subscribeToStoreSetting("refundRequests", refresh);
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("fanzzy-refund-requests-updated", refresh);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      unsubscribe();
+      channel?.close();
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("fanzzy-refund-requests-updated", refresh);
     };
   }, []);
 
@@ -1781,7 +1943,7 @@ function AdminDashboard() {
             >
               <span className="nav-icon">{item.icon}</span>
               {item.label}
-              {(item.label === "Orders" ? dashboardOrders.length : item.label === "Products" ? dashboardProducts.length : item.count) !== undefined && <b>{item.label === "Orders" ? dashboardOrders.length : item.label === "Products" ? dashboardProducts.length : item.count}</b>}
+              {(item.label === "Orders" ? dashboardOrders.length : item.label === "Cancelled orders" ? cancelledOrderCount : item.label === "Refund requests" ? pendingRefundRequestCount : item.label === "Products" ? dashboardProducts.length : item.count) !== undefined && <b>{item.label === "Orders" ? dashboardOrders.length : item.label === "Cancelled orders" ? cancelledOrderCount : item.label === "Refund requests" ? pendingRefundRequestCount : item.label === "Products" ? dashboardProducts.length : item.count}</b>}
             </button>
           ))}
         </nav>
@@ -1827,10 +1989,10 @@ function AdminDashboard() {
           <div>
             <p className="eyebrow">{liveDate.toLocaleDateString("en-IN", { weekday: "long", day: "2-digit", month: "long", year: "numeric" })}</p>
             <h1>
-              Good morning, Vestano <span>✦</span>
+              {active === "Offers" ? "Marketing · Offers & Promotions" : <>Good morning, Vestano <span>✦</span></>}
             </h1>
             <p className="subcopy">
-              Here’s what’s happening across Fanzzy today.
+              {active === "Offers" ? "Create and manage promotions for your Fanzzy store." : "Here’s what’s happening across Fanzzy today."}
             </p>
           </div>
           {active === "Overview" && (
@@ -2060,7 +2222,7 @@ function AdminDashboard() {
               {shownProducts.map((product) => (
                 <div className="table-row" key={product.sku}>
                   <div className="table-product">
-                    <img src={product.image} alt="" />
+                    {product.image ? <img src={product.image} alt="" /> : <span className="admin-order-item-placeholder" aria-hidden="true">✦</span>}
                     <span>
                       <strong>{product.name}</strong>
                       <small>{product.sku}</small>
@@ -2853,9 +3015,9 @@ const moduleContent: Record<
     secondary: "New coupon",
     rows: [],
   },
-  "Buy 1 Get X Free": {
+  "Offers": {
     eyebrow: "PROMOTIONS",
-    title: "Buy 1 Get X Free",
+    title: "Offers",
     description: "Create one-product offers with 1–4 free variants or sizes.",
     primary: "Create offer",
     secondary: "View report",
@@ -2914,15 +3076,17 @@ function ModuleWorkspace({
     return <PurchaseEntryWorkspace onNotify={onNotify} />;
   if (module === "Reports") return <ReportsWorkspace onNotify={onNotify} view={reportView} />;
   if (module === "Announcement") return <AnnouncementPanel onNotify={onNotify} module />;
+  if (module === "Damaged Products") return <DamagedProductsWorkspace onNotify={onNotify} />;
   if (module === "Categories") return <CategoryWorkspace onNotify={onNotify} />;
   if (module === "Orders") return <OrdersWorkspaceBoundary onNotify={onNotify} />;
+  if (module === "Cancelled orders") return <CancelledOrdersWorkspace onNotify={onNotify} />;
   if (module === "Refund requests") return <RefundRequestsWorkspace onNotify={onNotify} />;
   if (module === "Homepage") return <HomepageWorkspace onNotify={onNotify} />;
   if (module === "Delivery charge")
     return <DeliveryChargeWorkspace onNotify={onNotify} />;
   if (module === "Hub") return <HubWorkspace onNotify={onNotify} />;
   if (module === "Marketing") return <MarketingWorkspace onNotify={onNotify} />;
-  if (module === "Buy 1 Get X Free") return <PromotionOffersWorkspace onNotify={onNotify} />;
+  if (module === "Offers") return <PromotionOffersWorkspace onNotify={onNotify} />;
   if (module === "Collections")
     return <CollectionsWorkspace onNotify={onNotify} />;
   if (module === "Customers") return <CustomersWorkspaceBoundary onNotify={onNotify} />;
@@ -3875,6 +4039,315 @@ function ReportsWorkspace({
         {view === "inventory" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Complete inventory movement</strong><span>{report.inventoryRows.length} products</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Product</th><th>SKU</th><th>Category</th><th>Status</th><th>Movement</th><th>Stock</th><th>Units sold</th><th>Unit price</th><th>Stock value</th><th>Cost value</th></tr></thead><tbody>{report.inventoryRows.map((row) => <tr key={row.product.sku}><td>{row.product.name}</td><td>{row.product.sku}</td><td>{row.product.category}</td><td>{row.product.status}</td><td><span className={`report-movement ${row.movement.toLowerCase().replace(/\s+/g, "-")}`}>{row.movement}</span></td><td>{row.product.stock}</td><td>{row.units}</td><td>{formatAdminCurrency(parseReportMoney(row.product.price))}</td><td>{formatAdminCurrency(row.stockValue)}</td><td>{formatAdminCurrency(row.costValue)}</td></tr>)}</tbody></table></div></div>}
          {view === "orders" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Every confirmed order</strong><span>{report.orderRows.length} orders</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Order</th><th>Date</th><th>Customer</th><th>Status</th><th>Payment</th><th>Fulfilment</th><th>Items</th><th>Total</th><th>Phone</th></tr></thead><tbody>{report.orderRows.length ? report.orderRows.map((order) => <tr key={order.id}><td>{order.id}</td><td>{order.date}</td><td>{order.customerName}</td><td><span className={`report-order-status ${order.status.toLowerCase()}`}>{order.status}</span></td><td>{orderPaymentLabel(order)}</td><td>{order.fulfillmentMethod === "pickup" ? `Pickup · ${order.pickupHubName || "Hub"}` : "Delivery"}</td><td>{order.items?.reduce((sum, item) => sum + Math.max(0, Number(item.quantity) || 0), 0) || 0}</td><td>{order.total}</td><td>{order.userPhone || order.phone}</td></tr>) : <tr><td colSpan={9}>No confirmed orders in this period.</td></tr>}</tbody></table></div></div>}
          {view === "damaged" && <div className="report-detail-block report-detail-wide"><div className="report-detail-block-head"><strong>Every damaged item</strong><span>{report.damagedRows.length} records · {report.damagedUnits} units</span></div><div className="report-table-wrap"><table className="report-detail-table"><thead><tr><th>Date</th><th>Product</th><th>SKU</th><th>Category</th><th>Quantity</th><th>Scope</th><th>Reason</th><th>Retail value</th><th>Cost value</th></tr></thead><tbody>{report.damagedRows.length ? report.damagedRows.map((row) => <tr key={row.id}><td>{row.createdAt.slice(0, 10)}</td><td>{row.productName}</td><td>{row.sku}</td><td>{row.category}</td><td>{row.quantity}</td><td>{row.stockScope}</td><td>{row.reason}</td><td>{formatAdminCurrency(row.retailValue)}</td><td>{formatAdminCurrency(row.costValue)}</td></tr>) : <tr><td colSpan={9}>No damaged items in this period.</td></tr>}</tbody></table></div></div>}
+      </section>
+    </section>
+  );
+}
+
+function DamagedProductsWorkspace({ onNotify }: { onNotify: (message: string) => void }) {
+  const [products, setProducts] = useState<AdminProduct[]>(adminProducts);
+  const [productDamages, setProductDamages] = useState<ProductDamageMap>({});
+  const [query, setQuery] = useState("");
+  const [restoringId, setRestoringId] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    const loadProducts = async () => {
+      const [remote, variantsRemote, variantTypeRemote, sizesRemote, sizeStockRemote] = await Promise.all([
+        fetchCatalogProducts(),
+        fetchStoreSetting("productVariants"),
+        fetchStoreSetting("productVariantType"),
+        fetchStoreSetting("productSizes"),
+        fetchStoreSetting("productSizeStock"),
+      ]);
+      if (!active) return;
+      let variantsMap: Record<string, ProductVariant[]> = {};
+      let variantTypeMap: Record<string, ProductVariantType> = {};
+      let sizesMap: Record<string, string[]> = {};
+      let sizeStockMap: Record<string, Record<string, number>> = {};
+      if (variantsRemote.value) {
+        try {
+          const parsed = JSON.parse(variantsRemote.value) as Record<string, ProductVariant[]>;
+          if (parsed && typeof parsed === "object") variantsMap = parsed;
+        } catch {
+          variantsMap = {};
+        }
+      }
+      if (variantTypeRemote.value) {
+        try {
+          const parsed = JSON.parse(variantTypeRemote.value) as Record<string, unknown>;
+          if (parsed && typeof parsed === "object") {
+            variantTypeMap = Object.fromEntries(
+              Object.entries(parsed).filter((entry): entry is [string, ProductVariantType] => entry[1] === "normal" || entry[1] === "size"),
+            );
+          }
+        } catch {
+          variantTypeMap = {};
+        }
+      }
+      if (sizesRemote.value) {
+        try {
+          const parsed = JSON.parse(sizesRemote.value) as Record<string, unknown>;
+          if (parsed && typeof parsed === "object") {
+            sizesMap = Object.fromEntries(
+              Object.entries(parsed).filter((entry): entry is [string, string[]] => Array.isArray(entry[1]) && entry[1].every((size) => typeof size === "string")),
+            );
+          }
+        } catch {
+          sizesMap = {};
+        }
+      }
+      if (sizeStockRemote.value) {
+        try {
+          const parsed = JSON.parse(sizeStockRemote.value) as Record<string, Record<string, number>>;
+          if (parsed && typeof parsed === "object") sizeStockMap = parsed;
+        } catch {
+          sizeStockMap = {};
+        }
+      }
+      if (!remote.error && remote.data !== null) {
+        setProducts(remote.data.filter((product) => !isDemoProduct(product)).map((product) => {
+          const variants = variantsMap[product.sku]?.length ? variantsMap[product.sku] : product.variants || [];
+          const configuredSizeStock = sizeStockMap[product.sku] || {};
+          const sizes = sizesMap[product.sku]?.length
+            ? sizesMap[product.sku]
+            : product.sizes?.length
+              ? product.sizes
+              : Object.keys(configuredSizeStock).length
+                ? Object.keys(configuredSizeStock)
+              : Array.from(new Set(variants.map((variant) => variant.size).filter((size): size is string => Boolean(size))));
+          const sizeStock = Object.keys(configuredSizeStock).length
+            ? configuredSizeStock
+            : Object.fromEntries(variants.filter((variant) => variant.size && variant.stock !== undefined).map((variant) => [variant.size!, variant.stock!])) as Record<string, number>;
+          const variantType = variantTypeMap[product.sku] || product.variantType || (sizes.length ? "size" : "normal");
+          const stockSummary = getReportStockSummary({ stock: product.stock, variantType, sizes, sizeStock, variants });
+          return {
+            name: product.name,
+            sku: product.sku,
+            category: product.category,
+            stock: stockSummary.stock,
+            price: formatAdminCurrency(product.price),
+            cost: formatAdminCurrency(product.cost ?? 0),
+            status: product.status,
+            image: product.image || adminPlaceholderImage,
+            hoverImage: product.hoverImage || product.image || adminPlaceholderImage,
+            sizes,
+            sizeStock,
+            variants,
+            variantType,
+          };
+        }));
+        return;
+      }
+      const stored = window.localStorage.getItem("fanzzy-products");
+      if (!stored) return;
+      try {
+        const parsed = JSON.parse(stored) as Array<Partial<AdminProduct> & { id?: string; price?: string | number; cost?: string | number }>;
+        if (!Array.isArray(parsed)) return;
+        setProducts(parsed.filter((product) => !isDemoProduct(product)).map((product) => ({
+          name: String(product.name || "Untitled product"),
+          sku: String(product.sku || product.id || ""),
+          category: String(product.category || "Uncategorised"),
+          stock: Number(product.stock) || 0,
+          price: typeof product.price === "number" ? formatAdminCurrency(product.price) : String(product.price || "₹0"),
+          cost: typeof product.cost === "number" ? formatAdminCurrency(product.cost) : String(product.cost || "₹0"),
+          status: product.status === "Draft" || product.status === "Low stock" ? product.status : "Published",
+          image: String(product.image || adminPlaceholderImage),
+          hoverImage: String(product.hoverImage || product.image || adminPlaceholderImage),
+          sizes: product.sizes || [],
+          variants: product.variants || [],
+          variantType: product.variantType || (product.sizes?.length ? "size" : "normal"),
+        })));
+      } catch {
+        // Keep the empty state if local catalog cache is malformed.
+      }
+    };
+    void loadProducts().catch(() => undefined);
+    window.addEventListener("fanzzy-products-updated", loadProducts);
+    return () => {
+      active = false;
+      window.removeEventListener("fanzzy-products-updated", loadProducts);
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const readLocalDamages = () => {
+      const stored = window.localStorage.getItem(localProductDamagesKey);
+      if (!stored) return;
+      try {
+        const parsed = JSON.parse(stored) as ProductDamageMap;
+        if (active && parsed && typeof parsed === "object" && !Array.isArray(parsed)) setProductDamages(parsed);
+      } catch {
+        // Ignore malformed local damage history.
+      }
+    };
+    const loadDamages = async () => {
+      const remote = await fetchStoreSetting("productDamages");
+      const stored = remote.value || window.localStorage.getItem(localProductDamagesKey);
+      if (!stored) return;
+      try {
+        const parsed = JSON.parse(stored) as ProductDamageMap;
+        if (active && parsed && typeof parsed === "object" && !Array.isArray(parsed)) setProductDamages(parsed);
+      } catch {
+        readLocalDamages();
+      }
+    };
+    void loadDamages().catch(readLocalDamages);
+    window.addEventListener("fanzzy-product-damages-updated", readLocalDamages);
+    window.addEventListener("storage", readLocalDamages);
+    return () => {
+      active = false;
+      window.removeEventListener("fanzzy-product-damages-updated", readLocalDamages);
+      window.removeEventListener("storage", readLocalDamages);
+    };
+  }, []);
+
+  const damagedRows = useMemo(() => {
+    const productsByKey = new Map<string, AdminProduct>();
+    products.forEach((product) => {
+      productsByKey.set(reportNameKey(product.name), product);
+      productsByKey.set(reportNameKey(product.sku), product);
+    });
+    return Object.values(productDamages)
+      .flat()
+      .map((record) => {
+        const product = (record.sku && productsByKey.get(reportNameKey(record.sku))) || productsByKey.get(reportNameKey(record.productName));
+        const quantity = Math.max(0, Number(record.quantity) || 0);
+        const unitPrice = product ? parseReportMoney(product.price) : 0;
+        const unitCost = product ? parseReportMoney(product.cost) : 0;
+        return {
+          ...record,
+          productName: product?.name || record.productName || record.sku,
+          category: product?.category || "Archived product",
+          currentStock: product ? getReportStockSummary(product).stock : null,
+          quantity,
+          retailValue: unitPrice * quantity,
+          costValue: unitCost * quantity,
+        };
+      })
+      .sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)));
+  }, [productDamages, products]);
+
+  const visibleRows = useMemo(() => {
+    const search = query.trim().toLowerCase();
+    if (!search) return damagedRows;
+    return damagedRows.filter((row) => [row.productName, row.sku, row.category, row.stockScope, row.reason].some((value) => String(value || "").toLowerCase().includes(search)));
+  }, [damagedRows, query]);
+  const totalUnits = damagedRows.reduce((sum, row) => sum + row.quantity, 0);
+  const totalCost = damagedRows.reduce((sum, row) => sum + row.costValue, 0);
+  const totalRetail = damagedRows.reduce((sum, row) => sum + row.retailValue, 0);
+  const restoreDamage = async (record: ProductDamageRecord) => {
+    if (restoringId) return;
+    const product = products.find((item) => item.sku === record.sku);
+    if (!product) {
+      onNotify("This damaged product is no longer in the catalog");
+      return;
+    }
+    setRestoringId(record.id);
+    try {
+      const quantity = Math.max(0, Math.floor(Number(record.quantity) || 0));
+      if (quantity < 1) {
+        onNotify("Damaged quantity is not valid");
+        return;
+      }
+      const scope = String(record.stockScope || "Product stock").trim().toLowerCase();
+      const variants = (product.variants || []).map((variant) => ({ ...variant }));
+      const sizeStock = { ...(product.sizeStock || {}) };
+      let restoredToScopedStock = false;
+      if (variants.length) {
+        const variantIndex = variants.findIndex((variant, index) => {
+          const label = product.variantType === "size"
+            ? variant.size || variant.name || `Size ${index + 1}`
+            : variant.name || `Option ${index + 1}`;
+          return label.trim().toLowerCase() === scope || `size ${label}`.trim().toLowerCase() === scope;
+        });
+        if (variantIndex >= 0) {
+          const variant = variants[variantIndex];
+          const label = product.variantType === "size" ? variant.size || variant.name || "" : "";
+          variant.stock = Math.max(0, Number(variant.stock) || 0) + quantity;
+          if (label) sizeStock[label] = Math.max(0, Number(sizeStock[label]) || 0) + quantity;
+          restoredToScopedStock = true;
+        }
+      }
+      if (!restoredToScopedStock && product.variantType === "size" && product.sizes?.length) {
+        const size = product.sizes.find((item) => item.trim().toLowerCase() === scope || `size ${item}`.trim().toLowerCase() === scope);
+        if (size) {
+          sizeStock[size] = Math.max(0, Number(sizeStock[size]) || 0) + quantity;
+          restoredToScopedStock = true;
+        }
+      }
+      const liveStock = restoredToScopedStock
+        ? variants.length
+          ? variants.reduce((total, variant) => total + Math.max(0, Number(variant.stock) || 0), 0)
+          : (product.sizes || []).reduce((total, size) => total + Math.max(0, Number(sizeStock[size]) || 0), 0)
+        : Math.max(0, Number(product.stock) || 0) + quantity;
+      const updated: AdminProduct = {
+        ...product,
+        stock: liveStock,
+        sizeStock,
+        variants,
+        status: liveStock > 0 ? "Published" : product.status,
+      };
+      const nextProducts = products.map((item) => item.sku === product.sku ? updated : item);
+      const remainingForProduct = (productDamages[record.sku] || []).filter((item) => item.id !== record.id);
+      const nextDamages: ProductDamageMap = { ...productDamages };
+      if (remainingForProduct.length) nextDamages[record.sku] = remainingForProduct;
+      else delete nextDamages[record.sku];
+      let remoteProductError: Error | null = null;
+      let settingErrors: Array<Error | null | void> = [];
+      try {
+        remoteProductError = await saveCatalogProduct(toCatalogProduct(updated));
+        settingErrors = await Promise.all([
+          saveProductSizes(nextProducts),
+          saveProductSizeStock(nextProducts),
+          saveProductVariants(nextProducts),
+          saveProductVariantTypes(nextProducts),
+          saveStoreSetting("productDamages", JSON.stringify(nextDamages)),
+        ]);
+      } catch (error) {
+        settingErrors = [error instanceof Error ? error : new Error(String(error))];
+      }
+      setProducts(nextProducts);
+      setProductDamages(nextDamages);
+      persistCatalog(nextProducts);
+      persistProductDamages(nextDamages);
+      const remoteError = remoteProductError || settingErrors.find((error): error is Error => error instanceof Error);
+      onNotify(remoteError ? "Damage removed locally; Supabase needs its tables" : `${quantity} unit${quantity === 1 ? "" : "s"} restored to ${product.name}`);
+    } finally {
+      setRestoringId("");
+    }
+  };
+
+  return (
+    <section className="panel module-workspace damaged-products-workspace">
+      <div className="module-workspace-head">
+        <div>
+          <p className="eyebrow">INVENTORY</p>
+          <h2>Damaged products</h2>
+          <p>Review every stock item marked as damaged from the product detail panel.</p>
+        </div>
+        <div className="module-actions">
+          <button className="module-secondary" onClick={() => onNotify("Open Products and choose Add damaged stock from a product")}>Record damage ↗</button>
+        </div>
+      </div>
+      <div className="report-kpi-grid">
+        <div className="report-kpi"><small>Damage records</small><strong>{damagedRows.length}</strong><span>All time</span></div>
+        <div className="report-kpi"><small>Damaged units</small><strong>{totalUnits}</strong><span>Removed from stock</span></div>
+        <div className="report-kpi"><small>Estimated cost</small><strong>{formatAdminCurrency(totalCost)}</strong><span>Based on product cost</span></div>
+        <div className="report-kpi"><small>Retail value</small><strong>{formatAdminCurrency(totalRetail)}</strong><span>Based on selling price</span></div>
+      </div>
+      <section className="report-detail-panel">
+        <div className="report-detail-head">
+          <div><p className="eyebrow">DAMAGE LOG</p><h3>Recorded damaged stock</h3><span>{visibleRows.length} visible records · {totalUnits} total units</span></div>
+          <label className="report-table-filter">Search damaged products<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Product, SKU, reason" /></label>
+        </div>
+        <div className="report-table-wrap">
+          <table className="report-detail-table damaged-products-table">
+            <thead><tr><th>Date</th><th>Product</th><th>SKU</th><th>Category</th><th>Quantity</th><th>Scope</th><th>Reason</th><th>Current stock</th><th>Cost value</th><th>Retail value</th><th>Action</th></tr></thead>
+            <tbody>{visibleRows.length ? visibleRows.map((row) => <tr key={row.id}><td>{row.createdAt.slice(0, 10)}</td><td>{row.productName}</td><td>{row.sku}</td><td>{row.category}</td><td>{row.quantity}</td><td>{row.stockScope}</td><td>{row.reason}</td><td>{row.currentStock ?? "Archived"}</td><td>{formatAdminCurrency(row.costValue)}</td><td>{formatAdminCurrency(row.retailValue)}</td><td><button className="module-secondary damage-restore-button" disabled={restoringId === row.id || row.currentStock === null} onClick={() => void restoreDamage(row)}>{restoringId === row.id ? "Restoring…" : "Remove from damage"}</button></td></tr>) : <tr><td colSpan={11}>{damagedRows.length ? "No damaged products match this search." : "No damaged stock has been recorded yet."}</td></tr>}</tbody>
+          </table>
+        </div>
       </section>
     </section>
   );
@@ -5866,20 +6339,7 @@ function PromotionOffersWorkspace({ onNotify }: { onNotify: (message: string) =>
 
   return (
     <section className="panel module-workspace promotion-workspace">
-      <div className="module-workspace-head">
-        <div><p className="eyebrow">PROMOTIONS</p><h2>Buy 1 Get X Free</h2><p>Choose one product, then let customers select 1–4 free variants or sizes from that same product.</p></div>
-        <div className="module-actions"><button className="module-secondary" onClick={() => onNotify("Offer report is ready from usage data")}>View report ↗</button><button className="module-primary" onClick={openNew}>+ Create offer</button></div>
-      </div>
-      <div className="offer-capability-strip"><span>One product per offer</span><span>Buy 1 fixed</span><span>Get 1–4 free</span><span>Variant + size aware</span></div>
-      <div className="promotion-list">
-        {offers.length ? offers.map((offer, index) => (
-          <div className="promotion-list-row" key={offer.id}>
-            <button className="promotion-list-main" onClick={() => setSelected(offer)}><span className="module-row-number">{String(index + 1).padStart(2, "0")}</span><span><strong>{offer.name}</strong><small>{offerTypeLabel(offer)} · {offer.eligiblePaid.length + offer.eligibleFree.length || "All catalog"} eligible selections</small></span><i className={`status-pill ${offer.status.toLowerCase()}`}>{offer.status}</i><b>↗</b></button>
-            <div className="product-row-actions"><button onClick={() => openEdit(offer)} aria-label={`Edit ${offer.name}`}><Pencil size={15} /></button><button className="delete-action" onClick={() => void deleteOffer(offer)} aria-label={`Archive ${offer.name}`}><Trash2 size={15} /></button></div>
-          </div>
-        )) : <div className="promotion-empty"><span>✦</span><h3>No promotional offers yet</h3><p>Create a Buy 1 Get 1, Buy 1 Get 2, Buy 1 Get 3, or Buy 1 Get 4 offer for one product.</p><button className="module-primary" onClick={openNew}>Create your first offer</button></div>}
-      </div>
-      <div className="promotion-footnote"><strong>Operational safeguards</strong><span>Offers are stored with reusable product/variant IDs. Status, dates, usage limits, and selection rules are checked before a storefront application is accepted.</span></div>
+      <OffersDashboard offers={offers} products={catalog} onNewBogo={openNew} onEdit={openEdit} onToggle={(offer) => void toggleOffer(offer)} onArchive={(offer) => void deleteOffer(offer)} onNotify={onNotify} />
 
       {selected && <div className="product-modal-backdrop" onClick={() => setSelected(null)}><div className="product-detail-card promotion-detail-modal" onClick={(event) => event.stopPropagation()}><p className="eyebrow">{offerTypeLabel(selected)}</p><h3>{selected.name}</h3><p className="product-detail-meta">{selected.description || "No description added."}</p><div className="promotion-detail-grid"><span><small>Status</small><strong>{selected.status}</strong></span><span><small>Usage</small><strong>{selected.usageCount}{selected.maxTotalUsage ? ` / ${selected.maxTotalUsage}` : ""}</strong></span><span><small>Paid scope</small><strong>{selected.eligiblePaid.length || "All"}</strong></span><span><small>Free scope</small><strong>{selected.eligibleFree.length || "Same product"}</strong></span></div><p className="promotion-rules">{selected.allowMultipleQualifyingSets ? "Multiple qualifying sets enabled" : "Applies once per cart"} · {selected.allowSameVariantMultipleTimes ? "Repeat variants allowed" : "Unique variants only"} · {selected.automatic ? "Automatic" : `Coupon ${selected.couponCode || "required"}`}</p><div className="product-detail-actions"><button className="module-primary" onClick={() => openEdit(selected)}>Edit offer</button><button className="module-secondary" onClick={() => void toggleOffer(selected)}>{selected.status === "Active" ? "Deactivate" : "Activate"}</button><button className="module-secondary" onClick={() => setSelected(null)}>Close</button></div></div></div>}
 
@@ -5894,43 +6354,737 @@ function PromotionOffersWorkspace({ onNotify }: { onNotify: (message: string) =>
   );
 }
 
-function RefundRequestsWorkspace({ onNotify }: { onNotify: (message: string) => void }) {
-  const [requests, setRequests] = useState<RefundRequest[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [busyId, setBusyId] = useState<string | null>(null);
+function PosRefundsWorkspace({ onNotify, embedded = false }: { onNotify: (message: string) => void; embedded?: boolean }) {
+  const [orderId, setOrderId] = useState("");
+  const [summary, setSummary] = useState<ReturnOrderSummary | null>(null);
+  const [summarySource, setSummarySource] = useState<"remote" | "local" | "">("");
+  const [selectedReturnQuantities, setSelectedReturnQuantities] = useState<Record<string, string>>({});
+  const [reason, setReason] = useState("");
+  const [description, setDescription] = useState("");
+  const [damaged, setDamaged] = useState(false);
+  const [refundMethod, setRefundMethod] = useState<"Cash" | "UPI" | "Card">("Cash");
+  const [settlementStatus, setSettlementStatus] = useState<"Pending" | "Completed">("Completed");
+  const [refundReference, setRefundReference] = useState("");
+  const [cashAmount, setCashAmount] = useState("");
+  const [staffMember, setStaffMember] = useState("Admin staff");
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [allReturnHistory, setAllReturnHistory] = useState<WalkInReturnRecord[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(true);
+  const selectedLines = useMemo(
+    () => (summary?.lines || []).filter((line) => Object.prototype.hasOwnProperty.call(selectedReturnQuantities, line.id) && line.remainingEligible > 0),
+    [selectedReturnQuantities, summary],
+  );
+  const refundedProductCount = summary?.lines.filter((line) => line.remainingEligible < 1).length || 0;
+  const allProductsRefunded = summary?.lines.length ? refundedProductCount === summary.lines.length : false;
+  const refundAmount = selectedLines.reduce(
+    (total, line) => total + refundAmountForLineQuantity(line, Number(selectedReturnQuantities[line.id])),
+    0,
+  );
+  const orderReturns = summary?.returns || [];
+
+  const loadLocalReturnSummary = (lookupOrderId: string): ReturnOrderSummary | null => {
+    try {
+      const rawOrders = JSON.parse(window.localStorage.getItem("fanzzy-orders") || "[]") as unknown[];
+      const localOrder = Array.isArray(rawOrders)
+        ? rawOrders.map(normalizeOrderRecordForDisplay).find((order): order is OrderRecord => Boolean(order && order.id.toLowerCase() === lookupOrderId.toLowerCase()))
+        : null;
+      if (!localOrder) return null;
+      const rawReturns = JSON.parse(window.localStorage.getItem("fanzzy-walk-in-returns") || "[]") as WalkInReturnRecord[];
+      const localReturns = Array.isArray(rawReturns) ? rawReturns : [];
+      return summarizeReturnableOrder(localOrder, localReturns);
+    } catch {
+      return null;
+    }
+  };
+
+  useEffect(() => {
+    setSelectedReturnQuantities((current) => {
+      const next: Record<string, string> = {};
+      for (const line of summary?.lines || []) {
+        if (!Object.prototype.hasOwnProperty.call(current, line.id) || line.remainingEligible < 1) continue;
+        next[line.id] = String(Math.min(Math.max(1, Math.floor(Number(current[line.id]) || 1)), line.remainingEligible));
+      }
+      return next;
+    });
+  }, [summary]);
+
+  useEffect(() => {
+    if (refundMethod === "Cash") {
+      setSettlementStatus("Completed");
+      setCashAmount(refundAmount ? String(refundAmount) : "");
+    } else if (refundMethod === "UPI") {
+      setCashAmount("");
+    }
+  }, [refundAmount, refundMethod]);
 
   useEffect(() => {
     let active = true;
-    const loadRequests = async () => {
-      const remote = await fetchStoreSetting("refundRequests");
-      const stored = remote.value || window.localStorage.getItem("fanzzy-refund-requests");
+    const loadHistory = async () => {
+      const remote = await fetchStoreSetting("walkInReturns");
+      const stored = remote.value || window.localStorage.getItem("fanzzy-walk-in-returns") || "[]";
+      let records: WalkInReturnRecord[] = [];
+      try {
+        const parsed = JSON.parse(stored) as unknown;
+        records = Array.isArray(parsed) ? parsed as WalkInReturnRecord[] : [];
+      } catch {
+        records = [];
+      }
       if (!active) return;
-      setRequests(parseRefundRequests(stored));
+      setAllReturnHistory([...records].sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt)));
+      setHistoryLoading(false);
+    };
+    const refresh = () => { void loadHistory().catch(() => { if (active) setHistoryLoading(false); }); };
+    refresh();
+    const unsubscribe = subscribeToStoreSetting("walkInReturns", refresh);
+    window.addEventListener("storage", refresh);
+    window.addEventListener("fanzzy-walk-in-returns-updated", refresh);
+    return () => {
+      active = false;
+      unsubscribe();
+      window.removeEventListener("storage", refresh);
+      window.removeEventListener("fanzzy-walk-in-returns-updated", refresh);
+    };
+  }, []);
+
+  const findOrder = async (event?: React.FormEvent<HTMLFormElement>) => {
+    event?.preventDefault();
+    const normalized = orderId.trim();
+    if (!normalized) {
+      setError("Enter the original order ID.");
+      setSummary(null);
+      return;
+    }
+    setLoading(true);
+    setError("");
+    setMessage("");
+    try {
+      const response = await adminApiFetch(`/admin/returns?orderId=${encodeURIComponent(normalized)}`, { cache: "no-store" });
+      const result = await response.json() as ReturnOrderSummary & { error?: string };
+      const nextSummary = response.ok ? result : loadLocalReturnSummary(normalized);
+      if (!nextSummary) throw new Error(result.error || "POS sale could not be found.");
+      if (!isPosOrder(nextSummary.order)) throw new Error("Enter a POS sale ID beginning with #FZ-POS-.");
+      setSummary(nextSummary);
+      setSummarySource(response.ok ? "remote" : "local");
+      setSelectedReturnQuantities({});
+      setReason("");
+      setDescription("");
+      setDamaged(false);
+      setRefundReference("");
+      const originalPaymentMethod = nextSummary.order.posPaymentMethod;
+      const nextRefundMethod = originalPaymentMethod === "Cash" || originalPaymentMethod === "UPI" || originalPaymentMethod === "Card"
+        ? originalPaymentMethod
+        : "Cash";
+      setRefundMethod(nextRefundMethod);
+      setSettlementStatus(nextRefundMethod === "Cash" ? "Completed" : "Pending");
+      setMessage(`${nextSummary.order.id} loaded for POS refund${response.ok ? "" : " from this browser's local order cache"}.`);
+    } catch (loadError) {
+      setSummary(null);
+      setSummarySource("");
+      setSelectedReturnQuantities({});
+      setError(loadError instanceof Error ? loadError.message : "Could not load that order.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const submitReturn = async () => {
+    if (!summary || !selectedLines.length || saving) return;
+    setError("");
+    const selections = selectedLines.map((line) => ({
+      line,
+      quantity: Math.floor(Number(selectedReturnQuantities[line.id])),
+    }));
+    if (selections.some(({ quantity }) => !Number.isFinite(quantity) || quantity < 1)) return setError("Every selected return quantity must be at least 1.");
+    if (selections.some(({ line, quantity }) => quantity > line.remainingEligible)) return setError("A return quantity cannot exceed the remaining eligible quantity.");
+    if (!reason) return setError("Select a return reason.");
+    if (reason === "Other" && !description.trim()) return setError("Please provide a description for the selected return reason.");
+    if (refundMethod === "Card" && settlementStatus === "Completed" && !refundReference.trim()) return setError("Enter the card refund reference before marking the refund completed.");
+    if (refundMethod === "Cash" && settlementStatus === "Completed" && parseMoneyValue(cashAmount) < refundAmount) return setError("Cash amount handed back must cover the refund amount.");
+    if (summarySource === "local") return setError("This order is only available in this browser's local cache. Sync it to live order storage before recording a real return.");
+    const itemCount = selections.reduce((total, selection) => total + selection.quantity, 0);
+    const confirmMessage = `Confirm ${itemCount} item return${itemCount === 1 ? "" : "s"} across ${selections.length} selected product${selections.length === 1 ? "" : "s"} for ${summary.order.id} and record ${formatAdminCurrency(refundAmount)} ${settlementStatus === "Completed" ? "refund paid" : "refund pending"}?`;
+    if (!window.confirm(confirmMessage)) return;
+    setSaving(true);
+    setError("");
+    setMessage("");
+    const recordedReturns: WalkInReturnRecord[] = [];
+    let latestSummary: ReturnOrderSummary | null = summary;
+    try {
+      for (const [index, selection] of selections.entries()) {
+        const response = await adminApiFetch("/admin/returns", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            orderId: summary.order.id,
+            orderItemId: selection.line.id,
+            quantity: selection.quantity,
+            reason,
+            description,
+            damaged,
+            refundMethod,
+            refundReference,
+            settlementStatus,
+            cashAmount: parseMoneyValue(cashAmount),
+            staffMember,
+            clientRequestId: `walk-in-${summary.order.id}-${selection.line.id}-${Date.now()}-${index}`,
+          }),
+        });
+        const result = await response.json() as { record?: WalkInReturnRecord; summary?: ReturnOrderSummary; error?: string };
+        if (!response.ok || !result.record || !result.summary) throw new Error(result.error || "Could not process the selected returns.");
+        recordedReturns.push(result.record);
+        latestSummary = result.summary;
+      }
+      setSummary(null);
+      setSummarySource("");
+      setOrderId("");
+      setSelectedReturnQuantities({});
+      setReason("");
+      setDescription("");
+      setDamaged(false);
+      setRefundMethod("Cash");
+      setSettlementStatus("Completed");
+      setRefundReference("");
+      setCashAmount("");
+      setStaffMember("Admin staff");
+      setAllReturnHistory((current) => [...recordedReturns, ...current.filter((record) => !recordedReturns.some((saved) => saved.id === record.id))]);
+      setMessage(`${recordedReturns.length} return${recordedReturns.length === 1 ? "" : "s"} recorded. Refund status: ${recordedReturns[0]?.refundStatus || "updated"}.`);
+      onNotify(`${recordedReturns.length} return${recordedReturns.length === 1 ? "" : "s"} recorded`);
+      window.dispatchEvent(new Event("fanzzy-products-updated"));
+      window.dispatchEvent(new Event("fanzzy-product-damages-updated"));
+      window.dispatchEvent(new Event("fanzzy-orders-updated"));
+      window.dispatchEvent(new Event("fanzzy-walk-in-returns-updated"));
+    } catch (saveError) {
+      if (recordedReturns.length) {
+        setSummary(latestSummary);
+        setSelectedReturnQuantities({});
+        setAllReturnHistory((current) => [...recordedReturns, ...current.filter((record) => !recordedReturns.some((saved) => saved.id === record.id))]);
+        setMessage(`${recordedReturns.length} selected return${recordedReturns.length === 1 ? "" : "s"} were recorded before the remaining selection failed.`);
+        window.dispatchEvent(new Event("fanzzy-products-updated"));
+        window.dispatchEvent(new Event("fanzzy-product-damages-updated"));
+        window.dispatchEvent(new Event("fanzzy-orders-updated"));
+        window.dispatchEvent(new Event("fanzzy-walk-in-returns-updated"));
+      }
+      setError(saveError instanceof Error ? saveError.message : "Could not process the return.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className={embedded ? "module-workspace walk-in-returns-workspace pos-refunds-embedded" : "panel module-workspace walk-in-returns-workspace"}>
+      {!embedded && <div className="module-workspace-head">
+        <div>
+          <p className="eyebrow">POS REFUNDS</p>
+          <h2>POS returns &amp; refunds</h2>
+          <p>Enter a POS sale ID, select the exact item or variant, and record the in-store refund.</p>
+        </div>
+        {summary && <div className="module-summary return-module-summary"><span><i className="status-light" />{summary.lines.filter((line) => line.remainingEligible > 0).length} eligible lines</span><strong>{formatAdminCurrency(summary.returns.reduce((sum, record) => sum + record.refundAmount, 0))}</strong></div>}
+      </div>}
+
+      <form className="return-search-panel" onSubmit={(event) => void findOrder(event)}>
+        <label>POS sale ID<input value={orderId} onChange={(event) => setOrderId(event.target.value)} placeholder="#FZ-POS-..." autoComplete="off" /></label>
+        <button className="module-primary" type="submit" disabled={loading}>{loading ? "Finding…" : "Find POS sale"}</button>
+      </form>
+
+      {error && !summary && <p className="return-alert return-alert-error" role="alert">{error}</p>}
+      {message && !summary && <p className="return-alert return-alert-success" role="status">{message}</p>}
+      {loading && <div className="refund-request-empty">Loading order details…</div>}
+
+      {summary && !loading && <>
+        <section className="return-order-card">
+          <div className="return-order-heading">
+            <div><p className="eyebrow">ORIGINAL ORDER</p><h3>{summary.order.id}</h3><span>{summary.order.date || summary.order.createdAt || "Date unavailable"}</span></div>
+            <strong>{summary.order.total || "₹0"}</strong>
+          </div>
+          <dl className="return-order-details">
+            <div><dt>Customer</dt><dd>{summary.order.customerName || "Not provided"}</dd></div>
+            <div><dt>Contact</dt><dd>{summary.order.userPhone || summary.order.phone || summary.order.email || summary.order.userEmail || "Not provided"}</dd></div>
+            <div><dt>Order status</dt><dd>{summary.order.returnStatus ? "Refunded" : summary.order.status || "Unknown"}</dd></div>
+            <div><dt>Payment</dt><dd>{summary.order.paymentStatus || "Unknown"} · {summary.order.posPaymentMethod ? `POS ${summary.order.posPaymentMethod}` : summary.order.paymentMethod || "Online"}</dd></div>
+            <div><dt>Discount</dt><dd>{summary.order.coupon ? `${summary.order.coupon} · ${formatAdminCurrency(summary.order.couponDiscount || 0)}` : "No coupon recorded"}</dd></div>
+          </dl>
+        </section>
+
+        <section className="return-products-panel">
+          <div className="report-detail-head">
+            <div><p className="eyebrow">ORDER PRODUCTS</p><h3>{allProductsRefunded ? "This order is already refunded" : "Select returned products"}</h3><span>{allProductsRefunded ? "No product is eligible for another return." : "Tick every product being returned. Returns cannot exceed the remaining eligible quantity."}</span></div>
+          </div>
+          {refundedProductCount > 0 && <p className="return-alert return-alert-error" role="status">{allProductsRefunded ? "This order is already refunded. No product can be returned again." : `${refundedProductCount} product${refundedProductCount === 1 ? " is" : "s are"} already refunded and cannot be returned again.`}</p>}
+          <div className="return-line-list">
+            {summary.lines.length ? summary.lines.map((line) => {
+              const selected = Object.prototype.hasOwnProperty.call(selectedReturnQuantities, line.id);
+              const eligible = line.remainingEligible > 0;
+              return <div className={`return-line-card${selected ? " active" : ""}${eligible ? "" : " is-disabled"}`} key={line.id} aria-disabled={!eligible}>
+                {line.image ? <img src={line.image} alt="" /> : <span className="admin-order-item-placeholder" aria-hidden="true">✦</span>}
+                <span><strong>{line.productName}</strong><small>{line.sku}{line.variantName ? ` · ${line.variantName}` : ""}{line.size ? ` · Size ${line.size}` : ""}</small>{line.promotionLabel && <small>{line.promotionLabel}</small>}<label><input type="checkbox" checked={selected} disabled={!eligible} onChange={(event) => setSelectedReturnQuantities((current) => { const next = { ...current }; if (event.target.checked) next[line.id] = "1"; else delete next[line.id]; return next; })} /> Select for return</label></span>
+                <b>{line.quantity} bought</b>
+                <em>{line.previouslyReturned > 0 ? (line.remainingEligible > 0 ? `${line.previouslyReturned} refunded · ${line.remainingEligible} still eligible` : "Already refunded") : `${line.remainingEligible} eligible`}</em>
+                <strong>{formatAdminCurrency(line.lineTotal)}</strong>
+              </div>;
+            }) : <p className="refund-request-empty">This order has no saved product lines.</p>}
+          </div>
+        </section>
+
+        {selectedLines.length > 0 && <section className="return-form-panel">
+          <div className="report-detail-head">
+            <div><p className="eyebrow">RETURN DETAILS</p><h3>{selectedLines.length} product{selectedLines.length === 1 ? "" : "s"} selected</h3><span>Set the return quantity for every selected product.</span></div>
+            <strong>{formatAdminCurrency(refundAmount)}</strong>
+          </div>
+          <div className="return-form-grid">
+            {selectedLines.map((line) => <label key={line.id}>{line.productName} · Return quantity<input type="number" min="1" max={line.remainingEligible} value={selectedReturnQuantities[line.id] || "1"} onChange={(event) => setSelectedReturnQuantities((current) => ({ ...current, [line.id]: event.target.value }))} onWheel={(event) => event.currentTarget.blur()} /></label>)}
+            <label>Return reason<select value={reason} onChange={(event) => { const next = event.target.value; setReason(next); setError(""); if (next !== "Other") setDescription(""); }}><option value="">Select reason</option>{returnReasons.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
+            {reason && <label className="return-form-wide">{reason === "Other" ? "Description (required for Other)" : "Description (optional)"}<textarea value={description} onChange={(event) => { setDescription(event.target.value); setError(""); }} placeholder={reason === "Other" ? "Describe why this item is being returned" : "Optional notes"} aria-required={reason === "Other"} /></label>}
+            <label className="return-check"><input type="checkbox" checked={damaged} onChange={(event) => setDamaged(event.target.checked)} /> Product is damaged<span>{damaged ? "Will not be added to sellable stock." : "Will be restocked after confirmation."}</span></label>
+            <label>Refund method<select value={refundMethod} onChange={(event) => { setRefundMethod(event.target.value as "Cash" | "UPI" | "Card"); setError(""); }}><option>Cash</option><option>UPI</option><option>Card</option></select></label>
+            <label>Refund status<select value={settlementStatus} onChange={(event) => setSettlementStatus(event.target.value as "Pending" | "Completed")} disabled={refundMethod === "Cash"}><option>Pending</option><option>Completed</option></select></label>
+            {refundMethod === "Cash" ? <label>Cash handed back<input value={cashAmount} onChange={(event) => setCashAmount(event.target.value)} placeholder={formatAdminCurrency(refundAmount)} /></label> : <label>{refundMethod === "UPI" ? "UPI refund reference (optional)" : "Card refund reference"}<input value={refundReference} onChange={(event) => { setRefundReference(event.target.value); setError(""); }} placeholder={refundMethod === "UPI" ? "UPI transaction reference" : "Card terminal reference"} /></label>}
+            <label>Staff member<input value={staffMember} onChange={(event) => setStaffMember(event.target.value)} /></label>
+          </div>
+          <div className="return-refund-summary">
+            <span><small>Selected products</small><strong>{selectedLines.map((line) => line.productName).join(", ")}</strong></span>
+            <span><small>Total quantity</small><strong>{selectedLines.reduce((total, line) => total + Math.max(0, Math.floor(Number(selectedReturnQuantities[line.id]) || 0)), 0)}</strong></span>
+            <span><small>Refund amount</small><strong>{formatAdminCurrency(refundAmount)}</strong></span>
+            <span><small>Inventory</small><strong>{damaged ? "Damaged record only" : "Restock exact item"}</strong></span>
+          </div>
+          {error && <p className="return-alert return-alert-error" role="alert">{error}</p>}
+          <div className="product-detail-actions">
+            <button className="module-primary" type="button" disabled={saving || !selectedLines.length} onClick={() => void submitReturn()}>{saving ? "Processing…" : "Confirm selected returns & refund"}</button>
+          </div>
+        </section>}
+
+        {message && <p className="return-alert return-alert-success" role="status">{message}</p>}
+        {error && !selectedLines.length && <p className="return-alert return-alert-error" role="alert">{error}</p>}
+        <section className="return-history-panel">
+          <div className="report-detail-head"><div><p className="eyebrow">RETURN HISTORY</p><h3>Previous returns for this order</h3><span>{orderReturns.length} record{orderReturns.length === 1 ? "" : "s"}</span></div></div>
+          {orderReturns.length ? <div className="return-history-list">{orderReturns.map((record) => <article key={record.id}><span><strong>{record.id}</strong><small>{record.productName}{record.variantName ? ` · ${record.variantName}` : ""}{record.size ? ` · Size ${record.size}` : ""}</small></span><span>{record.quantity} unit{record.quantity === 1 ? "" : "s"}</span><span>{record.reason}</span><span>{record.damaged ? "Damaged" : "Restocked"}</span><strong>{formatAdminCurrency(record.refundAmount)}</strong><i className={`status-pill ${record.refundStatus.toLowerCase().replace(/\s+/g, "-")}`}>{record.refundStatus}</i></article>)}</div> : <p className="refund-request-empty">No returns have been recorded for this order yet.</p>}
+        </section>
+      </>}
+      <section className="return-history-panel all-return-history-panel">
+        <div className="report-detail-head"><div><p className="eyebrow">ALL POS REFUNDS</p><h3>Walk-in refund history</h3><span>{allReturnHistory.length} record{allReturnHistory.length === 1 ? "" : "s"}</span></div></div>
+        {historyLoading ? <p className="refund-request-empty">Loading refund history…</p> : allReturnHistory.length ? <div className="return-history-list">{allReturnHistory.map((record) => <article key={record.id}><span><strong>{record.productName}</strong><small>{record.orderId} · {new Date(record.createdAt).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}</small><small>{record.staffMember}</small></span><span>{record.quantity} unit{record.quantity === 1 ? "" : "s"}</span><span>{record.refundMethod}{record.refundReference ? ` · ${record.refundReference}` : ""}</span><span>{record.damaged ? "Damaged" : "Restocked"}</span><strong>{formatAdminCurrency(record.refundAmount)}</strong><i className={`status-pill ${record.refundStatus.toLowerCase().replace(/\s+/g, "-")}`}>{record.refundStatus}</i></article>)}</div> : <p className="refund-request-empty">No walk-in refunds have been recorded yet.</p>}
+      </section>
+    </section>
+  );
+}
+
+function CancelledOrdersWorkspace({ onNotify }: { onNotify: (message: string) => void }) {
+  type CancellationRefundQueueItem = {
+    order: OrderRecord;
+    record?: CustomerCancellationRecord;
+  };
+  const [orders, setOrders] = useState<OrderRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [busyOrderId, setBusyOrderId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const loadCancelledOrders = async () => {
+      const remote = await fetchStoreOrders<OrderRecord>();
+      if (!active) return;
+      if (remote.error || !remote.data) {
+        setError("Cancelled orders could not be loaded.");
+        setLoading(false);
+        return;
+      }
+      setError("");
+      setOrders(
+        remote.data
+          .map(normalizeOrderRecordForDisplay)
+          .filter((order): order is OrderRecord => Boolean(order && needsCancellationRefund(order))),
+      );
       setLoading(false);
     };
-    const refresh = () => { void loadRequests().catch(() => { if (active) setLoading(false); }); };
-    void loadRequests().catch(() => { if (active) setLoading(false); });
-    const timer = window.setInterval(refresh, 5000);
-    const unsubscribe = subscribeToStoreSetting("refundRequests", refresh);
+    const refresh = () => { void loadCancelledOrders(); };
+    void loadCancelledOrders();
+    const timer = window.setInterval(refresh, 30_000);
+    const unsubscribe = subscribeToStoreSetting("orders", refresh);
     window.addEventListener("storage", refresh);
-    window.addEventListener("fanzzy-refund-requests-updated", refresh);
+    window.addEventListener("fanzzy-orders-updated", refresh);
     return () => {
       active = false;
       window.clearInterval(timer);
       unsubscribe();
       window.removeEventListener("storage", refresh);
+      window.removeEventListener("fanzzy-orders-updated", refresh);
+    };
+  }, []);
+
+  const refundQueue = useMemo<CancellationRefundQueueItem[]>(
+    () =>
+      orders
+        .flatMap((order) => {
+          const records = (order.cancellationRecords || []).filter(
+            (record) => record.refundStatus !== "Not applicable",
+          );
+          return records.length
+            ? records.map<CancellationRefundQueueItem>((record) => ({ order, record }))
+            : [{ order, record: undefined }];
+        })
+        .sort((left, right) =>
+          String(right.record?.createdAt || right.order.cancelledAt || right.order.createdAt || right.order.date).localeCompare(
+            String(left.record?.createdAt || left.order.cancelledAt || left.order.createdAt || left.order.date),
+          ),
+        ),
+    [orders],
+  );
+  const pendingRefunds = refundQueue.filter(
+    ({ order, record }) =>
+      record ? record.refundStatus !== "Completed" : !hasCompletedCancellationRefund(order),
+  );
+  const completedRefunds = refundQueue.filter(
+    ({ order, record }) =>
+      record ? record.refundStatus === "Completed" : hasCompletedCancellationRefund(order),
+  );
+  const pendingRefundAmount = pendingRefunds.reduce(
+    (total, { order, record }) =>
+      total +
+      (record?.refundAmount ??
+        (Number(order.total.replace(/[^0-9.]/g, "")) || 0)),
+    0,
+  );
+  const formatCancellationDate = (
+    order: OrderRecord,
+    record?: CustomerCancellationRecord,
+  ) => {
+    const value = record?.createdAt || order.cancelledAt || order.createdAt || order.date;
+    const date = new Date(value);
+    return Number.isNaN(date.getTime())
+      ? String(value)
+      : date.toLocaleString("en-IN", {
+          day: "2-digit",
+          month: "short",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+  };
+  const issueRazorpayRefund = async (
+    order: OrderRecord,
+    record?: CustomerCancellationRecord,
+  ) => {
+    const refundKey = `${order.id}:${record?.id || "legacy"}`;
+    if (busyOrderId || !order.razorpayPaymentId) return;
+    const amount = record?.refundAmount ?? Number(order.total.replace(/[^0-9.]/g, ""));
+    if (!window.confirm(`Issue a ${formatAdminCurrency(amount)} refund through Razorpay? This cannot be reversed.`)) {
+      return;
+    }
+    setBusyOrderId(refundKey);
+    try {
+      const response = await adminApiFetch("/admin/cancelled-order-refunds", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          orderId: order.id,
+          cancellationRecordId: record?.id,
+        }),
+      });
+      const result = await response.json() as {
+        order?: OrderRecord;
+        refundReference?: string;
+        providerStatus?: string;
+        error?: string;
+      };
+      if (!response.ok || !result.order) {
+        throw new Error(result.error || "Razorpay refund could not be issued.");
+      }
+      const updatedOrder = normalizeOrderRecordForDisplay(result.order);
+      if (updatedOrder) {
+        setOrders((current) => current.map((candidate) =>
+          candidate.id === updatedOrder.id ? updatedOrder : candidate,
+        ));
+      }
+      window.dispatchEvent(new Event("fanzzy-orders-updated"));
+      onNotify(`${order.id} refund issued through Razorpay${result.refundReference ? ` · ${result.refundReference}` : ""}.`);
+    } catch (refundError) {
+      onNotify(
+        refundError instanceof Error
+          ? refundError.message
+          : "Razorpay refund could not be issued.",
+      );
+    } finally {
+      setBusyOrderId(null);
+    }
+  };
+  const renderOrderCard = ({
+    order,
+    record,
+  }: {
+    order: OrderRecord;
+    record?: CustomerCancellationRecord;
+  }) => {
+    const refundKey = `${order.id}:${record?.id || "legacy"}`;
+    const refundCompleted = record
+      ? record.refundStatus === "Completed"
+      : hasCompletedCancellationRefund(order);
+    const selectedItems = record
+      ? record.itemIndexes
+          .map((index) => order.items?.[index])
+          .filter((item): item is OrderItem => Boolean(item))
+          .map((item) => item.productName || item.name)
+      : [];
+    return (
+      <article className="cancelled-order-card" key={refundKey}>
+        <div className="refund-request-card-head">
+          <div>
+            <strong>{order.id}</strong>
+            <small>
+              {formatCancellationDate(order, record)} · {order.customerName}
+            </small>
+          </div>
+          <span
+            className={`status-pill ${
+              refundCompleted ? "refunded" : "pending"
+            }`}
+          >
+            {refundCompleted ? "Refund completed" : "Refund pending"}
+          </span>
+        </div>
+        <div className="refund-request-details">
+          <div>
+            <small>Refund amount</small>
+            <strong>{record ? formatAdminCurrency(record.refundAmount) : order.total}</strong>
+            <span>Online payment · refund through Razorpay</span>
+          </div>
+          <div>
+            <small>Cancellation reason</small>
+            <strong>{record?.reason || order.cancellationReason || "Not recorded"}</strong>
+            <span>{record?.description || order.cancellationDescription || "Customer cancellation"}</span>
+          </div>
+        </div>
+        {record && (
+          <p className="cancelled-order-items">
+            {record.fullOrder ? "Full order cancellation" : "Selected items"}
+            {selectedItems.length ? ` · ${selectedItems.join(", ")}` : ""}
+          </p>
+        )}
+        {!refundCompleted && (
+          <div className="cancelled-order-refund-form">
+            <button
+              className="module-primary"
+              type="button"
+              disabled={busyOrderId !== null || !order.razorpayPaymentId}
+              onClick={() => void issueRazorpayRefund(order, record)}
+            >
+              {busyOrderId === refundKey
+                ? "Issuing refund…"
+                : `Issue refund ${record ? formatAdminCurrency(record.refundAmount) : order.total}`}
+            </button>
+          </div>
+        )}
+        {refundCompleted && (
+          <p className="cancelled-order-refund-record">
+            Refund recorded{record?.refundReference || order.refundReference ? ` · ${record?.refundReference || order.refundReference}` : ""}
+          </p>
+        )}
+      </article>
+    );
+  };
+
+  return (
+    <section className="panel module-workspace cancelled-orders-workspace">
+      <div className="module-workspace-head">
+        <div>
+          <p className="eyebrow">PAYMENTS &amp; CANCELLATIONS</p>
+          <h2>Cancelled orders</h2>
+          <p>
+            Issue refunds for cancelled online payments securely from this
+            page using Razorpay.
+          </p>
+        </div>
+        <div className="module-summary refund-request-summary">
+          <span>
+            <i className="status-light" />
+            {pendingRefunds.length} refund{pendingRefunds.length === 1 ? "" : "s"} pending
+          </span>
+          <span>{formatAdminCurrency(pendingRefundAmount)} to refund</span>
+        </div>
+      </div>
+      <div className="refund-request-notice">
+        <strong>Secure Razorpay refund</strong>
+        <span>
+          The saved original payment and cancellation amount are verified on
+          the server before Razorpay receives a refund request.
+        </span>
+      </div>
+      {error && <p className="return-alert return-alert-error">{error}</p>}
+      {loading ? (
+        <div className="refund-request-empty">Loading cancelled orders…</div>
+      ) : !refundQueue.length ? (
+        <div className="refund-request-empty">
+          <strong>No cancelled online payments</strong>
+          <span>Cancelled online payments awaiting a refund will appear here automatically.</span>
+        </div>
+      ) : (
+        <>
+          <section className="cancelled-order-section">
+            <div className="report-detail-head">
+              <div>
+                <p className="eyebrow">ONLINE PAYMENT REFUNDS</p>
+                <h3>Refund queue</h3>
+                <span>
+                  {pendingRefunds.length} awaiting refund · {completedRefunds.length} completed
+                </span>
+              </div>
+            </div>
+            {refundQueue.length ? (
+              <div className="refund-request-list">
+                {refundQueue.map(renderOrderCard)}
+              </div>
+            ) : (
+              <p className="refund-request-empty">
+                No cancelled online payments need a refund.
+              </p>
+            )}
+          </section>
+        </>
+      )}
+    </section>
+  );
+}
+
+function RefundRequestsWorkspace({ onNotify }: { onNotify: (message: string) => void }) {
+  const [requests, setRequests] = useState<RefundRequest[]>([]);
+  const [onlineOrders, setOnlineOrders] = useState<OrderRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [customerType, setCustomerType] = useState<"online" | "walk-in">("online");
+  const requestedRefundCount = requests.filter((request) => request.status === "Requested").length;
+  const refundItemQuantities = (
+    request: RefundRequest,
+    choices: ReturnType<typeof onlineRefundChoices>,
+  ) => {
+    const customerSelections = Object.fromEntries(
+      (request.requestedItems?.length
+        ? request.requestedItems
+        : (request.requestedItemIds || []).map((orderItemId) => ({
+            orderItemId,
+            quantity: 1,
+          }))
+      )
+        .flatMap((item) => {
+          const choice = choices.find(
+            (candidate) => candidate.id === item.orderItemId,
+          );
+          const quantity = Math.floor(Number(item.quantity));
+          return choice && quantity >= 1 && quantity <= choice.quantity
+            ? [[choice.id, String(quantity)] as const]
+            : [];
+        }),
+    );
+    if (Object.keys(customerSelections).length) return customerSelections;
+    return Object.fromEntries(
+      choices.map((choice) => [choice.id, String(choice.quantity)]),
+    );
+  };
+
+  useEffect(() => {
+    let active = true;
+    const updateRequestsIfChanged = (next: RefundRequest[]) => {
+      setRequests((current) => JSON.stringify(current) === JSON.stringify(next) ? current : next);
+    };
+    const updateOnlineOrdersIfChanged = (next: OrderRecord[]) => {
+      setOnlineOrders((current) => JSON.stringify(current) === JSON.stringify(next) ? current : next);
+    };
+    const loadRequests = async () => {
+      const [remote, ordersRemote] = await Promise.all([fetchStoreSetting("refundRequests"), fetchStoreOrders<OrderRecord>()]);
+      if (!active) return;
+      const localRequests = parseRefundRequests(window.localStorage.getItem("fanzzy-refund-requests"));
+      const remoteRequests = parseRefundRequests(remote.value);
+      updateRequestsIfChanged(remote.error ? localRequests : remoteRequests);
+      updateOnlineOrdersIfChanged(ordersRemote.data?.filter((order) => !order.posSale) || []);
+      setLoading(false);
+    };
+    // The server is authoritative. Re-applying a stale local cache before
+    // each one-second poll changed the number of cards for a moment, which
+    // visibly pushed the page up and down while an operator was scrolling.
+    const refresh = () => { void loadRequests().catch(() => { if (active) setLoading(false); }); };
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === "fanzzy-refund-requests") refresh();
+    };
+    const channel = typeof BroadcastChannel !== "undefined"
+      ? new BroadcastChannel("fanzzy-refund-requests")
+      : null;
+    channel?.addEventListener("message", (event) => {
+      const incoming = event.data && typeof event.data === "object" && Array.isArray(event.data.requests)
+        ? parseRefundRequests(JSON.stringify(event.data.requests))
+        : [];
+      if (incoming.length) updateRequestsIfChanged(incoming);
+      refresh();
+    });
+    void loadRequests().catch(() => { if (active) setLoading(false); });
+    // The local preview has no Supabase realtime server. Keep a short fallback
+    // so a request created in another browser tab or device appears without a
+    // manual reload even if BroadcastChannel is unavailable.
+    const timer = window.setInterval(refresh, 1000);
+    const unsubscribe = subscribeToStoreSetting("refundRequests", refresh);
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("fanzzy-refund-requests-updated", refresh);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      unsubscribe();
+      channel?.close();
+      window.removeEventListener("storage", onStorage);
       window.removeEventListener("fanzzy-refund-requests-updated", refresh);
     };
   }, []);
 
   const updateStatus = async (request: RefundRequest, status: RefundRequestStatus) => {
     if (busyId) return;
+    const localTestOrder = onlineOrders.find((order) => order.id === request.orderId)?.localTestOrder === true;
+    if (
+      status === "Refunded" &&
+      !window.confirm(localTestOrder
+        ? `Complete the local test refund for ${request.orderId}? This simulates the app status and stock update only; Razorpay will not be contacted.`
+        : `Issue the calculated refund for ${request.orderId} through Razorpay? This cannot be reversed.`)
+    ) {
+      return;
+    }
     setBusyId(request.id);
     try {
+      if (status === "Refunded") {
+        const response = await adminApiFetch("/admin/online-refunds", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ requestId: request.id }),
+        });
+        const result = await response.json() as {
+          error?: string;
+          requests?: RefundRequest[];
+          orders?: OrderRecord[];
+          refundReference?: string;
+        };
+        if (!response.ok) throw new Error(result.error || "Refund request could not be completed.");
+        const next = Array.isArray(result.requests)
+          ? parseRefundRequests(JSON.stringify(result.requests))
+          : [];
+        const updatedOrders = Array.isArray(result.orders) ? result.orders : [];
+        if (!next.length || !updatedOrders.length) throw new Error("Refund was completed, but the updated data could not be loaded.");
+
+        window.localStorage.setItem("fanzzy-refund-requests", JSON.stringify(next));
+        window.localStorage.setItem("fanzzy-orders", JSON.stringify(updatedOrders));
+        setRequests(next);
+        setOnlineOrders(updatedOrders.filter((order) => !order.posSale));
+        window.dispatchEvent(new Event("fanzzy-refund-requests-updated"));
+        window.dispatchEvent(new Event("fanzzy-orders-updated"));
+        window.dispatchEvent(new Event("fanzzy-products-updated"));
+        onNotify(localTestOrder
+          ? `${request.id} completed as a local test refund; stock restored`
+          : `${request.id} refunded through Razorpay${result.refundReference ? ` · ${result.refundReference}` : ""}; stock restored`);
+        return;
+      }
       const remote = await fetchStoreSetting("refundRequests");
       const current = parseRefundRequests(remote.value || window.localStorage.getItem("fanzzy-refund-requests"));
       const next = current.map((item) => item.id === request.id
-        ? { ...item, status, updatedAt: new Date().toISOString() }
+        ? {
+          ...item,
+          status,
+          updatedAt: new Date().toISOString(),
+        }
         : item);
       const error = await saveStoreSetting("refundRequests", JSON.stringify(next));
       if (error) throw new Error("Refund request could not be updated.");
@@ -5945,18 +7099,68 @@ function RefundRequestsWorkspace({ onNotify }: { onNotify: (message: string) => 
     }
   };
 
+  const renderOnlineRequest = (request: RefundRequest) => {
+    const order = onlineOrders.find((candidate) => candidate.id === request.orderId);
+    const razorpayPaymentId = order?.razorpayPaymentId?.trim() || "";
+    const localTestOrder = order?.localTestOrder === true;
+    const choices = order ? onlineRefundChoices(order) : [];
+    const quantities = refundItemQuantities(request, choices);
+    const requestedChoices = choices.filter((choice) => Boolean(quantities[choice.id]));
+    let preview: OnlineRefundSelection[] | null = [];
+    if (order && Object.keys(quantities).length) {
+      try { preview = selectOnlineRefundItems(order, Object.entries(quantities).map(([orderItemId, quantity]) => ({ orderItemId, quantity: Number(quantity) }))); } catch { preview = null; }
+    }
+    const savedSelections = request.selections?.length ? request.selections : request.selection ? [request.selection] : [];
+
+    return <article className="refund-request-card" key={request.id}>
+      <div className="refund-request-card-head"><div><strong>{request.orderId}</strong><small>{request.id} · {new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(request.createdAt))}</small></div><span className={`status-pill ${request.status.toLowerCase()}`}>{request.status}</span></div>
+      <div className="refund-request-details">
+        <div><small>Customer</small><strong>{request.customerName}</strong><span>{request.phone || "Phone not provided"}</span></div>
+        <div><small>{savedSelections.length ? "Selected refund" : "Original order total"}</small><strong>{request.amount}</strong><span>{request.reason}</span></div>
+      </div>
+      {request.status === "Requested" && <div className="online-refund-item-picker">
+        <p>Customer-selected products and quantities are shown below. Review the request, then record the refund.</p>
+        {order && requestedChoices.length ? <div className="online-refund-line-picker">{requestedChoices.map((choice) => {
+          const quantity = quantities[choice.id] || "";
+          return <div className="online-refund-line" key={choice.id}>
+            <span>{choice.productName}{choice.variantName ? ` · ${choice.variantName}` : ""}{choice.size ? ` · Size ${choice.size}` : ""} · {choice.quantity} bought</span>
+            <strong>{quantity} requested</strong>
+          </div>;
+        })}</div> : <p className="return-alert return-alert-error">Customer-selected products could not be loaded. Approval is unavailable.</p>}
+        {preview?.length ? <p className="online-refund-preview">Refund for {preview.map((selection) => `${selection.quantity} × ${selection.productName}`).join(", ")}: <strong>{formatAdminCurrency(preview.reduce((total, selection) => total + selection.refundAmount, 0))}</strong></p> : null}
+        {razorpayPaymentId ? <p className="online-refund-payment-id">Razorpay payment ID: <code>{razorpayPaymentId}</code></p> : localTestOrder ? <p className="online-refund-preview">Local test order: complete a simulated refund to verify return status and stock. Razorpay will not be contacted.</p> : <p className="return-alert return-alert-error">The original Razorpay payment ID is missing, so this refund cannot be sent through Razorpay.</p>}
+      </div>}
+      {savedSelections.length > 0 && <p className="online-refund-preview">Selected return: {savedSelections.map((selection) => `${selection.quantity} × ${selection.productName}${selection.variantName ? ` · ${selection.variantName}` : ""}${selection.size ? ` · Size ${selection.size}` : ""}`).join(", ")} · {formatAdminCurrency(savedSelections.reduce((total, selection) => total + selection.refundAmount, 0))}</p>}
+      <div className="refund-request-actions">
+        {request.status === "Requested" && <><button className="module-primary" type="button" disabled={busyId !== null || !preview?.length || (!razorpayPaymentId && !localTestOrder)} onClick={() => void updateStatus(request, "Refunded")}>{busyId === request.id ? "Issuing refund…" : localTestOrder ? "Complete local test refund" : "Issue refund in Razorpay"}</button><button className="module-secondary" type="button" disabled={busyId !== null} onClick={() => void updateStatus(request, "Rejected")}>Reject</button></>}
+        {request.status === "Approved" && <button className="module-primary" type="button" disabled={busyId !== null || (!razorpayPaymentId && !localTestOrder)} onClick={() => void updateStatus(request, "Refunded")}>{busyId === request.id ? "Issuing refund…" : localTestOrder ? "Complete local test refund" : "Issue refund in Razorpay"}</button>}
+        {request.status === "Rejected" && <span className="refund-request-closed">No further action</span>}
+        {request.status === "Refunded" && <span className="refund-request-closed">Refund completed</span>}
+      </div>
+    </article>;
+  };
+
   return (
     <section className="panel module-workspace refund-requests-workspace">
       <div className="module-workspace-head">
         <div>
           <p className="eyebrow">CUSTOMER CARE</p>
           <h2>Refund requests</h2>
-          <p>Review refund requests from delivered orders and record the decision here.</p>
+          <p>Choose the customer type, then review online requests or process an in-store POS refund.</p>
         </div>
-        <div className="module-summary refund-request-summary"><span><i className="status-light" />{requests.filter((request) => request.status === "Requested").length} awaiting review</span><span>{requests.length} total request{requests.length === 1 ? "" : "s"}</span></div>
+        <div className="module-summary refund-request-summary"><span><i className="status-light" />{requestedRefundCount} awaiting review</span><span>{requests.length} total request{requests.length === 1 ? "" : "s"}</span></div>
       </div>
-      <div className="refund-request-notice"><strong>Manual refund step</strong><span>Approving records your decision only. Complete the actual refund in your payment provider, then mark the request as refunded.</span></div>
-      {loading ? <div className="refund-request-empty">Loading refund requests…</div> : requests.length ? <div className="refund-request-list">{requests.map((request) => <article className="refund-request-card" key={request.id}><div className="refund-request-card-head"><div><strong>{request.orderId}</strong><small>{request.id} · {new Intl.DateTimeFormat("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(request.createdAt))}</small></div><span className={`status-pill ${request.status.toLowerCase()}`}>{request.status}</span></div><div className="refund-request-details"><div><small>Customer</small><strong>{request.customerName}</strong><span>{request.phone || "Phone not provided"}</span></div><div><small>Refund amount</small><strong>{request.amount}</strong><span>{request.reason}</span></div></div><div className="refund-request-actions">{request.status === "Requested" && <><button className="module-primary" type="button" disabled={busyId !== null} onClick={() => void updateStatus(request, "Approved")}>Approve</button><button className="module-secondary" type="button" disabled={busyId !== null} onClick={() => void updateStatus(request, "Rejected")}>Reject</button></>}{request.status === "Approved" && <button className="module-primary" type="button" disabled={busyId !== null} onClick={() => void updateStatus(request, "Refunded")}>Mark refunded</button>}{request.status === "Rejected" && <span className="refund-request-closed">No further action</span>}{request.status === "Refunded" && <span className="refund-request-closed">Refund completed</span>}</div></article>)}</div> : <div className="refund-request-empty"><strong>No refund requests yet</strong><span>Requests from delivered customer orders will appear here.</span></div>}
+      <div className="refund-customer-options" role="tablist" aria-label="Customer type">
+        <button className={customerType === "online" ? "module-primary" : "module-secondary"} type="button" role="tab" aria-selected={customerType === "online"} onClick={() => setCustomerType("online")}>Online customer{requestedRefundCount ? ` · ${requestedRefundCount} pending` : ""}</button>
+        <button className={customerType === "walk-in" ? "module-primary" : "module-secondary"} type="button" role="tab" aria-selected={customerType === "walk-in"} onClick={() => setCustomerType("walk-in")}>Walk-in customer</button>
+      </div>
+      {customerType === "walk-in" ? <>
+        <div className="refund-request-notice"><strong>POS refund</strong><span>Search for the original POS sale, then record the returned item, inventory outcome, and refund payment details.</span></div>
+        <PosRefundsWorkspace onNotify={onNotify} embedded />
+      </> : <>
+        <div className="refund-request-notice"><strong>Secure Razorpay refund</strong><span>The selected item amount and original payment are verified on the server. Issuing the refund sends it to Razorpay, records its reference, and restores stock.</span></div>
+        {loading ? <div className="refund-request-empty">Loading refund requests…</div> : requests.length ? <div className="refund-request-list">{requests.map(renderOnlineRequest)}</div> : <div className="refund-request-empty"><strong>No refund requests yet</strong><span>Requests from delivered customer orders will appear here.</span></div>}
+      </>}
     </section>
   );
 }
@@ -5977,32 +7181,57 @@ function OrdersWorkspace({
   const [phone, setPhone] = useState("");
   const [lastOrdersSync, setLastOrdersSync] = useState<Date | null>(null);
   const [ordersSyncError, setOrdersSyncError] = useState("");
+  const [refundRequests, setRefundRequests] = useState<RefundRequest[]>([]);
   const [catalogProducts, setCatalogProducts] = useState<Array<{ id: string; name: string; sku: string; category: string; stock: number; price: number; cost: number; status: string; image: string; variants: ProductVariant[] }>>([]);
   const [orderItemDraft, setOrderItemDraft] = useState({ productId: "", variantName: "", quantity: "1", price: "" });
   const [shipmentWeight, setShipmentWeight] = useState("");
   const [shipmentWeightError, setShipmentWeightError] = useState("");
   const [shipmentCreating, setShipmentCreating] = useState(false);
   const [delhiveryPickupLocations, setDelhiveryPickupLocations] = useState<string[]>([]);
+  const [delhiveryConfigError, setDelhiveryConfigError] = useState("");
+  const [delhiveryLocationLabels, setDelhiveryLocationLabels] = useState<Record<string, string>>({});
+  const [delhiveryLocationsLoading, setDelhiveryLocationsLoading] = useState(true);
+  const [delhiveryConfigRevision, setDelhiveryConfigRevision] = useState(0);
   const [shipmentPickupLocation, setShipmentPickupLocation] = useState("");
   const [shipmentPickupTime, setShipmentPickupTime] = useState("");
+  const selectedOrderRefunds = selectedOrder ? refundRequests.filter((request) => request.orderId === selectedOrder.id && request.status === "Refunded") : [];
 
   useEffect(() => {
     let active = true;
+    const loadRefundHistory = async () => {
+      const remote = await fetchStoreSetting("refundRequests");
+      const stored = remote.value || window.localStorage.getItem("fanzzy-refund-requests");
+      if (active) setRefundRequests(parseRefundRequests(stored));
+    };
+    const refresh = () => { void loadRefundHistory().catch(() => undefined); };
+    void loadRefundHistory().catch(() => undefined);
+    const unsubscribe = subscribeToStoreSetting("refundRequests", refresh);
+    window.addEventListener("storage", refresh);
+    window.addEventListener("fanzzy-refund-requests-updated", refresh);
+    return () => { active = false; unsubscribe(); window.removeEventListener("storage", refresh); window.removeEventListener("fanzzy-refund-requests-updated", refresh); };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    setDelhiveryLocationsLoading(true);
     void adminApiFetch("/admin/delhivery/config", { cache: "no-store" })
       .then(async (response) => {
-        const result = await response.json() as { pickupLocations?: string[]; defaultPickupTime?: string; error?: string };
+        const result = await response.json() as { pickupLocations?: string[]; pickupLocationDetails?: Array<{ name: string; address: string; city: string; state: string; pincode: string }>; defaultPickupTime?: string; configurationError?: string; error?: string };
         if (!response.ok) throw new Error(result.error || "Could not load Delhivery pickup settings");
         if (!active) return;
         const locations = Array.isArray(result.pickupLocations) ? result.pickupLocations.filter(Boolean) : [];
         setDelhiveryPickupLocations(locations);
-        setShipmentPickupLocation((current) => current || locations[0] || "");
+        setDelhiveryLocationLabels(Object.fromEntries((result.pickupLocationDetails || []).map(location => [location.name, [location.name, [location.address, location.city, location.state, location.pincode].filter(Boolean).join(", ")].filter(Boolean).join(" — ")])));
+        setDelhiveryConfigError(result.configurationError || (locations.length ? "" : "No Delhivery pickup warehouse is configured. Add the registered warehouse in the server shipping settings."));
+        setShipmentPickupLocation((current) => locations.includes(current) ? current : locations[0] || "");
         setShipmentPickupTime((current) => current || result.defaultPickupTime || "11:00");
       })
       .catch((error) => {
-        if (active) setShipmentWeightError(error instanceof Error ? error.message : "Could not load Delhivery pickup settings");
-      });
+        if (active) setDelhiveryConfigError(error instanceof Error ? error.message : "Could not load Delhivery pickup settings");
+      })
+      .finally(() => { if (active) setDelhiveryLocationsLoading(false); });
     return () => { active = false; };
-  }, []);
+  }, [delhiveryConfigRevision]);
 
   useEffect(() => {
     let syncInFlight = false;
@@ -6015,15 +7244,17 @@ function OrdersWorkspace({
         await adminApiFetch("/razorpay/sync-payments", { method: "POST" }).catch(() => undefined);
       }
       const localOrders: OrderRecord[] = [];
-      try {
-        const stored = window.localStorage.getItem("fanzzy-orders");
-        const parsed = stored ? JSON.parse(stored) as OrderRecord[] : [];
-        if (Array.isArray(parsed)) parsed.forEach((order) => {
-          const normalized = normalizeOrderRecordForDisplay(order);
-          if (normalized && !isDemoOrder(normalized) && hasConfirmedPayment(normalized)) localOrders.push(normalized);
-        });
-      } catch {
-        window.localStorage.removeItem("fanzzy-orders");
+      if (!isLocalTestPreview) {
+        try {
+          const stored = window.localStorage.getItem("fanzzy-orders");
+          const parsed = stored ? JSON.parse(stored) as OrderRecord[] : [];
+          if (Array.isArray(parsed)) parsed.forEach((order) => {
+            const normalized = normalizeOrderRecordForDisplay(order);
+            if (normalized && !isDemoOrder(normalized) && hasConfirmedPayment(normalized)) localOrders.push(normalized);
+          });
+        } catch {
+          window.localStorage.removeItem("fanzzy-orders");
+        }
       }
       // Show locally cached orders only while the first live request is loading.
       // Do not replace an already rendered list on every polling cycle.
@@ -6097,7 +7328,7 @@ function OrdersWorkspace({
     };
   }, []);
 
-  const delhiveryOrderKey = useMemo(() => orders.filter((order) => order.delhiveryAwb).map((order) => `${order.id}::${order.delhiveryAwb}`).sort().join("|"), [orders]);
+  const delhiveryOrderKey = useMemo(() => orders.filter((order) => orderNeedsDelivery(order) && order.delhiveryAwb).map((order) => `${order.id}::${order.delhiveryAwb}`).sort().join("|"), [orders]);
 
   useEffect(() => {
     if (!delhiveryOrderKey) return;
@@ -6139,8 +7370,8 @@ function OrdersWorkspace({
     if (!selectedOrder) return;
     const refreshed = orders.find((order) => order.id === selectedOrder.id);
     if (!refreshed) return;
-    const selectedTracking = [selectedOrder.delhiveryAwb, selectedOrder.delhiveryShipmentStatus, selectedOrder.delhiveryWeightGrams, selectedOrder.delhiveryLiveStatus, selectedOrder.delhiveryLastTrackedAt].join("|");
-    const refreshedTracking = [refreshed.delhiveryAwb, refreshed.delhiveryShipmentStatus, refreshed.delhiveryWeightGrams, refreshed.delhiveryLiveStatus, refreshed.delhiveryLastTrackedAt].join("|");
+    const selectedTracking = [selectedOrder.status, selectedOrder.cancelledAt, selectedOrder.cancellationReason, selectedOrder.cancellationDescription, JSON.stringify(selectedOrder.cancellationRecords), selectedOrder.refundStatus, selectedOrder.delhiveryAwb, selectedOrder.delhiveryShipmentStatus, selectedOrder.delhiveryWeightGrams, selectedOrder.delhiveryLiveStatus, selectedOrder.delhiveryLastTrackedAt].join("|");
+    const refreshedTracking = [refreshed.status, refreshed.cancelledAt, refreshed.cancellationReason, refreshed.cancellationDescription, JSON.stringify(refreshed.cancellationRecords), refreshed.refundStatus, refreshed.delhiveryAwb, refreshed.delhiveryShipmentStatus, refreshed.delhiveryWeightGrams, refreshed.delhiveryLiveStatus, refreshed.delhiveryLastTrackedAt].join("|");
     if (selectedTracking !== refreshedTracking) setSelectedOrder(refreshed);
   }, [orders, selectedOrder?.id]);
 
@@ -6178,7 +7409,7 @@ function OrdersWorkspace({
       .filter((order) => {
         const orderDate = String(order.date || "").slice(0, 10);
         const matchesDate = orderDate >= from && orderDate <= to;
-        const matchesStatus = statusFilter === "all" || order.status === statusFilter;
+        const matchesStatus = statusFilter === "all" || orderListStatus(order) === statusFilter;
         return matchesDate && matchesStatus;
       })
       // Keep a deterministic newest-first order so polling cannot reshuffle
@@ -6267,7 +7498,7 @@ function OrdersWorkspace({
     }
   };
   const createDelhiveryShipment = async () => {
-    if (!selectedOrder || shipmentCreating) return;
+    if (!selectedOrder || !orderNeedsDelivery(selectedOrder) || shipmentCreating) return;
     const weightGrams = Math.round(Number(shipmentWeight));
     if (!Number.isFinite(weightGrams) || weightGrams < 500 || weightGrams > 30_000) {
       setShipmentWeightError("Enter a packed parcel weight between 500 and 30,000 grams.");
@@ -6436,6 +7667,7 @@ function OrdersWorkspace({
             <option value="Packed">Packed</option>
             <option value="Shipped">Shipped</option>
             <option value="Delivered">Delivered</option>
+            <option value="Refunded">Refunded</option>
             <option value="Cancelled">Cancelled</option>
           </select>
         </label>
@@ -6469,11 +7701,11 @@ function OrdersWorkspace({
               <small className="order-list-products">{Array.isArray(order.items) ? order.items.map((rawItem, itemIndex) => { const item = normalizeOrderItemForDisplay(rawItem, itemIndex); return getOrderedItemDisplayName(item, getOrderedProduct(item)); }).join(", ") || "No saved item details" : "No saved item details"}</small>
                <small className="order-list-products">Payment: {orderPaymentLabel(order)}{order.paymentMethod === "cod" ? " · Pay on delivery" : order.paymentStatus === "paid" ? " · Paid" : " · Pending"} · Inventory: {order.inventoryAdjusted === true ? "Updated" : "Pending"}</small>
                <small className="order-list-products">Fulfilment: {orderFulfillmentLabel(order)}</small>
-              {order.fulfillmentMethod !== "pickup" && <small className="order-list-products">Delhivery: {order.delhiveryLiveStatus || (order.delhiveryAwb ? "Shipment created" : "Awaiting shipment")}</small>}
-              {order.fulfillmentMethod !== "pickup" && order.delhiveryAwb && <small className="order-list-products">Pickup: {order.delhiveryPickupRequestStatus === "created" ? `Scheduled${order.delhiveryPickupRequestId ? ` · ${order.delhiveryPickupRequestId}` : ""}` : order.delhiveryPickupRequestStatus === "covered" ? "Covered by an existing pickup" : order.delhiveryPickupRequestStatus === "pending" ? "Request in progress" : order.delhiveryPickupRequestStatus === "failed" ? "Pickup request failed" : "Waiting to schedule"}</small>}
+              {orderNeedsDelivery(order) && <small className="order-list-products">Delhivery: {order.delhiveryLiveStatus || (order.delhiveryAwb ? "Shipment created" : "Awaiting shipment")}</small>}
+              {orderNeedsDelivery(order) && order.delhiveryAwb && <small className="order-list-products">Pickup: {order.delhiveryPickupRequestStatus === "created" ? `Scheduled${order.delhiveryPickupRequestId ? ` · ${order.delhiveryPickupRequestId}` : ""}` : order.delhiveryPickupRequestStatus === "covered" ? "Covered by an existing pickup" : order.delhiveryPickupRequestStatus === "pending" ? "Request in progress" : order.delhiveryPickupRequestStatus === "failed" ? "Pickup request failed" : "Waiting to schedule"}</small>}
             </span>
-            <i className={`status-pill ${safeOrderStatus(order.status).toLowerCase()}`}>
-              {safeOrderStatus(order.status)}
+            <i className={`status-pill ${orderListStatus(order).toLowerCase().replaceAll(" ", "-")}`}>
+              {orderListStatus(order)}
             </i>
             <b>{order.total}</b>
             <em>↗</em>
@@ -6509,6 +7741,13 @@ function OrdersWorkspace({
                 {selectedOrder.customerName} ·{" "}
                 {formatOrderDate(selectedOrder.date)}{formatOrderTime(selectedOrder.createdAt) ? ` · ${formatOrderTime(selectedOrder.createdAt)}` : ""} · {selectedOrder.total}
               </p>
+              <section className="admin-refund-history">
+                <p className="eyebrow">REFUND HISTORY</p>
+                {selectedOrderRefunds.length ? <div>{selectedOrderRefunds.map((request) => {
+                  const selections = request.selections?.length ? request.selections : request.selection ? [request.selection] : [];
+                  return <article key={request.id}><div><strong>{request.amount}</strong><span>{selections.length ? selections.map((selection) => `${selection.quantity} × ${selection.productName}${selection.variantName ? ` · ${selection.variantName}` : ""}${selection.size ? ` · Size ${selection.size}` : ""}`).join(", ") : "Refund recorded"}</span><small>{request.id} · {formatOrderDate(request.updatedAt || request.createdAt)}</small></div><p>{request.reason}</p></article>;
+                })}</div> : <p className="admin-refund-history-empty">No refunds have been recorded for this order.</p>}
+              </section>
               <section className="admin-order-payment-summary" aria-label="Payment method used">
                 <div>
                   <p className="eyebrow">PAYMENT METHOD USED</p>
@@ -6523,8 +7762,9 @@ function OrdersWorkspace({
                   <span>{selectedOrder.razorpayPaymentId || selectedOrder.razorpayOrderId}</span>
                 </div>}
               </section>
-              {selectedOrder.fulfillmentMethod !== "pickup" && <section className="admin-customer-details admin-delhivery-details">
+              {orderNeedsDelivery(selectedOrder) && <section className="admin-customer-details admin-delhivery-details">
                 <p className="eyebrow">DELHIVERY SHIPMENT</p>
+                {!selectedOrder.delhiveryAwb && delhiveryConfigError && <p className="admin-delhivery-weight-error" role="alert">{delhiveryConfigError}</p>}
                 {selectedOrder.delhiveryAwb ? <>
                   <dl>
                     <div><dt>AWB</dt><dd>{selectedOrder.delhiveryAwb}</dd></div>
@@ -6542,19 +7782,16 @@ function OrdersWorkspace({
                     <label htmlFor="delhivery-packed-weight">Packed parcel weight <span>grams · allowed range 500–30,000</span></label>
                     <input id="delhivery-packed-weight" type="number" min="500" max="30000" step="1" inputMode="numeric" value={shipmentWeight} onChange={(event) => { setShipmentWeight(event.target.value); if (shipmentWeightError) setShipmentWeightError(""); }} placeholder="e.g. 650" aria-describedby="delhivery-weight-range delhivery-weight-error" aria-invalid={Boolean(shipmentWeightError)} disabled={shipmentCreating || selectedOrder.delhiveryShipmentStatus === "pending"} />
                     <label htmlFor="delhivery-pickup-location">Delhivery pickup location <span>Existing registered warehouse</span></label>
-                    <select id="delhivery-pickup-location" value={shipmentPickupLocation} onChange={(event) => { setShipmentPickupLocation(event.target.value); if (shipmentWeightError) setShipmentWeightError(""); }} disabled={shipmentCreating || selectedOrder.delhiveryShipmentStatus === "pending" || !delhiveryPickupLocations.length}>
-                      {!delhiveryPickupLocations.length && <option value="">No configured pickup location</option>}
-                      {delhiveryPickupLocations.map((location) => <option key={location} value={location}>{location}</option>)}
-                    </select>
+                    <DelhiveryPickupSelect value={shipmentPickupLocation} locations={delhiveryPickupLocations} labels={delhiveryLocationLabels} loading={delhiveryLocationsLoading} onRefresh={() => setDelhiveryConfigRevision(value => value + 1)} onChange={(value) => { setShipmentPickupLocation(value); if (shipmentWeightError) setShipmentWeightError(""); }} disabled={shipmentCreating || selectedOrder.delhiveryShipmentStatus === "pending"} />
                     <label htmlFor="delhivery-pickup-time">Pickup time <span>India time</span></label>
                     <input id="delhivery-pickup-time" type="time" step="60" value={shipmentPickupTime} onChange={(event) => { setShipmentPickupTime(event.target.value); if (shipmentWeightError) setShipmentWeightError(""); }} disabled={shipmentCreating || selectedOrder.delhiveryShipmentStatus === "pending"} />
-                    <button className="module-primary admin-delhivery-create-button" type="button" onClick={() => void createDelhiveryShipment()} disabled={shipmentCreating || selectedOrder.delhiveryShipmentStatus === "pending" || !delhiveryPickupLocations.length}>{shipmentCreating || selectedOrder.delhiveryShipmentStatus === "pending" ? "Creating shipment…" : "Create Delhivery shipment"}</button>
+                    <button className="module-primary admin-delhivery-create-button" type="button" onClick={() => void createDelhiveryShipment()} disabled={shipmentCreating || delhiveryLocationsLoading || selectedOrder.delhiveryShipmentStatus === "pending" || !delhiveryPickupLocations.length || Boolean(delhiveryConfigError)}>{shipmentCreating || selectedOrder.delhiveryShipmentStatus === "pending" ? "Creating shipment…" : "Create Delhivery shipment"}</button>
                     <small id="delhivery-weight-range" className="admin-delhivery-weight-range">Use the total packed weight, including the product and packaging.</small>
                     <p id="delhivery-weight-error" className="admin-delhivery-weight-error" role="alert">{shipmentWeightError}</p>
                   </div>
                 </>}
               </section>}
-              {selectedOrder.fulfillmentMethod !== "pickup" && selectedOrder.delhiveryAwb && (() => {
+              {orderNeedsDelivery(selectedOrder) && selectedOrder.delhiveryAwb && (() => {
                 const liveStatus = selectedOrder.delhiveryLiveStatus || (selectedOrder.delhiveryShipmentStatus === "created" ? "Ready to ship" : "Order received");
                 const currentStage = delhiveryTimelineStageIndex(liveStatus);
                 const scans = selectedOrder.delhiveryScans || [];
@@ -6562,6 +7799,59 @@ function OrdersWorkspace({
               })()}
               <section className="admin-customer-details"><p className="eyebrow">CUSTOMER &amp; ORDER IDS</p><dl><div><dt>Order ID</dt><dd>{selectedOrder.id}</dd></div><div className="admin-customer-account"><dt>Customer Account ID</dt><dd>{selectedOrder.userId || "Legacy / guest order"}</dd></div><div><dt>Name</dt><dd>{selectedOrder.customerName || "Not provided"}</dd></div><div><dt>Login mobile</dt><dd>{selectedOrder.userPhone || selectedOrder.phone || "Not provided"}</dd></div><div><dt>Email</dt><dd>{selectedOrder.email || selectedOrder.userEmail || "Not provided"}</dd></div><div><dt>WhatsApp</dt><dd>{selectedOrder.phone || "Not provided"}</dd></div><div><dt>Fulfilment</dt><dd>{selectedOrder.fulfillmentMethod === "pickup" ? `Pickup from ${selectedOrder.pickupHubName || "hub"}` : "Delivery"}</dd></div><div className="admin-customer-address"><dt>{selectedOrder.fulfillmentMethod === "pickup" ? "Pickup hub / place" : "Delivery address"}</dt><dd>{selectedOrder.fulfillmentMethod === "pickup" ? `${selectedOrder.pickupHubName || "Hub"} · ${selectedOrder.pickupHubPlace || selectedOrder.address || "Place not saved"}` : selectedOrder.address || "Not provided"}</dd></div></dl>{selectedOrder.razorpayPaymentId && <button className="module-secondary admin-restore-payment-details" type="button" onClick={() => void restoreOrderDetailsFromRazorpay()}>Restore delivery details from Razorpay</button>}</section>
               {Array.isArray(selectedOrder.items) && selectedOrder.items.length ? <section className="admin-order-items"><p className="eyebrow">ITEMS IN THIS ORDER · {selectedOrder.items.length} LINES</p><div>{selectedOrder.items.map((rawItem, itemIndex) => { const item = normalizeOrderItemForDisplay(rawItem, itemIndex); const product = getOrderedProduct(item); const displayName = getOrderedItemDisplayName(item, product); const size = item.size || item.name.match(/(?:^| · )Size (.+)$/i)?.[1] || ""; const variant = item.variantName || (item.name.includes(" · ") ? item.name.split(" · ").slice(1).filter((part) => !/^Size /i.test(part)).join(" · ") : ""); const promotion = item.promotion; const promotionRole = promotion?.role === "free" ? "FREE ITEM" : promotion?.role === "bundle" ? "BUNDLE ITEM" : "PAID ITEM"; const selectedVariant = size ? product?.variants.find((candidate) => String(candidate.size || candidate.name).trim().replace(/^size\s+/i, "").toLowerCase() === size.trim().replace(/^size\s+/i, "").toLowerCase()) : variant ? product?.variants.find((candidate) => candidate.name.trim().toLowerCase() === variant.trim().toLowerCase()) : undefined; const selectionStock = selectedVariant?.stock ?? product?.stock; const displayImage = item.variantImage || selectedVariant?.image || item.image || product?.image; const imageAlt = variant ? `${displayName} variant` : displayName; return <article key={`${selectedOrder.id}-${item.productId || item.name}-${variant}-${size}-${promotion?.groupId || "legacy"}-${itemIndex}`}><>{displayImage ? <button className="admin-order-image-button" type="button" onClick={() => setEnlargedOrderImage({ src: displayImage, alt: imageAlt })} aria-label={`Enlarge ${imageAlt}`}><img src={displayImage} alt={imageAlt} /></button> : <span className="admin-order-item-placeholder" aria-hidden="true">✦</span>}</><span><strong>{displayName}</strong>{promotion && <small className={`admin-order-promotion ${promotion.role === "free" ? "is-free" : ""}`}>{promotionRole} · {promotion.label}</small>}{product ? <><small>{product.category} · SKU {product.sku}</small><small>Current {size ? `size ${size}` : variant ? "variant" : "product"} stock: {selectionStock} · {product.status}</small></> : <small>Product no longer in the catalog</small>}{variant && <small>Selected variant: {variant}{displayImage ? " · Variant image shown" : ""}</small>}{size && <small>Selected size: {size}</small>}{promotion && promotion.regularPrice !== promotion.linePrice && <small>Regular value: {formatAdminCurrency(promotion.regularPrice)} · Allocated price: {item.price}</small>}<em>Quantity ordered: {item.quantity}</em></span><b>{item.price}</b></article>; })}</div></section> : <section className="admin-order-items admin-order-item-repair"><p className="eyebrow">ADD MISSING ORDER DETAILS</p><p>This older paid order has no saved product information. Select the product and variant to restore its order record.</p><div className="admin-order-item-repair-fields"><label>Product<select value={orderItemDraft.productId} onChange={(event) => { const product = catalogProducts.find((candidate) => candidate.id === event.target.value); setOrderItemDraft({ productId: event.target.value, variantName: "", quantity: "1", price: product ? `₹${product.price.toLocaleString("en-IN")}` : "" }); }}><option value="">Select product</option>{catalogProducts.map((product) => <option key={product.id} value={product.id}>{product.name} · {product.sku}</option>)}</select></label>{draftProduct?.variants.length ? <label>Variant<select value={orderItemDraft.variantName} onChange={(event) => setOrderItemDraft((current) => ({ ...current, variantName: event.target.value }))}><option value="">Select variant</option>{draftProduct.variants.map((variant, index) => <option key={`${variant.name}-${index}`} value={variant.name}>{variant.name || `Option ${index + 1}`}</option>)}</select></label> : null}<label>Quantity<input type="number" min="1" value={orderItemDraft.quantity} onChange={(event) => setOrderItemDraft((current) => ({ ...current, quantity: event.target.value }))} /></label><label>Price<input value={orderItemDraft.price} onChange={(event) => setOrderItemDraft((current) => ({ ...current, price: event.target.value }))} placeholder="₹0" /></label></div>{draftProduct && <div className="admin-order-item-repair-preview">{orderItemDraft.variantName && draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image ? <img src={draftProduct.variants.find((variant) => variant.name === orderItemDraft.variantName)?.image} alt="Selected variant preview" /> : draftProduct.image ? <img src={draftProduct.image} alt="Selected product preview" /> : null}<span>{orderItemDraft.variantName ? `Selected variant: ${orderItemDraft.variantName}` : "Select a variant if applicable"}</span></div>}<button className="module-primary" type="button" onClick={addMissingOrderItem}>Add to this order</button></section>}
+              {(selectedOrder.status === "Cancelled" || selectedOrder.cancellationRecords?.length) && (
+                <section className="admin-customer-details admin-cancellation-details">
+                  <p className="eyebrow">CANCELLATION DETAILS</p>
+                  <dl>
+                    <div>
+                      <dt>Reason</dt>
+                      <dd>{selectedOrder.cancellationReason || "Not recorded"}</dd>
+                    </div>
+                    <div>
+                      <dt>Requested by</dt>
+                      <dd>
+                        {selectedOrder.cancelledBy === "customer"
+                          ? "Customer"
+                          : selectedOrder.cancelledBy === "admin"
+                            ? "Admin"
+                            : "Not recorded"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Cancelled on</dt>
+                      <dd>
+                        {selectedOrder.cancelledAt
+                          ? delhiveryTimelineDate(selectedOrder.cancelledAt)
+                          : "Not recorded"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Refund status</dt>
+                      <dd>{selectedOrder.refundStatus || "Not applicable"}</dd>
+                    </div>
+                    {selectedOrder.cancellationDescription && (
+                      <div className="admin-customer-address">
+                        <dt>Customer description</dt>
+                        <dd>{selectedOrder.cancellationDescription}</dd>
+                      </div>
+                    )}
+                    {selectedOrder.cancellationRecords?.length ? (
+                      <div className="admin-customer-address">
+                        <dt>Cancelled items</dt>
+                        <dd>
+                          {selectedOrder.cancellationRecords.map((record) => {
+                            const itemNames = record.itemIndexes
+                              .map((index) => selectedOrder.items?.[index])
+                              .filter((item): item is OrderItem => Boolean(item))
+                              .map((item) => item.productName || item.name);
+                            return `${record.fullOrder ? "Full order" : itemNames.join(", ") || "Selected items"} · ${formatAdminCurrency(record.refundAmount)} · ${record.refundStatus}`;
+                          }).join(" | ")}
+                        </dd>
+                      </div>
+                    ) : null}
+                  </dl>
+                </section>
+              )}
               <div className="order-status-editor">
                 <label>
                   Status
@@ -6680,7 +7970,7 @@ function OrdersRecoveryWorkspace({
              <small className="order-list-products">Payment: {orderPaymentLabel(order)}</small>
              <small className="order-list-products">Fulfilment: {orderFulfillmentLabel(order)}</small>
            </span>
-          <i className={`status-pill ${safeOrderStatus(order.status).toLowerCase()}`}>{safeOrderStatus(order.status)}</i>
+          <i className={`status-pill ${orderListStatus(order).toLowerCase().replaceAll(" ", "-")}`}>{orderListStatus(order)}</i>
           <b>{order.total}</b>
         </div>)}
       </div> : <p className="empty-filter">No confirmed orders found.</p>}
@@ -7888,6 +9178,12 @@ function PosWorkspace({
   const [customerName, setCustomerName] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
   const [discountValue, setDiscountValue] = useState("");
+  const [posPromotions, setPosPromotions] = useState<SalesPromotion[]>([]);
+  const [posCouponCode, setPosCouponCode] = useState("");
+  const [posPromotionTime, setPosPromotionTime] = useState(() => new Date());
+  const [purchaseHistory, setPurchaseHistory] = useState<string[]>([]);
+  const [historyAvailable, setHistoryAvailable] = useState(false);
+  const [lockedPosPromotion, setLockedPosPromotion] = useState<ReturnType<typeof evaluateSalesPromotions> | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<PosPaymentMethod>("Cash");
   const [checkoutBusy, setCheckoutBusy] = useState(false);
   const [lastSale, setLastSale] = useState<OrderRecord | null>(null);
@@ -7898,6 +9194,25 @@ function PosWorkspace({
   const inputRef = useRef<HTMLInputElement>(null);
   const lookupProductRef = useRef<(value: string) => void>(() => undefined);
   const lastAutoLookupRef = useRef("");
+
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      const [settings, orders] = await Promise.all([loadSalesPromotions(), fetchStoreOrders<OrderRecord>()]);
+      if (!alive) return;
+      setPosPromotions(settings.promotions);
+      setHistoryAvailable(!orders.error);
+      setPurchaseHistory((orders.data || []).filter((order) => order.status !== "Cancelled" && (order.status === "Delivered" || order.paymentStatus === "paid" || order.paymentStatus === "cod_collected")).map((order) => order.phone || order.userPhone || ""));
+    };
+    void load();
+    const timer = window.setInterval(() => setPosPromotionTime(new Date()), 30000);
+    const sync = () => { void load(); };
+    const unsubscribe = subscribeToStoreSetting("salesPromotions", sync);
+    window.addEventListener("fanzzy-sales-promotions-updated", sync);
+    window.addEventListener("fanzzy-orders-updated", sync);
+    window.addEventListener("storage", sync);
+    return () => { alive = false; window.clearInterval(timer); unsubscribe(); window.removeEventListener("fanzzy-sales-promotions-updated", sync); window.removeEventListener("fanzzy-orders-updated", sync); window.removeEventListener("storage", sync); };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -8124,7 +9439,11 @@ function PosWorkspace({
   }), [cart, products]);
   const cartUnits = cartLines.reduce((total, line) => total + line.quantity, 0);
   const subtotal = cartLines.reduce((total, line) => total + parseMoney(line.selection.price) * line.quantity, 0);
-  const discount = Math.min(subtotal, Math.max(0, Number(discountValue) || 0));
+  const computedPosPromotion = evaluateSalesPromotions(posPromotions, cartLines.map(({ selection, quantity }) => ({ productId: selection.sku, category: selection.category, price: parseMoney(selection.price), quantity })), { couponCode: posCouponCode, customerPhone, previousCustomerPhones: purchaseHistory, historyAvailable, now: websitePromotionClock(posPromotionTime) });
+  const posPromotion = paymentMethod === "UPI" && lockedPosPromotion ? lockedPosPromotion : computedPosPromotion;
+  const manualPosDiscount = Math.min(subtotal, Math.max(0, Number(discountValue) || 0));
+  const appliedPosPromotion = posPromotion.discount >= manualPosDiscount && posPromotion.discount > 0 ? posPromotion : null;
+  const discount = Math.min(subtotal, Math.max(manualPosDiscount, posPromotion.discount));
   const total = Math.max(0, subtotal - discount);
   const qrPaymentFingerprint = cartLines.map(({ selection, quantity }) => `${selection.key}:${quantity}`).sort().join("|");
   const upiPaymentActive = paymentMethod === "UPI" && (posQr.status === "loading" || posQr.status === "ready" || posQr.status === "paid");
@@ -8148,14 +9467,17 @@ function PosWorkspace({
     }
 
     const timer = window.setTimeout(async () => {
+      setLockedPosPromotion((current) => current || computedPosPromotion);
       const loadingState: PosQrState = { status: "loading" };
       posQrRef.current = loadingState;
       setPosQr(loadingState);
       try {
+        const orderToken = globalThis.crypto?.randomUUID?.().replace(/-/g, "").slice(-6).toUpperCase() || String(Date.now()).slice(-6);
+        const orderId = `#FZ-POS-${orderToken}`;
         const response = await fetch(adminRazorpayApiUrl("pos-qr"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ amount: Math.round(total * 100), reference: `POS-${Date.now()}` }),
+          body: JSON.stringify({ amount: Math.round(total * 100), reference: orderId, orderId }),
         });
         const payload = await response.json() as { id?: string; imageUrl?: string; paymentUrl?: string; mode?: "native_qr" | "payment_link"; amount?: number; closeBy?: number; error?: string };
         if (!response.ok || !payload.id || (!payload.imageUrl && !payload.paymentUrl)) throw new Error(payload.error || "Could not create the Razorpay payment QR.");
@@ -8163,7 +9485,7 @@ function PosWorkspace({
           void fetch(`${adminRazorpayApiUrl("pos-qr")}?id=${encodeURIComponent(payload.id)}`, { method: "DELETE" }).catch(() => undefined);
           return;
         }
-        const readyState: PosQrState = { status: "ready", id: payload.id, imageUrl: payload.imageUrl, paymentUrl: payload.paymentUrl, mode: payload.mode, amount: payload.amount || Math.round(total * 100), closeBy: payload.closeBy };
+        const readyState: PosQrState = { status: "ready", id: payload.id, orderId, imageUrl: payload.imageUrl, paymentUrl: payload.paymentUrl, mode: payload.mode, amount: payload.amount || Math.round(total * 100), closeBy: payload.closeBy };
         posQrRef.current = readyState;
         setPosQr(readyState);
       } catch (qrError) {
@@ -8247,6 +9569,8 @@ function PosWorkspace({
     }
     setCart({});
     setDiscountValue("");
+    setPosCouponCode("");
+    setLockedPosPromotion(null);
     setCustomerName("");
     setCustomerPhone("");
     setLastProduct(null);
@@ -8260,6 +9584,7 @@ function PosWorkspace({
       setError("This UPI payment is already received. Complete the sale before changing payment method.");
       return;
     }
+    setLockedPosPromotion(method === "UPI" ? computedPosPromotion : null);
     setPaymentMethod(method);
     setError("");
   };
@@ -8310,9 +9635,11 @@ function PosWorkspace({
       await Promise.all([saveProductVariants(nextProducts), saveProductSizeStock(nextProducts)]);
 
       const now = new Date();
-      const token = globalThis.crypto?.randomUUID?.().replace(/-/g, "").slice(-6).toUpperCase() || String(Date.now()).slice(-6);
+      const token = paymentMethod === "UPI" && posQr.orderId
+        ? posQr.orderId.replace(/^#FZ-POS-/i, "")
+        : globalThis.crypto?.randomUUID?.().replace(/-/g, "").slice(-6).toUpperCase() || String(Date.now()).slice(-6);
       const order: OrderRecord = {
-        id: `#FZ-POS-${token}`,
+        id: posQr.orderId || `#FZ-POS-${token}`,
         invoiceNumber: `POS-${token}`,
         date: now.toISOString().slice(0, 10),
         createdAt: now.toISOString(),
@@ -8329,7 +9656,7 @@ function PosWorkspace({
         posSale: true,
         razorpayPaymentId: paymentMethod === "UPI" ? posQr.paymentId : undefined,
         razorpayQrCodeId: paymentMethod === "UPI" ? posQr.id : undefined,
-        coupon: discount > 0 ? "POS discount" : undefined,
+        coupon: appliedPosPromotion?.promotion ? `${appliedPosPromotion.promotion.name}${appliedPosPromotion.promotion.type === "coupon" ? ` (${appliedPosPromotion.promotion.couponCode})` : ""}` : discount > 0 ? "POS discount" : undefined,
         couponDiscount: discount,
         inventoryAdjusted: true,
         items: cartLines.map(({ product, selection, quantity }) => ({
@@ -8362,6 +9689,8 @@ function PosWorkspace({
       window.dispatchEvent(new Event("fanzzy-orders-updated"));
       setCart({});
       setDiscountValue("");
+      setPosCouponCode("");
+      setLockedPosPromotion(null);
       setCustomerName("");
       setCustomerPhone("");
       setLastProduct(null);
@@ -8418,7 +9747,7 @@ function PosWorkspace({
               <b className={posQr.status === "paid" ? "is-paid" : ""}>{posQr.status === "paid" ? "✓" : "•••"}</b>
             </>}
           </section>}
-          <div className="pos-totals"><label><span>Subtotal</span><strong>{formatAdminCurrency(subtotal)}</strong></label><label><span>Discount</span><span className="pos-discount-input">₹<input value={discountValue} onChange={(event) => setDiscountValue(event.target.value.replace(/[^0-9.]/g, ""))} inputMode="decimal" placeholder="0" disabled={upiPaymentActive} /></span></label><label className="pos-grand-total"><span>Total</span><strong>{formatAdminCurrency(total)}</strong></label><small>Prices are inclusive of applicable GST.</small></div>
+          <div className="pos-promotion-box"><label>Promotion coupon<input aria-label="POS promotion coupon" value={posCouponCode} disabled={upiPaymentActive} onChange={(event) => setPosCouponCode(event.target.value.toUpperCase())} placeholder="Enter a coupon code" /></label><p>{appliedPosPromotion?.promotion ? `${appliedPosPromotion.promotion.name} · −${formatAdminCurrency(appliedPosPromotion.discount)}` : posCouponCode ? "No eligible coupon for this bill." : "Best eligible promotion applies automatically."}</p></div><div className="pos-totals"><label><span>Subtotal</span><strong>{formatAdminCurrency(subtotal)}</strong></label><label><span>Manual discount</span><span className="pos-discount-input">₹<input value={discountValue} onChange={(event) => setDiscountValue(event.target.value.replace(/[^0-9.]/g, ""))} inputMode="decimal" placeholder="0" disabled={upiPaymentActive} /></span></label>{appliedPosPromotion && <label><span>Applied promotion</span><strong>−{formatAdminCurrency(appliedPosPromotion.discount)}</strong></label>}<label className="pos-grand-total"><span>Total</span><strong>{formatAdminCurrency(total)}</strong></label><small>Prices are inclusive of applicable GST.</small></div>
           <button className="pos-pay-button" type="button" disabled={!cartLines.length || checkoutBusy || (paymentMethod === "UPI" && !upiPaymentConfirmed)} onClick={() => void completeSale()}>{checkoutBusy ? "Completing sale…" : paymentMethod === "UPI" ? upiPaymentConfirmed ? `Complete ${formatAdminCurrency(total)} · UPI paid` : posQr.status === "loading" ? "Creating Razorpay QR…" : `Waiting for UPI payment · ${formatAdminCurrency(total)}` : `Pay ${formatAdminCurrency(total)} · ${paymentMethod}`} <span>→</span></button>
           {lastSale && <div className="pos-sale-complete"><span>✓</span><div><strong>Sale completed</strong><small>{lastSale.id} · {lastSale.total}</small></div><button type="button" onClick={() => void printOrderBill(lastSale)}>Print receipt</button></div>}
         </aside>
@@ -10726,7 +12055,7 @@ function ProductLibraryWorkspace({
       {selectedProduct && !isEditing && !damageFormOpen && (
         <div className="product-detail-card">
           <div className="product-detail-image">
-            <img src={selectedProduct.image} alt="" />
+            {selectedProduct.image ? <img src={selectedProduct.image} alt="" /> : <span className="admin-order-item-placeholder" aria-hidden="true">✦</span>}
           </div>
           <div className="product-detail-copy">
             <p className="eyebrow">PRODUCT DETAILS</p>

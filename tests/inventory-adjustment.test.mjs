@@ -79,9 +79,11 @@ test("normal variant reservation deducts only the selected variant", async (t) =
   }, config, "decrement", true);
 
   assert.deepEqual(result, { complete: true });
-  assert.equal(writes.length, 1);
+  assert.equal(writes.length, 2);
   const savedVariants = JSON.parse(writes[0].body[0].value);
   assert.deepEqual(savedVariants["SKU-RED"], [{ name: "Red", stock: 1 }, { name: "Blue", stock: 7 }]);
+  assert.equal(writes[1].kind, "product");
+  assert.equal(writes[1].body.stock, 8);
 });
 
 test("size reservation rejects a quantity above the selected size stock", async (t) => {

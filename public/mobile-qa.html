@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Fanzzy test courier controls</title>
+<style>body{font:16px system-ui;background:#f4ede5;color:#4b1c2b;max-width:680px;margin:60px auto;padding:24px}section{background:white;padding:24px;border-radius:16px}input,button{font:inherit;padding:12px;border:1px solid #c6b59e;border-radius:8px;margin:5px 0}input{box-sizing:border-box;width:100%}button{background:#4b1c2b;color:white;cursor:pointer}pre{white-space:pre-wrap;overflow-wrap:anywhere}a{color:inherit}</style>
+<h1>Test courier controls</h1><p>Local Delhivery simulation. Create a shipment in <a href="/admin" target="_blank">test admin</a>, then paste its TEST- AWB here.</p>
+<section><label for="awb">Test AWB</label><input id="awb" placeholder="TEST-…" autocomplete="off"><button id="inspect">Inspect shipment</button> <button id="advance">Advance status</button><p>Ready to Ship → Scheduled for pickup → In Transit → Out for delivery → Delivered</p><pre id="result" role="status">No shipment selected.</pre></section>
+<p>Reopen Track order in the app to fetch the new courier status. Refresh tracking in admin to save the order's new status. Mock shipment state clears when the API restarts.</p>
+<script>
+const result = document.getElementById('result');
+async function request(method) {
+  const awb = document.getElementById('awb').value.trim();
+  if (!/^TEST-[A-Z0-9]+$/i.test(awb)) { result.textContent = 'Enter a TEST- AWB from the local test admin.'; return; }
+  for (const button of document.querySelectorAll('button')) button.disabled = true;
+  try { const response = await fetch('/api/test/delhivery/' + encodeURIComponent(awb), { method }); const body = await response.json(); if (!response.ok) throw new Error(body.error || 'Request failed'); result.textContent = JSON.stringify(body, null, 2); }
+  catch (error) { result.textContent = error.message; }
+  finally { for (const button of document.querySelectorAll('button')) button.disabled = false; }
+}
+document.getElementById('inspect').onclick = () => request('GET');
+document.getElementById('advance').onclick = () => request('POST');
+</script></html>

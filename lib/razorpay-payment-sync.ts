@@ -1,6 +1,12 @@
-import { createDelhiveryPickupRequest, delhiveryPickupSchedule, getDelhiveryAdminOptions, manifestDelhiveryShipment, trackDelhiveryShipment } from "./delhivery";
+import { randomUUID } from "node:crypto";
+import { isPosOrder, orderNeedsDelivery } from "./order-fulfillment";
+import type {
+  CustomerCancellationReason,
+  CustomerCancellationRecord,
+} from "./customer-cancellation";
+import { createDelhiveryPickupRequest, delhiveryPickupSchedule, getDelhiveryAdminOptions, loadDelhiveryAdminOptions, manifestDelhiveryShipment, trackDelhiveryShipment } from "./delhivery";
 
-type StoredOrder = {
+export type StoredOrder = {
   id: string;
   userId?: string;
   userPhone?: string;
@@ -26,6 +32,14 @@ type StoredOrder = {
   inventoryReservedAt?: string;
   inventoryReleased?: boolean;
   inventoryAdjusted?: boolean;
+  cancelledAt?: string;
+  cancelledBy?: "customer" | "admin";
+  cancellationReason?: CustomerCancellationReason;
+  cancellationDescription?: string;
+  cancellationRecords?: CustomerCancellationRecord[];
+  returnStatus?: "Returned" | "Partially returned" | "Refunded";
+  refundStatus?: "Not applicable" | "Pending" | "Completed" | "Refunded";
+  refundReference?: string;
   delhiveryAwb?: string;
   delhiveryTrackingUrl?: string;
   delhiveryShipmentStatus?: "awaiting_weight" | "pending" | "created" | "failed" | "skipped";
@@ -47,17 +61,28 @@ type StoredOrder = {
   delhiveryLastTrackedAt?: string;
   delhiveryScans?: Array<{ status: string; date?: string; location?: string; instructions?: string }>;
   couponDiscount?: number;
+  coupon?: string;
   promotionDiscount?: number;
   shippingTotal?: number;
-  items?: Array<{ name: string; quantity: number; price: string; regularPrice?: number; productId?: string; variantName?: string; size?: string; hsnCode?: string; vendorId?: string | null; vendorName?: string; vendorSlug?: string }>;
+  items?: Array<{ name: string; quantity: number; price: string; regularPrice?: number; productId?: string; productName?: string; variantName?: string; size?: string; hsnCode?: string; vendorId?: string | null; vendorName?: string; vendorSlug?: string; cancelled?: boolean; promotion?: { groupId: string; offerId: string; role: "paid" | "free" | "bundle"; linePrice: number; regularPrice: number; label: string } }>;
 };
+type StoredOrderItem = NonNullable<StoredOrder["items"]>[number];
 
 import { syncVendorOrderForPaidOrder } from "./vendor-server";
+import { assertLocalTestServerSafety, isLocalTestEnvironment } from "./runtime-safety";
+import { assertCapturedPayment } from "./payment-policy";
+import { checkoutRpc, readTransactionalOrders, patchTransactionalOrders, createTransactionalOrder, captureTransactionalPayment } from "./transactional-checkout";
+import { recoverCapturedOrderBinding } from "./razorpay-provider";
+import { authorizeMobileQuote } from "./mobile-checkout-authority";
+import { checkoutRequestHash } from "./transactional-checkout";
 
 type StoredVariant = { name?: string; size?: string; stock?: number; [key: string]: unknown };
 
 export type RazorpayPayment = {
   id: string;
+  status?: string;
+  captured?: boolean;
+  currency?: string;
   order_id?: string;
   amount?: number;
   email?: string;
@@ -66,58 +91,25 @@ export type RazorpayPayment = {
   notes?: Record<string, unknown>;
 };
 
-const paymentAddress = (payment: RazorpayPayment) => {
-  const address = payment.notes?.address;
-  return typeof address === "string" && address.trim() ? address.trim() : undefined;
+assertLocalTestServerSafety(process.env);
+
+const orderIdFromReceipt = (receipt?: string) => {
+  const value = String(receipt || "").trim();
+  if (!/^#?FZ-[A-Z0-9-]+$/i.test(value)) return "";
+  return value.startsWith("#") ? value : `#${value}`;
 };
 
-const customerEmail = (email?: string) => {
-  const normalized = email?.trim();
-  // Razorpay uses this placeholder for some payment methods. It is not the customer's email.
-  return normalized && !normalized.toLowerCase().endsWith("@razorpay.com") ? normalized : undefined;
+const isPosPayment = (payment: RazorpayPayment, receipt?: string) => {
+  const notedOrderId = typeof payment.notes?.fanzzy_order_id === "string" ? payment.notes.fanzzy_order_id.trim() : "";
+  const posReference = typeof payment.notes?.fanzzy_pos_reference === "string" ? payment.notes.fanzzy_pos_reference.trim() : "";
+  const paymentSource = typeof payment.notes?.fanzzy_payment_source === "string" ? payment.notes.fanzzy_payment_source.trim() : "";
+  return /^#?FZ-POS-/i.test(orderIdFromReceipt(receipt))
+    || /^#?FZ-POS-/i.test(notedOrderId)
+    || Boolean(posReference)
+    || paymentSource === "pos_qr_fallback";
 };
 
-const restorePaymentContactDetails = (order: StoredOrder, payment: RazorpayPayment) => {
-  const address = paymentAddress(payment);
-  const email = customerEmail(payment.email);
-  if (payment.contact?.trim()) order.phone = payment.contact.trim();
-  if (address) order.address = address;
-  if (email) order.email = email;
-  if (!email && order.email?.toLowerCase().endsWith("@razorpay.com")) delete order.email;
-  if (!email && order.customerName === payment.email?.split("@")[0]) order.customerName = "Razorpay customer";
-};
-
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "https://pdrcrkxeyqxqgpwfxqpu.supabase.co";
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-  || process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
-  || "sb_publishable_OTSfS6G2tlrAGINfyY3VGA_yi_3BPAV";
-
-const headers = {
-  apikey: supabaseKey,
-  Authorization: `Bearer ${supabaseKey}`,
-  "Content-Type": "application/json",
-};
-
-const asMoney = (amountPaise: number) => `₹${Math.round(amountPaise / 100).toLocaleString("en-IN")}`;
-const asOrderId = (payment: RazorpayPayment, receipt?: string) => {
-  const notedId = typeof payment.notes?.fanzzy_order_id === "string" ? payment.notes.fanzzy_order_id.trim() : "";
-  if (/^#FZ-[A-Z0-9-]+$/i.test(notedId)) return notedId;
-  const receiptId = String(receipt || "").trim();
-  if (/^#?FZ-[A-Z0-9-]+$/i.test(receiptId)) return receiptId.startsWith("#") ? receiptId : `#${receiptId}`;
-  return `#FZ-RZP-${payment.id.slice(-6).toUpperCase()}`;
-};
-
-async function readOrders() {
-  const response = await fetch(`${supabaseUrl}/rest/v1/store_settings?key=eq.orders&select=value`, { headers });
-  if (!response.ok) throw new Error("Could not read saved orders");
-  const rows = await response.json() as Array<{ value?: string }>;
-  try {
-    const parsed = JSON.parse(rows[0]?.value || "[]") as unknown;
-    return Array.isArray(parsed) ? parsed as StoredOrder[] : [];
-  } catch {
-    return [] as StoredOrder[];
-  }
-}
+async function readOrders() { return readTransactionalOrders(); }
 
 const publicTrackingPhone = (value: string) => String(value || "").replace(/\D/g, "").slice(-10);
 
@@ -153,6 +145,7 @@ export async function lookupPublicOrderTracking(orderId: string, phone: string) 
   return {
     orderId: order.id,
     placedOn: order.createdAt || order.date,
+    deliveryAddress: order.fulfillmentMethod === "pickup" ? undefined : order.address,
     status: liveTracking?.status || order.delhiveryLiveStatus || order.status || "Order received",
     statusType: liveTracking?.statusType || order.delhiveryLiveStatusType,
     statusDate: liveTracking?.statusDate || order.delhiveryLiveStatusDate,
@@ -164,34 +157,103 @@ export async function lookupPublicOrderTracking(orderId: string, phone: string) 
   };
 }
 
-async function writeOrders(orders: StoredOrder[]) {
-  const response = await fetch(`${supabaseUrl}/rest/v1/store_settings?on_conflict=key`, {
-    method: "POST",
-    headers: { ...headers, Prefer: "resolution=merge-duplicates,return=minimal" },
-    body: JSON.stringify([{ key: "orders", value: JSON.stringify(orders), updated_at: new Date().toISOString() }]),
-  });
-  if (!response.ok) throw new Error("Could not save the paid order");
-}
+async function writeOrders(orders: StoredOrder[]) { return patchTransactionalOrders(orders); }
 
-async function readJsonSetting<T>(key: string, fallback: T) {
-  const response = await fetch(`${supabaseUrl}/rest/v1/store_settings?key=eq.${encodeURIComponent(key)}&select=value`, { headers });
-  if (!response.ok) throw new Error(`Could not read ${key}`);
-  const rows = await response.json() as Array<{ value?: string }>;
-  try {
-    return JSON.parse(rows[0]?.value || "") as T;
-  } catch {
-    return fallback;
+const normalizeText = (value: unknown, maxLength = 240) =>
+  String(typeof value === "string" || typeof value === "number" ? value : "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+
+const normalizeOrderMoney = (value: unknown) => {
+  const text = normalizeText(value, 40);
+  if (/^₹[0-9,]+(?:\.\d{1,2})?$/.test(text)) return text;
+  const amount = Number(String(value || "").replace(/[^0-9.-]/g, ""));
+  return Number.isFinite(amount) ? `₹${Math.max(0, Math.round(amount)).toLocaleString("en-IN")}` : "₹0";
+};
+
+const normalizeOrderNumber = (value: unknown) => {
+  const orderId = normalizeText(value, 40).toUpperCase();
+  return /^#FZ-[A-Z0-9-]+$/.test(orderId) ? orderId : "";
+};
+
+const normalizePositiveInteger = (value: unknown, fallback = 0) => {
+  const parsed = Math.floor(Number(value));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const sanitizeMobilePendingOrder = (value: unknown, identity: { id: string; phone: string }): StoredOrder => {
+  const source = value && typeof value === "object" ? value as Partial<StoredOrder> : {};
+  const id = normalizeOrderNumber(source.id);
+  if (!id) throw new Error("A valid Fanzzy order ID is required.");
+  if (source.status && source.status !== "Processing") throw new Error("Mobile orders must start as Processing.");
+  if (source.paymentStatus && source.paymentStatus !== "pending") throw new Error("Mobile orders must start with pending payment status.");
+  if (source.paymentMethod !== "cod" && source.paymentMethod !== "online") throw new Error("Select a valid payment method.");
+
+  const customerPhone = normalizeText(source.phone || source.userPhone || identity.phone, 32);
+  const userPhone = normalizeText(source.userPhone || identity.phone, 32);
+  const identityMatches = source.userId === identity.id || customerPhoneDigits(userPhone || customerPhone) === customerPhoneDigits(identity.phone);
+  if (!identityMatches) throw new Error("This order does not belong to the signed-in customer.");
+
+  const fulfillmentMethod = source.fulfillmentMethod === "pickup" ? "pickup" : "delivery";
+  const address = normalizeText(source.address, 320);
+  if (fulfillmentMethod === "delivery" && !/\b[1-9][0-9]{5}\b/.test(address)) {
+    throw new Error("A complete delivery address with a valid pincode is required.");
   }
-}
+  if (fulfillmentMethod === "pickup" && !normalizeText(source.pickupHubId || source.pickupHubName, 120)) {
+    throw new Error("Select a pickup hub for this order.");
+  }
 
-async function writeJsonSetting(key: string, value: unknown) {
-  const response = await fetch(`${supabaseUrl}/rest/v1/store_settings?on_conflict=key`, {
-    method: "POST",
-    headers: { ...headers, Prefer: "resolution=merge-duplicates,return=minimal" },
-    body: JSON.stringify([{ key, value: JSON.stringify(value), updated_at: new Date().toISOString() }]),
-  });
-  if (!response.ok) throw new Error(`Could not update ${key}`);
-}
+  const items = Array.isArray(source.items) ? source.items.map((item) => {
+    const row = item && typeof item === "object" ? item as Partial<StoredOrderItem> : {};
+    return {
+      productId: normalizeText(row.productId, 120),
+      productName: normalizeText(row.productName, 160),
+      name: normalizeText(row.name, 200),
+      quantity: normalizePositiveInteger(row.quantity),
+      price: normalizeOrderMoney(row.price),
+      regularPrice: Math.max(0, Number(row.regularPrice) || 0),
+      variantName: normalizeText(row.variantName, 120) || undefined,
+      size: normalizeText(row.size, 40) || undefined,
+      hsnCode: normalizeText(row.hsnCode, 40) || undefined,
+      vendorId: row.vendorId === null ? null : normalizeText(row.vendorId, 120) || undefined,
+      vendorName: normalizeText(row.vendorName, 160) || undefined,
+      vendorSlug: normalizeText(row.vendorSlug, 120) || undefined,
+      promotion: row.promotion,
+    };
+  }).filter((item) => item.productId && item.name && item.quantity > 0) : [];
+  if (!items.length) throw new Error("Add at least one item before checkout.");
+
+  const now = new Date().toISOString();
+  const createdAt = normalizeText(source.createdAt, 40);
+  const date = normalizeText(source.date, 20);
+  return {
+    id,
+    userId: identity.id,
+    userPhone,
+    userEmail: normalizeText(source.userEmail, 160) || undefined,
+    date: /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : now.slice(0, 10),
+    createdAt: createdAt && !Number.isNaN(Date.parse(createdAt)) ? createdAt : now,
+    status: "Processing",
+    total: normalizeOrderMoney(source.total),
+    customerName: normalizeText(source.customerName, 140) || "Fanzzy customer",
+    phone: customerPhone || identity.phone,
+    email: normalizeText(source.email, 160) || undefined,
+    address,
+    fulfillmentMethod,
+    pickupHubId: fulfillmentMethod === "pickup" ? normalizeText(source.pickupHubId, 120) || undefined : undefined,
+    pickupHubName: fulfillmentMethod === "pickup" ? normalizeText(source.pickupHubName, 160) || undefined : undefined,
+    pickupHubPlace: fulfillmentMethod === "pickup" ? normalizeText(source.pickupHubPlace, 160) || undefined : undefined,
+    paymentStatus: "pending",
+    paymentMethod: source.paymentMethod,
+    codCharge: Math.max(0, Number(source.codCharge) || 0),
+    couponDiscount: Math.max(0, Number(source.couponDiscount) || 0),
+    coupon: normalizeText(source.coupon, 80) || undefined,
+    promotionDiscount: Math.max(0, Number(source.promotionDiscount) || 0),
+    shippingTotal: Math.max(0, Number(source.shippingTotal) || 0),
+    items,
+  };
+};
 
 const delhiveryFailureMessage = (error: unknown) => {
   const message = error instanceof Error ? error.message : "Delhivery shipment creation failed.";
@@ -211,7 +273,7 @@ const delhiveryAutomationStartDate = "2026-09-05";
 const requiresAdminShipmentWeight = () => /^(1|true|yes|on)$/i.test(String(process.env.DELHIVERY_REQUIRE_ADMIN_WEIGHT || ""));
 
 const isDeliveryOrderReadyForPickup = (order: StoredOrder) =>
-  order.fulfillmentMethod !== "pickup"
+  orderNeedsDelivery(order)
   && Boolean(order.delhiveryAwb)
   && order.delhiveryShipmentStatus === "created"
   && order.status !== "Delivered"
@@ -279,7 +341,7 @@ async function ensureDelhiveryPickupRequest(orders: StoredOrder[], order: Stored
 }
 
 async function ensureDelhiveryShipment(orders: StoredOrder[], order: StoredOrder, force = false) {
-  if (order.fulfillmentMethod === "pickup") return;
+  if (!orderNeedsDelivery(order)) return;
   if (order.status === "Delivered" || order.status === "Cancelled") return;
   const orderDate = String(order.createdAt || order.date || "").slice(0, 10);
   if (orderDate && orderDate < delhiveryAutomationStartDate) return;
@@ -316,429 +378,140 @@ async function ensureDelhiveryShipment(orders: StoredOrder[], order: StoredOrder
   await ensureDelhiveryPickupRequest(orders, order);
 }
 
-const normalizeSelection = (value?: string) => String(value || "").trim().replace(/^size\s+/i, "").toLowerCase();
-const normalizeSku = (value?: string) => String(value || "").trim().replace(/[^a-z0-9]/gi, "").toLowerCase();
-const findSettingKey = <T>(settings: Record<string, T>, sku: string) =>
-  Object.keys(settings).find((key) => normalizeSku(key) === normalizeSku(sku));
-const resolveSettingKey = <T>(settings: Record<string, T>, sku: string) => findSettingKey(settings, sku) || sku;
-
-type InventoryMode = "decrement" | "release";
-type InventoryAdjustment = { complete: boolean; reason?: string };
-
-const inventoryMutationQueue: { current: Promise<void> } = { current: Promise.resolve() };
-const withInventoryMutationLock = async <T>(operation: () => Promise<T>) => {
-  const previous = inventoryMutationQueue.current;
-  let release!: () => void;
-  inventoryMutationQueue.current = new Promise<void>((resolve) => { release = resolve; });
-  await previous;
-  try {
-    return await operation();
-  } finally {
-    release();
-  }
-};
-
-const stockAfterAdjustment = (current: number, quantity: number, mode: InventoryMode) =>
-  mode === "release" ? Math.max(0, Math.floor(current + quantity)) : Math.max(0, Math.floor(current - quantity));
-
-async function adjustInventory(order: StoredOrder, mode: InventoryMode = "decrement", requireAvailable = false): Promise<InventoryAdjustment> {
-  const [savedVariants, savedSizeStock, savedVariantTypes] = await Promise.all([
-    readJsonSetting<Record<string, StoredVariant[]>>("product_variants", {}),
-    readJsonSetting<Record<string, Record<string, number>>>("product_size_stock", {}),
-    readJsonSetting<Record<string, "normal" | "size">>("product_variant_type", {}),
-  ]);
-  const variants = structuredClone(savedVariants);
-  const sizeStock = structuredClone(savedSizeStock);
-  const baseQuantities = new Map<string, number>();
-  let variantsChanged = false;
-  let sizeStockChanged = false;
-  const unresolvedProductIds = new Set<string>();
-
-  // Checkout may store a normalized product id while Admin keys inventory by
-  // the original SKU. Resolve each order line to that canonical SKU first.
-  let productRows: Array<{ sku?: string; stock?: number }> = [];
-  try {
-    const productResponse = await fetch(`${supabaseUrl}/rest/v1/products?select=sku,stock`, { headers });
-    if (productResponse.ok) productRows = await productResponse.json() as Array<{ sku?: string; stock?: number }>;
-  } catch {
-    productRows = [];
-  }
-  const resolveProductSku = (rawSku: string) =>
-    productRows.find((product) => normalizeSku(product.sku) === normalizeSku(rawSku))?.sku?.trim()
-      || findSettingKey(savedVariants, rawSku)
-      || findSettingKey(savedSizeStock, rawSku)
-      || findSettingKey(savedVariantTypes, rawSku)
-      || rawSku;
-
-  order.items?.forEach((item) => {
-    const rawSku = String(item.productId || "").trim();
-    const sku = resolveProductSku(rawSku);
-    const quantity = Math.floor(Number(item.quantity) || 0);
-    if (!sku || quantity <= 0) return;
-    const product = productRows.find((candidate) => normalizeSku(candidate.sku) === normalizeSku(sku));
-    const hasBaseStock = product?.stock !== undefined && product?.stock !== null && Number.isFinite(Number(product.stock));
-
-    const variantTypeKey = resolveSettingKey(savedVariantTypes, sku);
-    // The checkout line is the source of truth for the selected stock bucket.
-    // This also repairs older products whose variant-type setting was not saved.
-    const selectionType = item.size ? "size" : item.variantName ? "normal" : savedVariantTypes[variantTypeKey];
-    if (selectionType === "size" && item.size) {
-      const normalizedSize = normalizeSelection(item.size);
-      const sizeStockKey = resolveSettingKey(sizeStock, sku);
-      const currentSizeStock = sizeStock[sizeStockKey] || {};
-      const sizeKey = Object.keys(currentSizeStock).find((key) => normalizeSelection(key) === normalizedSize) || item.size;
-      const variantsKey = resolveSettingKey(variants, sku);
-      const productVariants = variants[variantsKey] || [];
-      const variantIndex = productVariants.findIndex((variant) => normalizeSelection(variant.size || variant.name) === normalizedSize);
-      const sizeVariant = variantIndex >= 0 ? productVariants[variantIndex] : undefined;
-      const configuredSizeStock = currentSizeStock[sizeKey];
-      const variantAvailable = Number(sizeVariant?.stock);
-      const hasConfiguredSizeStock = configuredSizeStock !== undefined && Number.isFinite(Number(configuredSizeStock));
-      const hasVariantStock = Number.isFinite(variantAvailable);
-
-      // Legacy products sometimes have a selected size but no matching size
-      // or variant inventory row. Their base product stock is the only stock
-      // bucket we can safely decrement in that case.
-      if (!hasConfiguredSizeStock && !hasVariantStock) {
-        // A zero base stock cannot represent the selected size. Keep the
-        // payment pending until the size metadata is restored instead of
-        // incorrectly marking its inventory as adjusted.
-        if (!hasBaseStock) unresolvedProductIds.add(rawSku || sku);
-        else baseQuantities.set(sku, (baseQuantities.get(sku) || 0) + quantity);
-        return;
-      }
-      if (hasConfiguredSizeStock) {
-        const available = Math.floor(Number(configuredSizeStock));
-        if (mode === "decrement" && requireAvailable && available < quantity) {
-          unresolvedProductIds.add(rawSku || sku);
-          return;
-        }
-        sizeStock[sizeStockKey] = {
-          ...currentSizeStock,
-          [sizeKey]: stockAfterAdjustment(available, quantity, mode),
-        };
-        sizeStockChanged = true;
-      }
-      if (hasVariantStock && sizeVariant) {
-        const available = Math.floor(Number(sizeVariant.stock));
-        if (mode === "decrement" && requireAvailable && available < quantity) {
-          unresolvedProductIds.add(rawSku || sku);
-          return;
-        }
-        variants[variantsKey] = productVariants.map((variant, index) => index === variantIndex
-          ? { ...variant, stock: stockAfterAdjustment(available, quantity, mode) }
-          : variant);
-        variantsChanged = true;
-      }
-      return;
-    }
-
-    if (selectionType === "normal" && item.variantName) {
-      const normalizedVariant = normalizeSelection(item.variantName);
-      const variantsKey = resolveSettingKey(variants, sku);
-      const productVariants = variants[variantsKey] || [];
-      const variantIndex = productVariants.findIndex((variant, index) =>
-        normalizeSelection(variant.name || `Option ${index + 1}`) === normalizedVariant,
-      );
-      const selectedVariant = variantIndex >= 0 ? productVariants[variantIndex] : undefined;
-      if (!selectedVariant || !Number.isFinite(Number(selectedVariant.stock))) {
-        if (!hasBaseStock) unresolvedProductIds.add(rawSku || sku);
-        else baseQuantities.set(sku, (baseQuantities.get(sku) || 0) + quantity);
-        return;
-      }
-      const available = Math.floor(Number(selectedVariant.stock));
-      if (mode === "decrement" && requireAvailable && available < quantity) {
-        unresolvedProductIds.add(rawSku || sku);
-        return;
-      }
-      variants[variantsKey] = productVariants.map((variant, index) => index === variantIndex
-        ? { ...variant, stock: stockAfterAdjustment(available, quantity, mode) }
-        : variant);
-      variantsChanged = true;
-      return;
-    }
-
-    if (!hasBaseStock) unresolvedProductIds.add(rawSku || sku);
-    else baseQuantities.set(sku, (baseQuantities.get(sku) || 0) + quantity);
-  });
-
-  // Do not partially deduct an order. A local-only or deleted product cannot
-  // be reconciled from this server, so its order stays pending instead of
-  // making its other lines reduce again during every future sync.
-  if (unresolvedProductIds.size > 0) {
-    return { complete: false, reason: mode === "decrement" && requireAvailable ? "One or more products do not have enough stock." : undefined };
-  }
-
-  for (const [sku, quantity] of baseQuantities) {
-    let expectedStock = Number(productRows.find((product) => normalizeSku(product.sku) === normalizeSku(sku))?.stock);
-    if (!Number.isFinite(expectedStock)) return { complete: false };
-    if (mode === "decrement" && requireAvailable && expectedStock < quantity) {
-      return { complete: false, reason: "One or more products do not have enough stock." };
-    }
-    let updated = false;
-    for (let attempt = 0; attempt < 3 && !updated; attempt += 1) {
-      const nextStock = stockAfterAdjustment(expectedStock, quantity, mode);
-      const updateResponse = await fetch(`${supabaseUrl}/rest/v1/products?sku=eq.${encodeURIComponent(sku)}&stock=eq.${encodeURIComponent(String(expectedStock))}`, {
-        method: "PATCH",
-        headers: { ...headers, Prefer: "return=representation" },
-        body: JSON.stringify({ stock: nextStock, updated_at: new Date().toISOString() }),
-      });
-      if (!updateResponse.ok) throw new Error("Could not update product inventory");
-      const updatedRows = await updateResponse.json() as Array<{ sku?: string }>;
-      if (updatedRows.length > 0) {
-        updated = true;
-        break;
-      }
-      const retryResponse = await fetch(`${supabaseUrl}/rest/v1/products?sku=eq.${encodeURIComponent(sku)}&select=sku,stock`, { headers });
-      if (!retryResponse.ok) return { complete: false };
-      const retryRows = await retryResponse.json() as Array<{ sku?: string; stock?: number }>;
-      expectedStock = Number(retryRows[0]?.stock);
-      if (!Number.isFinite(expectedStock)) return { complete: false };
-      if (mode === "decrement" && requireAvailable && expectedStock < quantity) {
-        return { complete: false, reason: "One or more products do not have enough stock." };
-      }
-    }
-    if (!updated) return { complete: false, reason: "Inventory changed while this order was being reserved." };
-  }
-
-  if (sizeStockChanged) await writeJsonSetting("product_size_stock", sizeStock);
-  if (variantsChanged) await writeJsonSetting("product_variants", variants);
-  return { complete: true };
-}
-
 export async function reconcilePendingOrderInventory() {
-  const initialOrders = await readOrders();
-  const reservationExpiry = Date.now() - 5 * 60 * 1000;
-  for (const order of initialOrders) {
-    if (order.paymentStatus !== "pending" || order.inventoryReserved !== true || order.inventoryReleased === true) continue;
-    const reservedAt = Date.parse(order.inventoryReservedAt || order.createdAt || order.date || "");
-    if (Number.isFinite(reservedAt) && reservedAt <= reservationExpiry) {
-      await releaseReservedOrderInventory(order.id).catch(() => undefined);
-    }
-  }
-
   const orders = await readOrders();
   let reconciled = 0;
   let pending = 0;
-  let ordersChanged = false;
-
-  // Covers paid orders older than Razorpay's latest-payment window. Only an
-  // explicit true is an idempotency marker, so stock is never reduced twice.
   for (const order of orders) {
-    if (order.paymentStatus !== "paid" || order.inventoryAdjusted === true) continue;
+    if (order.paymentStatus !== "pending" || !order.inventoryReserved || order.inventoryReleased) continue;
     try {
-      if (order.inventoryReserved === true && order.inventoryReleased !== true) {
-        order.inventoryAdjusted = true;
-        reconciled += 1;
-        ordersChanged = true;
-        continue;
-      }
-      const adjustment = await withInventoryMutationLock(() => adjustInventory(order));
-      if (adjustment.complete) {
-        order.inventoryAdjusted = true;
-        reconciled += 1;
-      } else {
-        order.inventoryAdjusted = false;
-        pending += 1;
-      }
-    } catch {
-      order.inventoryAdjusted = false;
-      pending += 1;
-    }
-    ordersChanged = true;
+      const updated = await checkoutRpc<StoredOrder>("expire", order.id);
+      if (updated.inventoryReleased) reconciled++;
+      else pending++;
+    } catch { pending++; }
   }
-
-  if (ordersChanged) await writeOrders(orders);
   return { reconciled, pending };
 }
 
-async function finalizeRazorpayPaymentInternal(payment: RazorpayPayment, receipt?: string) {
-  if (!payment.id) throw new Error("Razorpay payment ID is missing");
+export async function finalizeRazorpayPayment(payment: RazorpayPayment, receipt?: string, callback?: { key: string; hash: string }): Promise<StoredOrder | null> {
+  if (!payment.id || payment.status !== "captured" || payment.captured !== true || payment.currency !== "INR") throw new Error("Payment has not been captured in INR.");
   const orders = await readOrders();
-  let order = orders.find((candidate) => candidate.razorpayPaymentId === payment.id);
-  // Older paid orders do not have inventoryAdjusted. Treat only an explicit
-  // true value as complete so the next payment sync can repair their missing
-  // size/variant stock deduction and then mark them complete.
-  if (order?.paymentStatus === "paid" && order.inventoryAdjusted === true) {
-    if (!order.createdAt && payment.created_at) order.createdAt = new Date(payment.created_at * 1000).toISOString();
-    restorePaymentContactDetails(order, payment);
-    await writeOrders(orders);
-    await syncVendorOrderForPaidOrder(order).catch(() => undefined);
-    await ensureDelhiveryShipment(orders, order);
-    return order;
-  }
-
+  let order = orders.find((row) => row.razorpayPaymentId === payment.id)
+    || orders.find((row) => row.razorpayOrderId && row.razorpayOrderId === payment.order_id)
+    || orders.find((row) => row.id === payment.notes?.fanzzy_order_id)
+    || orders.find((row) => row.id === orderIdFromReceipt(receipt));
   if (!order) {
-    order = orders.find((candidate) => candidate.razorpayOrderId && candidate.razorpayOrderId === payment.order_id);
+    if (isPosPayment(payment, receipt)) return null;
+    throw new Error("Saved order could not be found. Payment requires reconciliation.");
   }
-  if (!order) {
-    const notedOrderId = typeof payment.notes?.fanzzy_order_id === "string" ? payment.notes.fanzzy_order_id.trim() : "";
-    if (notedOrderId) order = orders.find((candidate) => candidate.id === notedOrderId);
+  if (!isPosOrder(order)) {
+    if (!order.razorpayOrderId) order = await recoverCapturedOrderBinding(order, payment);
+    assertCapturedPayment(payment, order);
   }
-  if (!order) {
-    order = {
-      id: asOrderId(payment, receipt),
-      date: payment.created_at ? new Date(payment.created_at * 1000).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10),
-      createdAt: payment.created_at ? new Date(payment.created_at * 1000).toISOString() : new Date().toISOString(),
-      status: "Processing",
-      total: asMoney(Number(payment.amount) || 0),
-      customerName: customerEmail(payment.email)?.split("@")[0] || "Razorpay customer",
-      phone: payment.contact || "Not provided",
-      email: customerEmail(payment.email),
-      address: paymentAddress(payment),
-      items: [],
-    };
-    orders.unshift(order);
-  }
-
-  order.paymentStatus = "paid";
-  if (!order.createdAt && payment.created_at) order.createdAt = new Date(payment.created_at * 1000).toISOString();
-  order.razorpayOrderId = payment.order_id || order.razorpayOrderId;
-  order.razorpayPaymentId = payment.id;
-  restorePaymentContactDetails(order, payment);
-  order.inventoryAdjusted = order.inventoryReserved === true && order.inventoryReleased !== true;
-  await writeOrders(orders);
-
-  // Payment confirmation must not be lost because an older product is missing
-  // size/variant metadata. Keep the paid order and let the next admin sync
-  // retry inventory correction while it remains visibly pending.
-  if (!order.inventoryAdjusted) {
-    try {
-      const adjustment = await adjustInventory(order);
-      order.inventoryAdjusted = adjustment.complete;
-    } catch {
-      order.inventoryAdjusted = false;
-    }
-  }
-  await writeOrders(orders);
-  await syncVendorOrderForPaidOrder(order).catch(() => undefined);
-  if (order.fulfillmentMethod !== "pickup") await ensureDelhiveryShipment(orders, order);
-  return order;
-}
-
-export async function finalizeRazorpayPayment(payment: RazorpayPayment, receipt?: string) {
-  return withInventoryMutationLock(() => finalizeRazorpayPaymentInternal(payment, receipt));
+  return captureTransactionalPayment(order.id, payment, callback);
 }
 
 const customerPhoneDigits = (value: string) => String(value || "").replace(/\D/g, "").slice(-10);
 
+export async function listCustomerOrders(identity: { id: string; phone: string }) {
+  const orders = await readOrders();
+  const phone = customerPhoneDigits(identity.phone);
+  return orders
+    .filter((order) => order.userId
+      ? order.userId === identity.id
+      : phone.length === 10 && customerPhoneDigits(order.userPhone || order.phone) === phone)
+    .sort((left, right) => (right.createdAt || right.date).localeCompare(left.createdAt || left.date))
+    .map((order) => ({
+      id: order.id,
+      date: order.date,
+      createdAt: order.createdAt,
+      status: order.status,
+      paymentStatus: order.paymentStatus,
+      total: order.total,
+      fulfillmentMethod: order.fulfillmentMethod,
+      items: order.items?.map((item) => ({ name: item.productName || item.name, quantity: item.quantity, price: item.price })),
+    }));
+}
+
+export async function saveMobilePendingOrder(value: unknown, identity: { id: string; phone: string }, options: { requestKey: string; website?: boolean }) {
+  const order = sanitizeMobilePendingOrder(value, identity);
+  const requestHash = checkoutRequestHash(order);
+  const existing = await checkoutRpc<{ order: StoredOrder; request_hash: string } | null>("lookup_request", "", identity.id, { requestKey: options.requestKey });
+  if (existing) {
+    if (existing.request_hash !== requestHash) throw new Error("Checkout request key was reused for different details.");
+    return existing.order;
+  }
+  const quote = await authorizeMobileQuote(order, options.website === true, () => websitePromotionCustomerContext(identity));
+  return createTransactionalOrder(order, identity.id, options.requestKey, quote, requestHash);
+}
+
+export async function websitePromotionCustomerContext(identity: { id: string; phone: string }) {
+  const history = await listCustomerOrders(identity);
+  const hasPurchase = history.some((order) => order.status !== "Cancelled" && (order.status === "Delivered" || order.paymentStatus === "paid" || order.paymentStatus === "cod_pending" || order.paymentStatus === "cod_collected"));
+  return { customerPhone: identity.phone, historyAvailable: true, previousCustomerPhones: hasPurchase ? [identity.phone] : [] };
+}
+
 export async function confirmCashOnDeliveryOrder(orderId: string, identity?: { id: string; phone: string }) {
-  return withInventoryMutationLock(async () => {
+  if (!identity) throw new Error("Customer authentication required.");
+  return checkoutRpc<StoredOrder>("cod", orderId, identity.id);
+}
+
+type OutboxJob = { id: number; order_id: string; kind: "shipment" | "vendor_sync"; token: string };
+const fulfillmentEnabled = () => isLocalTestEnvironment(process.env) || process.env.FANZZY_FULFILLMENT_ENABLED === "true";
+
+export async function processCheckoutOutbox(orderId = "", kind?: string) {
+  if (!fulfillmentEnabled()) return { disabled: true, processed: 0 };
+  let processed = 0;
+  for (let i = 0; i < (orderId ? 1 : 10); i++) {
+    const token = randomUUID();
+    const job = await checkoutRpc<OutboxJob | null>("outbox_claim", orderId, "", { token, kind });
+    if (!job) break;
     const orders = await readOrders();
-    const order = orders.find((candidate) => candidate.id === orderId);
-    if (!order) throw new Error("Order could not be found for COD confirmation.");
-    if (identity) {
-      const sameAccount = order.userId ? order.userId === identity.id : customerPhoneDigits(order.userPhone || order.phone) === customerPhoneDigits(identity.phone);
-      if (!sameAccount) throw new Error("This order does not belong to the signed-in customer.");
+    const order = orders.find((row) => row.id === job.order_id);
+    // The durable sending transition happens before any external side effect.
+    await checkoutRpc("outbox_sending", "", "", { id: job.id, token });
+    try {
+      if (!order || !order.inventoryAdjusted || !["paid", "cod_pending", "cod_collected"].includes(order.paymentStatus || "")) throw new Error("Order is not ready for fulfilment");
+      if (job.kind === "vendor_sync") await syncVendorOrderForPaidOrder(order);
+      else await ensureDelhiveryShipment(orders, order);
+      if (job.kind === "shipment" && order.delhiveryShipmentStatus !== "created" && order.delhiveryShipmentStatus !== "awaiting_weight") throw new Error("Shipment outcome requires reconciliation");
+      await checkoutRpc("outbox_complete", "", "", { id: job.id, token, result: { awaitingWeight: order.delhiveryShipmentStatus === "awaiting_weight", waybill: order.delhiveryAwb || null } });
+      processed++;
+    } catch {
+      // Do not automatically repeat a request which might already have shipped
+      // or created a vendor order. Operators reconcile ambiguous outcomes.
+      await checkoutRpc("outbox_unknown", "", "", { id: job.id, token, result: { requiresReconciliation: true } }).catch(() => undefined);
     }
-
-    const paymentMethods = await readJsonSetting<Record<string, unknown>>("payment_methods", {});
-    if (paymentMethods.cod === false) throw new Error("Cash on delivery is currently unavailable.");
-    if (order.paymentMethod !== "cod") throw new Error("This order was not created with COD selected.");
-    if (order.paymentStatus === "cod_pending") {
-      await syncVendorOrderForPaidOrder(order).catch(() => undefined);
-      if (order.fulfillmentMethod !== "pickup") await ensureDelhiveryShipment(orders, order);
-      return order;
-    }
-    if (order.paymentStatus !== "pending") throw new Error("This order has already been confirmed or cannot use COD.");
-
-    if (order.inventoryReserved !== true || order.inventoryReleased === true) {
-      const adjustment = await adjustInventory(order, "decrement", true);
-      if (!adjustment.complete) throw new Error(adjustment.reason || "One or more products do not have enough stock.");
-      order.inventoryReserved = true;
-      order.inventoryReservedAt = order.inventoryReservedAt || new Date().toISOString();
-    }
-    order.inventoryReleased = false;
-    order.inventoryAdjusted = true;
-    order.paymentMethod = "cod";
-    order.paymentStatus = "cod_pending";
-    await writeOrders(orders);
-    await syncVendorOrderForPaidOrder(order).catch(() => undefined);
-    if (order.fulfillmentMethod !== "pickup") await ensureDelhiveryShipment(orders, order);
-    return order;
-  });
+  }
+  return { disabled: false, processed };
 }
 
 export async function createAdminDelhiveryShipment(orderId: string, weightGrams: number, pickupLocation: string, pickupTime: string) {
-  return withInventoryMutationLock(async () => {
-    const orders = await readOrders();
-    const order = orders.find((candidate) => candidate.id === orderId);
-    if (!order) throw new Error("Order could not be found for Delhivery shipment creation.");
-    if (order.fulfillmentMethod === "pickup") throw new Error("Hub-pickup orders do not use Delhivery shipping.");
-    if (!order.paymentStatus || !["paid", "cod_pending", "cod_collected"].includes(order.paymentStatus)) throw new Error("Payment or COD confirmation is required before creating the shipment.");
-    if (order.status === "Delivered" || order.status === "Cancelled") throw new Error(`A ${order.status.toLowerCase()} order cannot create a new shipment.`);
-    if (order.delhiveryAwb) return order;
-    const normalizedWeight = Math.round(Number(weightGrams));
-    if (!Number.isFinite(normalizedWeight) || normalizedWeight < 500 || normalizedWeight > 30_000) throw new Error("Packed parcel weight must be between 500 and 30,000 grams.");
-    const options = getDelhiveryAdminOptions();
-    if (!options.pickupLocations.includes(pickupLocation)) throw new Error("Select the configured Delhivery pickup location.");
-    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(pickupTime)) throw new Error("Enter a valid Delhivery pickup time.");
-
-    order.delhiveryWeightGrams = normalizedWeight;
-    order.delhiveryPickupLocation = pickupLocation;
-    order.delhiveryPickupRequestTime = `${pickupTime}:00`;
-    order.delhiveryShipmentStatus = "awaiting_weight";
-    delete order.delhiveryShipmentError;
-    await writeOrders(orders);
-    await ensureDelhiveryShipment(orders, order, true);
-    return order;
-  });
+  if (!fulfillmentEnabled()) throw new Error("Fulfilment is disabled until deployment approval.");
+  const normalizedWeight = Math.round(Number(weightGrams));
+  if (!Number.isFinite(normalizedWeight) || normalizedWeight < 500 || normalizedWeight > 30000) throw new Error("Packed parcel weight must be between 500 and 30,000 grams.");
+  const options = await loadDelhiveryAdminOptions();
+  if (!options.pickupLocations.includes(pickupLocation)) throw new Error("Select the configured Delhivery pickup location.");
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(pickupTime)) throw new Error("Enter a valid Delhivery pickup time.");
+  await checkoutRpc("prepare_shipment", orderId, "", { weight: normalizedWeight, pickupLocation, pickupTime: pickupTime + ":00" });
+  await processCheckoutOutbox(orderId, "shipment");
+  return (await readOrders()).find((row) => row.id === orderId)!;
 }
 
 export async function refreshDelhiveryOrderTracking(orderId: string, waybill: string) {
-  return withInventoryMutationLock(async () => {
-    const orders = await readOrders();
-    const order = orders.find((candidate) => candidate.id === orderId && candidate.delhiveryAwb === waybill);
-    if (!order) throw new Error("The Delhivery shipment could not be matched to this order.");
-    const tracking = await trackDelhiveryShipment(waybill, order.id);
-    order.delhiveryLiveStatus = tracking.status;
-    order.delhiveryLiveStatusType = tracking.statusType;
-    order.delhiveryLiveStatusDate = tracking.statusDate;
-    order.delhiveryLiveLocation = tracking.location;
-    order.delhiveryScans = tracking.scans;
-    order.delhiveryLastTrackedAt = new Date().toISOString();
-    if (/delivered/i.test(tracking.status)) {
-      order.status = "Delivered";
-      if (order.paymentMethod === "cod") order.paymentStatus = "cod_collected";
-    }
-    else if (/(picked|dispatched|in transit|out for delivery|shipped)/i.test(tracking.status) && order.status === "Processing") order.status = "Shipped";
-    await writeOrders(orders);
-    return tracking;
-  });
+  const order = (await readOrders()).find((row) => row.id === orderId && row.delhiveryAwb === waybill);
+  if (!order) throw new Error("Shipment does not match this order.");
+  const tracking = await trackDelhiveryShipment(waybill, orderId);
+  await checkoutRpc("tracking", orderId, "", { ...tracking, waybill });
+  return tracking;
 }
 
-export async function reserveOrderInventory(orderId: string) {
-  return withInventoryMutationLock(async () => {
-    const orders = await readOrders();
-    const order = orders.find((candidate) => candidate.id === orderId);
-    if (!order) throw new Error("Order could not be found for stock reservation.");
-    if (order.paymentStatus === "paid" || order.paymentStatus === "cod_pending" || order.paymentStatus === "cod_collected") return order;
-    if (order.inventoryReserved === true && order.inventoryReleased !== true) return order;
-
-    const adjustment = await adjustInventory(order, "decrement", true);
-    if (!adjustment.complete) throw new Error(adjustment.reason || "One or more products do not have enough stock.");
-    order.inventoryReserved = true;
-    order.inventoryReservedAt = new Date().toISOString();
-    order.inventoryReleased = false;
-    order.inventoryAdjusted = false;
-    await writeOrders(orders);
-    return order;
-  });
+export async function reserveOrderInventory(orderId: string, identity?: { id: string; phone: string }) {
+  if (!identity) throw new Error("Customer authentication required.");
+  return checkoutRpc<StoredOrder>("reserve", orderId, identity.id);
 }
 
-export async function releaseReservedOrderInventory(orderId: string) {
-  return withInventoryMutationLock(async () => {
-    const orders = await readOrders();
-    const order = orders.find((candidate) => candidate.id === orderId);
-    if (!order) throw new Error("Order could not be found for stock release.");
-    if (order.paymentStatus === "paid" || order.paymentStatus === "cod_pending" || order.paymentStatus === "cod_collected" || order.inventoryReserved !== true || order.inventoryReleased === true) return order;
-
-    const adjustment = await adjustInventory(order, "release");
-    if (!adjustment.complete) throw new Error("Reserved stock could not be released.");
-    order.inventoryReserved = true;
-    order.inventoryReleased = true;
-    order.inventoryAdjusted = false;
-    await writeOrders(orders);
-    return order;
-  });
+export async function releaseReservedOrderInventory(orderId: string, identity?: { id: string; phone: string }) {
+  if (!identity) throw new Error("Customer authentication required.");
+  return checkoutRpc<StoredOrder>("release", orderId, identity.id);
 }

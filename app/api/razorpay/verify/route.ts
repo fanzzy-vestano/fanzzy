@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { finalizeRazorpayPayment, type RazorpayPayment } from "../../../../lib/razorpay-payment-sync";
+import { paymentConfigurationError } from "../../../../lib/payment-policy";
 
 type VerifyPaymentRequest = {
   razorpayOrderId?: unknown;
@@ -14,6 +15,8 @@ const json = (body: Record<string, unknown>, status = 200) =>
   });
 
 export async function POST(request: Request) {
+  const configurationError = paymentConfigurationError(process.env);
+  if (configurationError) return json({ error: configurationError }, 503);
   const keySecret = process.env.RAZORPAY_KEY_SECRET;
   if (!keySecret) return json({ error: "Razorpay is not configured on the server" }, 503);
 
@@ -44,15 +47,17 @@ export async function POST(request: Request) {
       headers: { Authorization: `Basic ${Buffer.from(`${process.env.RAZORPAY_KEY_ID || ""}:${keySecret}`).toString("base64")}` },
     });
     const payment = await paymentResponse.json() as RazorpayPayment & { error?: { description?: string } };
-    if (!paymentResponse.ok || payment.order_id !== orderId) {
+    if (!paymentResponse.ok || payment.id !== paymentId || payment.order_id !== orderId) {
       return json({ error: payment.error?.description || "Razorpay payment could not be confirmed" }, 502);
     }
     const order = await finalizeRazorpayPayment(payment);
+    if (!order) return json({ error: "Saved order is awaiting reconciliation." }, 409);
     return json({
       verified: true,
       razorpayOrderId: orderId,
       razorpayPaymentId: paymentId,
-      inventoryAdjusted: order.inventoryAdjusted === true,
+      inventoryAdjusted: order?.inventoryAdjusted === true,
+      orderSaved: Boolean(order),
     });
   } catch (error) {
     return json({ error: error instanceof Error ? error.message : "Could not save the confirmed payment" }, 502);

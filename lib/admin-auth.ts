@@ -1,15 +1,19 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { assertLocalTestServerSafety } from "./runtime-safety";
+
+assertLocalTestServerSafety(process.env);
 
 const ADMIN_COOKIE = "fanzzy_admin_session";
 const SESSION_MAX_AGE = 60 * 60 * 12;
 let runtimeAdminPassword = "";
 let pendingReset: { email: string; token: string; otp: string; expiresAt: number } | null = null;
 const getSecret = () => process.env.ADMIN_AUTH_SECRET?.trim() || "";
+const isLocalTest = () => process.env.FANZZY_ENV === "local-test" || process.env.NEXT_PUBLIC_FANZZY_ENV === "local-test";
 const sign = (value: string) => createHmac("sha256", getSecret()).update(value).digest("base64url");
 
 export const getAdminCredentials = () => ({
-  email: process.env.ADMIN_LOGIN_EMAIL?.trim().toLowerCase() || "",
-  password: runtimeAdminPassword || process.env.ADMIN_LOGIN_PASSWORD || "",
+  email: process.env.ADMIN_LOGIN_EMAIL?.trim().toLowerCase() || (isLocalTest() ? "local-admin@fanzzy.test" : ""),
+  password: runtimeAdminPassword || process.env.ADMIN_LOGIN_PASSWORD || (isLocalTest() ? "local-admin-password" : ""),
 });
 
 export const isAdminConfigured = () => {

@@ -2,6 +2,9 @@ import { createHash, randomBytes, scrypt as nodeScrypt, timingSafeEqual, createC
 import { promisify } from "node:util";
 import { delhiveryTrackingUrl, trackDelhiveryShipment } from "./delhivery";
 import { allocateProRata, calculateCommission, groupOrderItemsByVendor, resolveCommissionRule, slugifyVendorName, type CommissionRule, type VendorAccountStatus, type VendorOrderStatus, type VendorProductStatus } from "./vendor-marketplace";
+import { assertLocalTestServerSafety } from "./runtime-safety";
+
+assertLocalTestServerSafety(process.env);
 
 const scrypt = promisify(nodeScrypt);
 const VENDOR_COOKIE = "fanzzy_vendor_session";
@@ -344,7 +347,7 @@ export async function getPublicVendor(slug: string) {
   const vendors = await rest<VendorRecord[]>("vendors", `slug=eq.${encodeURIComponent(slug)}&status=eq.Active&store_visibility=eq.Visible&select=id,slug,business_name,logo_url,cover_url,description,featured`);
   const vendor = vendors[0];
   if (!vendor) throw new VendorDataError("Vendor store not found.", 404);
-  const products = await rest<Array<Record<string, unknown>>>("products", `vendor_id=eq.${encodeURIComponent(vendor.id)}&vendor_status=eq.Approved&public_vendor_visible=eq.true&select=*&order=created_at.desc`);
+  const products = await rest<Array<Record<string, unknown>>>("products", `vendor_id=eq.${encodeURIComponent(vendor.id)}&vendor_status=eq.Approved&public_vendor_visible=eq.true&status=neq.Draft&select=*&order=created_at.desc`);
   return { vendor: { id: vendor.id, slug: vendor.slug, businessName: vendor.business_name, logoUrl: vendor.logo_url || undefined, coverUrl: vendor.cover_url || undefined, description: vendor.description, featured: vendor.featured }, products };
 }
 
@@ -886,7 +889,7 @@ export async function syncVendorOrderForPaidOrder(order: { id: string; total: st
   });
   const groups = groupOrderItemsByVendor({ id: order.id, total: order.total, items: rawItems }, productMap);
   const groupAmounts = groups.map((group) => group.items.reduce((sum, item) => sum + money(item.price) * Math.max(0, Number(item.quantity) || 0), 0));
-  const couponGroupAllocations = allocateProRata(Number(order.couponDiscount) || 0, groupAmounts);
+  const couponGroupAllocations = allocateProRata((Number(order.couponDiscount) || 0) + (Number(order.promotionDiscount) || 0), groupAmounts);
   const shippingGroupAllocations = allocateProRata(Number(order.shippingTotal) || 0, groupAmounts);
   const commissionRows = await rest<Array<Record<string, unknown>>>("vendor_commission_rules", "active=eq.true&select=scope_type,scope_id,mode,rate,fixed_amount", { privileged: true }).catch(() => []);
   const toRule = (row: Record<string, unknown> | undefined, source: CommissionRule["source"]): CommissionRule | undefined => row ? { source, mode: row.mode === "fixed" ? "fixed" : "percentage", rate: Number(row.rate) || 0, fixedAmount: Number(row.fixed_amount) || 0 } : undefined;

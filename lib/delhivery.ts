@@ -1,3 +1,7 @@
+import { createMockDelhiveryPickup, createMockDelhiveryShipment, trackMockDelhiveryShipment } from "./delhivery-mock";
+import { fetchDelhiveryPickupLocations, hasDelhiveryLocationIntegration } from "./delhivery-locations";
+import { assertLocalTestServerSafety, DELHIVERY_PRODUCTION_HOST, DELHIVERY_STAGING_HOST, isLocalTestEnvironment } from "./runtime-safety";
+
 type DelhiveryAddress = {
   name: string;
   address: string;
@@ -47,15 +51,21 @@ export type DelhiveryTrackingResult = {
   scans: Array<{ status: string; date?: string; location?: string; instructions?: string }>;
 };
 
-const createEndpoint = "https://track.delhivery.com/api/cmu/create.json";
-const pickupRequestEndpoint = "https://track.delhivery.com/fm/request/new/";
-const trackingEndpoint = "https://track.delhivery.com/api/v1/packages/json/";
-const pincodeEndpoint = "https://track.delhivery.com/c/api/pin-codes/json/";
+assertLocalTestServerSafety(process.env);
+
+const delhiveryMode = () => String(process.env.DELHIVERY_MODE || (isLocalTestEnvironment(process.env) ? "mock" : "production")).trim();
+const delhiveryBaseUrl = () => {
+  const configured = String(process.env.DELHIVERY_API_BASE_URL || "").trim().replace(/\/$/, "");
+  if (configured) return configured;
+  return delhiveryMode() === "staging" ? `https://${DELHIVERY_STAGING_HOST}` : `https://${DELHIVERY_PRODUCTION_HOST}`;
+};
+const endpoint = (path: string) => `${delhiveryBaseUrl()}${path}`;
 
 const config = () => ({
   token: String(process.env.DELHIVERY_API_TOKEN || "").trim(),
   client: String(process.env.DELHIVERY_CLIENT_NAME || "").trim(),
-  pickupLocation: String(process.env.DELHIVERY_PICKUP_LOCATION || "").trim(),
+  pickupLocation: String(process.env.DELHIVERY_PICKUP_LOCATION || "").trim()
+    || String(process.env.DELHIVERY_PICKUP_NAME || "").trim(),
   sellerName: String(process.env.DELHIVERY_SELLER_NAME || "").trim(),
   sellerAddress: String(process.env.DELHIVERY_SELLER_ADDRESS || "").trim(),
   sellerGstTin: String(process.env.DELHIVERY_SELLER_GST_TIN || "").trim(),
@@ -68,14 +78,29 @@ const config = () => ({
   defaultHeightCm: Number(process.env.DELHIVERY_DEFAULT_HEIGHT_CM || 5),
 });
 
-export const isDelhiveryConfigured = () => {
+const missingDelhiverySettings = () => {
   const current = config();
-  return Boolean(current.token && current.client && current.pickupLocation && current.sellerName && current.sellerAddress && current.sellerGstTin);
+  if (delhiveryMode() === "mock") return [
+    ...(!current.pickupLocation && !hasDelhiveryLocationIntegration() ? ["pickup warehouse"] : []),
+    ...(!/^[1-9]\d{5}$/.test(current.originPin) ? ["valid origin pincode"] : []),
+  ];
+  return [
+    [current.token, "API token"],
+    [current.client, "client name"],
+    [current.pickupLocation || hasDelhiveryLocationIntegration(), "pickup warehouse"],
+    [current.sellerName, "seller name"],
+    [current.sellerAddress, "seller address"],
+    [current.sellerGstTin, "seller GST number"],
+    [/^[1-9]\d{5}$/.test(current.originPin), "valid origin pincode"],
+  ].filter(([value]) => !value).map(([, label]) => String(label));
 };
 
+export const isDelhiveryConfigured = () => missingDelhiverySettings().length === 0;
+
 export const isDelhiveryPickupConfigured = () => {
+  if (delhiveryMode() === "mock") return true;
   const current = config();
-  return Boolean(current.token && current.pickupLocation);
+  return Boolean(current.token && (current.pickupLocation || hasDelhiveryLocationIntegration()));
 };
 
 const safeJson = async (response: Response) => {
@@ -116,7 +141,8 @@ const parseAddress = (order: DelhiveryOrder): DelhiveryAddress => {
 };
 
 const getPincodeServiceability = async (pincode: string, token: string, paymentMethod: DelhiveryOrder["paymentMethod"] = "online") => {
-  const response = await fetch(`${pincodeEndpoint}?filter_codes=${encodeURIComponent(pincode)}`, {
+  if (delhiveryMode() === "mock") return;
+  const response = await fetch(`${endpoint("/c/api/pin-codes/json/")}?filter_codes=${encodeURIComponent(pincode)}`, {
     headers: { Authorization: `Token ${token}`, Accept: "application/json" },
   });
   const { value } = await safeJson(response);
@@ -200,17 +226,28 @@ const validPickupTime = (value: string) => {
 
 export const getDelhiveryAdminOptions = () => {
   const current = config();
+  const missing = missingDelhiverySettings();
   return {
     pickupLocations: current.pickupLocation ? [current.pickupLocation] : [],
     defaultPickupTime: validPickupTime(current.pickupTime).slice(0, 5),
+    configurationError: missing.length ? `Delhivery setup is incomplete. Missing: ${missing.join(", ")}.` : "",
   };
 };
 
-const configuredPickupLocation = (requested?: string) => {
+export const loadDelhiveryAdminOptions = async () => {
+  const options = getDelhiveryAdminOptions();
+  if (!hasDelhiveryLocationIntegration()) return { ...options, pickupLocationDetails: [] };
+  const details = await fetchDelhiveryPickupLocations();
+  return { ...options, pickupLocations: details.map(location => location.name), pickupLocationDetails: details,
+    configurationError: options.configurationError || (details.length ? "" : "No active pickup locations were returned by Delhivery One.") };
+};
+
+const configuredPickupLocation = async (requested?: string) => {
   const current = config();
   const pickupLocation = String(requested || current.pickupLocation).trim();
   if (!pickupLocation) throw delhiveryError("The Delhivery pickup location is not configured on the server.");
-  if (pickupLocation !== current.pickupLocation) throw delhiveryError("The selected Delhivery pickup location is not configured on the server.");
+  const locations = hasDelhiveryLocationIntegration() ? (await loadDelhiveryAdminOptions()).pickupLocations : getDelhiveryAdminOptions().pickupLocations;
+  if (!locations.includes(pickupLocation)) throw delhiveryError("The selected Delhivery pickup location is not configured on the server or is no longer active.");
   return pickupLocation;
 };
 
@@ -286,8 +323,12 @@ export const delhiveryPickupSchedule = (pickupTime?: string) => pickupScheduleCa
 export async function createDelhiveryPickupRequest(expectedPackageCount: number, pickupLocation?: string, pickupTime?: string): Promise<DelhiveryPickupRequestResult> {
   const current = config();
   if (!isDelhiveryPickupConfigured()) throw delhiveryError("Delhivery pickup automation is not fully configured on the server.");
-  const selectedPickupLocation = configuredPickupLocation(pickupLocation);
+  const selectedPickupLocation = await configuredPickupLocation(pickupLocation);
   const count = Math.max(1, Math.floor(Number(expectedPackageCount) || 0));
+  if (delhiveryMode() === "mock") {
+    const schedule = pickupScheduleCandidates(pickupTime)[0];
+    return createMockDelhiveryPickup(count, schedule.pickupTime);
+  }
   let lastError: Error | undefined;
   for (const schedule of pickupScheduleCandidates(pickupTime)) {
     const body = JSON.stringify({
@@ -296,7 +337,7 @@ export async function createDelhiveryPickupRequest(expectedPackageCount: number,
       pickup_location: selectedPickupLocation,
       expected_package_count: count,
     });
-    const response = await fetch(pickupRequestEndpoint, {
+    const response = await fetch(endpoint("/fm/request/new/"), {
       method: "POST",
       headers: { Authorization: `Token ${current.token}`, "Content-Type": "application/json", Accept: "application/json" },
       body,
@@ -322,10 +363,10 @@ export async function createDelhiveryPickupRequest(expectedPackageCount: number,
 
 export async function manifestDelhiveryShipment(order: DelhiveryOrder): Promise<DelhiveryShipmentResult> {
   const current = config();
-  if (!isDelhiveryConfigured()) throw delhiveryError("Delhivery is not fully configured on the server.");
+  if (!isDelhiveryConfigured()) throw delhiveryError(getDelhiveryAdminOptions().configurationError);
   if (!current.originPin || !/^\d{6}$/.test(current.originPin)) throw delhiveryError("The Delhivery origin pincode is not configured.");
   const consignee = parseAddress(order);
-  const pickupLocation = configuredPickupLocation(order.delhiveryPickupLocation);
+  const pickupLocation = await configuredPickupLocation(order.delhiveryPickupLocation);
   await getPincodeServiceability(consignee.pincode, current.token, order.paymentMethod);
 
   const items = (order.items || []).filter((item) => Math.max(0, Number(item.quantity) || 0) > 0);
@@ -367,8 +408,9 @@ export async function manifestDelhiveryShipment(order: DelhiveryOrder): Promise<
     client: current.client,
     fragile_shipment: true,
   };
+  if (delhiveryMode() === "mock") return createMockDelhiveryShipment(order, weight, pickupLocation);
   const body = new URLSearchParams({ format: "json", data: JSON.stringify(payload) });
-  const response = await fetch(createEndpoint, {
+  const response = await fetch(endpoint("/api/cmu/create.json"), {
     method: "POST",
     headers: { Authorization: `Token ${current.token}`, "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
     body,
@@ -396,10 +438,11 @@ const trackingScans = (value: unknown) => {
 
 export async function trackDelhiveryShipment(waybill: string, refId?: string): Promise<DelhiveryTrackingResult> {
   const current = config();
+  if (delhiveryMode() === "mock") return trackMockDelhiveryShipment(waybill.trim());
   if (!current.token) throw delhiveryError("Delhivery is not configured on the server.");
   const params = new URLSearchParams({ waybill: waybill.trim() });
   if (refId?.trim()) params.set("ref_ids", refId.trim());
-  const response = await fetch(`${trackingEndpoint}?${params.toString()}`, {
+  const response = await fetch(`${endpoint("/api/v1/packages/json/")}?${params.toString()}`, {
     headers: { Authorization: `Token ${current.token}`, Accept: "application/json" },
   });
   const { value } = await safeJson(response);

@@ -1,6 +1,8 @@
+import { filterCatalogProducts, type CatalogScope } from "../catalog/catalog-visibility";
 import { supabase } from "./client";
 import { countProductsByCategoryKey, mergeCatalogCategories } from "../catalog-categories";
 import { prepareStoreImage } from "../store-image-upload";
+import { adminApiFetch, customerApiFetch } from "../site-api-client";
 
 export type CatalogStatus = "Published" | "Draft" | "Low stock";
 export type ProductVariantType = "normal" | "size";
@@ -106,10 +108,17 @@ const settingKeys = {
   productImageAdjustments: "product_image_adjustments",
   productDamages: "product_damages",
   promotionalOffers: "promotional_offers",
+  salesPromotions: "sales_promotions",
   refundRequests: "refund_requests",
+  walkInReturns: "walk_in_returns",
   printerName: "printer_name",
   billDesign: "bill_design",
 } as const;
+
+const localTestStoreSettingKey = (key: keyof typeof settingKeys) =>
+  process.env.NEXT_PUBLIC_FANZZY_ENV === "local-test" && process.env.NEXT_PUBLIC_FANZZY_DATA_MODE !== "production-snapshot" && key === "refundRequests"
+    ? "local_test_refund_requests"
+    : settingKeys[key];
 
 const asError = (value: unknown) => value instanceof Error ? value : new Error(String(value || "Supabase request failed"));
 
@@ -145,16 +154,23 @@ const asCategory = (row: Record<string, unknown>): CatalogCategory => ({
   section: row.section === "luxury" || row.section === "normal" ? row.section : undefined,
 });
 
-export async function fetchCatalogProducts() {
+export async function fetchCatalogProducts(scope: CatalogScope = "all") {
   if (!supabase) return { data: null, error: new Error("Supabase is not configured") };
-  const result = await supabase.from("products").select("*,vendors(business_name,slug)").order("created_at", { ascending: true });
+  const read = (select: string) => {
+    let query = supabase!.from("products").select(select);
+    if (scope !== "all") query = query.neq("status", "Draft");
+    if (scope === "general") query = query.is("vendor_id", null);
+    if (typeof scope === "object") query = query.eq("vendor_id", scope.vendorId).eq("vendor_status", "Approved").eq("public_vendor_visible", true);
+    return query.order("created_at", { ascending: true });
+  };
+  const result = await read("*,vendors(business_name,slug)");
   if (!result.error) {
-    return { data: result.data?.map((row) => asProduct(row as Record<string, unknown>)) ?? null, error: null };
+    return { data: result.data ? filterCatalogProducts(result.data.map((row) => asProduct(row as unknown as Record<string, unknown>)), scope) : null, error: null };
   }
   // Vendor relations may not exist yet in an older production schema. The
   // catalog itself must remain available while vendor metadata is optional.
-  const fallback = await supabase.from("products").select("*").order("created_at", { ascending: true });
-  return { data: fallback.data?.map((row) => asProduct(row as Record<string, unknown>)) ?? null, error: fallback.error };
+  const fallback = await read("*");
+  return { data: fallback.data ? filterCatalogProducts(fallback.data.map((row) => asProduct(row as unknown as Record<string, unknown>)), scope) : null, error: fallback.error };
 }
 
 export async function saveCatalogProduct(product: CatalogProduct) {
@@ -296,8 +312,9 @@ export async function renameCatalogCategory(
 }
 
 export async function fetchStoreSetting(key: keyof typeof settingKeys) {
+  if (key === "orders") { const result = await fetchStoreOrders(); return { value: result.data ? JSON.stringify(result.data) : null, error: result.error }; }
   if (!supabase) return { value: null, error: new Error("Supabase is not configured") };
-  const result = await supabase.from("store_settings").select("value").eq("key", settingKeys[key]).maybeSingle();
+  const result = await supabase.from("store_settings").select("value").eq("key", localTestStoreSettingKey(key)).maybeSingle();
   return { value: typeof result.data?.value === "string" ? result.data.value : null, error: result.error };
 }
 
@@ -335,9 +352,10 @@ export async function fetchVendorCategoryNames() {
 // rather than making seven connections before a customer can see products.
 export async function fetchStoreSettings<const Keys extends readonly (keyof typeof settingKeys)[]>(keys: Keys) {
   const result = supabase
-    ? await supabase.from("store_settings").select("key,value").in("key", keys.map((key) => settingKeys[key]))
+    ? await supabase.from("store_settings").select("key,value").in("key", keys.filter((key) => key !== "orders").map((key) => settingKeys[key]))
     : { data: null, error: new Error("Supabase is not configured") };
   const values = new Map((result.data || []).map((row) => [row.key, row.value]));
+  if (keys.includes("orders")) { const orders = await fetchStoreOrders(); if (orders.error) throw orders.error; values.set("orders", JSON.stringify(orders.data)); }
   return Object.fromEntries(keys.map((key) => {
     const value = values.get(settingKeys[key]);
     return [key, { value: typeof value === "string" ? value : null, error: result.error }];
@@ -345,24 +363,73 @@ export async function fetchStoreSettings<const Keys extends readonly (keyof type
 }
 
 export async function saveStoreSetting(key: keyof typeof settingKeys, value: string) {
+  if (key === "orders") { try { return saveStoreOrders(JSON.parse(value)); } catch { return new Error("Order data is invalid."); } }
   if (!supabase) return new Error("Supabase is not configured");
-  const { error } = await supabase.from("store_settings").upsert({ key: settingKeys[key], value, updated_at: new Date().toISOString() }, { onConflict: "key" });
+  const { error } = await supabase.from("store_settings").upsert({ key: localTestStoreSettingKey(key), value, updated_at: new Date().toISOString() }, { onConflict: "key" });
   return error;
 }
 
-export async function fetchStoreOrders<T>() {
-  const remote = await fetchStoreSetting("orders");
-  if (remote.error || !remote.value) return { data: null as T[] | null, error: remote.error };
-  try {
-    const parsed: unknown = JSON.parse(remote.value);
-    return { data: Array.isArray(parsed) ? parsed as T[] : null, error: null };
-  } catch (error) {
-    return { data: null as T[] | null, error: asError(error) };
-  }
+const orderSnapshots = new Map<string, Record<string, unknown>>();
+const editableOrderField = (key: string) => ["status", "customerName", "phone", "email", "address", "returnStatus", "refundStatus", "refundReference", "cancellationRecords"].includes(key) || key.startsWith("delhivery");
+async function loadAdminOrdersApi() {
+  if (typeof window !== "undefined" && window.location.pathname.startsWith("/admin")) return true;
+  const session = supabase ? (await supabase.auth.getSession()).data.session : null;
+  return session?.user.email?.toLowerCase() === "fanzzy@vestanoretail.com";
 }
-
+export async function fetchStoreOrders<T>() {
+  try {
+    const localTestDatabase = process.env.NEXT_PUBLIC_FANZZY_ENV === "local-test"
+      && process.env.NEXT_PUBLIC_SUPABASE_URL?.startsWith("http:");
+    if (localTestDatabase && supabase) {
+      const { data, error } = await supabase
+        .from("store_settings")
+        .select("value")
+        .eq("key", "orders")
+        .maybeSingle();
+      if (error) throw error;
+      const value = (data as { value?: unknown } | null)?.value;
+      const orders = typeof value === "string" ? JSON.parse(value) : value;
+      if (!Array.isArray(orders)) throw new Error("Local test orders are unavailable.");
+      for (const order of orders) orderSnapshots.set(String(order.id), structuredClone(order));
+      return { data: orders as T[], error: null };
+    }
+    const admin = await loadAdminOrdersApi();
+    const response = await (admin ? adminApiFetch("/admin/orders", { credentials: "include", cache: "no-store" }) : customerApiFetch("/orders", { credentials: "include", cache: "no-store" }));
+    const body = await response.json() as { orders?: Array<Record<string, unknown>>; error?: string };
+    if (!response.ok || !Array.isArray(body.orders)) throw new Error(body.error || "Orders are unavailable.");
+    for (const order of body.orders) orderSnapshots.set(String(order.id), structuredClone(order));
+    return { data: body.orders as T[], error: null };
+  } catch (error) { return { data: null as T[] | null, error: asError(error) }; }
+}
 export async function saveStoreOrders(orders: unknown[]) {
-  return saveStoreSetting("orders", JSON.stringify(orders));
+  try {
+    if (!await loadAdminOrdersApi()) return new Error("Customer order writes require the authenticated checkout API.");
+    const patches: Array<{ id: string; changes: Record<string, unknown>; before: Record<string, unknown> }> = [];
+    const created: Record<string, unknown>[] = [];
+    for (const value of orders) {
+      if (!value || typeof value !== "object" || !("id" in value)) throw new Error("Order data is invalid.");
+      const order = value as Record<string, unknown>;
+      const id = String(order.id);
+      const old = orderSnapshots.get(id);
+      if (!old) {
+        if (!id.startsWith("#FZ-POS-")) continue;
+        created.push(order); continue;
+      }
+      const changes: Record<string, unknown> = {}; const before: Record<string, unknown> = {};
+      for (const key of Object.keys(order).filter(editableOrderField)) {
+        if (JSON.stringify(order[key] ?? null) !== JSON.stringify(old[key] ?? null)) {
+          changes[key] = order[key] ?? null; before[key] = old[key] ?? null;
+        }
+      }
+      if (Object.keys(changes).length) patches.push({ id, changes, before });
+    }
+    if (!patches.length && !created.length) return null;
+    const response = await adminApiFetch("/admin/orders", { method: "PATCH", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify({ patches, created }) });
+    const body = await response.json() as { saved?: boolean; orders?: Array<Record<string, unknown>>; error?: string };
+    if (!response.ok || !body.saved) throw new Error(body.error || "Order changes could not be saved.");
+    for (const order of body.orders || []) orderSnapshots.set(String(order.id), structuredClone(order));
+    return null;
+  } catch (error) { return asError(error); }
 }
 
 let storeSettingSubscriptionSequence = 0;
@@ -373,7 +440,7 @@ let vendorCategorySubscriptionSequence = 0;
 
 export function subscribeToCatalogProducts(onChange: () => void) {
   const client = supabase;
-  if (!client) return () => undefined;
+  if (!client || (process.env.NEXT_PUBLIC_FANZZY_ENV === "local-test" && process.env.NEXT_PUBLIC_SUPABASE_URL?.startsWith("http:"))) return () => undefined;
   catalogProductSubscriptionSequence += 1;
   const channel = client
     .channel(`fanzzy-products-live-${catalogProductSubscriptionSequence}`)
@@ -388,7 +455,7 @@ export function subscribeToCatalogProducts(onChange: () => void) {
 
 export function subscribeToVendorCategories(onChange: () => void) {
   const client = supabase;
-  if (!client) return () => undefined;
+  if (!client || (process.env.NEXT_PUBLIC_FANZZY_ENV === "local-test" && process.env.NEXT_PUBLIC_SUPABASE_URL?.startsWith("http:"))) return () => undefined;
   vendorCategorySubscriptionSequence += 1;
   const channel = client
     .channel(`fanzzy-vendor-categories-live-${vendorCategorySubscriptionSequence}`)
@@ -408,7 +475,7 @@ export function subscribeToVendorCategories(onChange: () => void) {
 
 export function subscribeToStoreSetting(key: keyof typeof settingKeys, onChange: () => void) {
   const client = supabase;
-  if (!client) return () => undefined;
+  if (!client || (process.env.NEXT_PUBLIC_FANZZY_ENV === "local-test" && process.env.NEXT_PUBLIC_SUPABASE_URL?.startsWith("http:"))) return () => undefined;
   storeSettingSubscriptionSequence += 1;
   const channel = client
     .channel(`fanzzy-${settingKeys[key]}-live-${storeSettingSubscriptionSequence}`)

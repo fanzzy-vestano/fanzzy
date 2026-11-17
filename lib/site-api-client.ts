@@ -36,6 +36,13 @@ export const customerApiFetch = (path: string, init: RequestInit = {}) => {
   return siteApiFetch(path, withBearer(init, token));
 };
 
+// Payments can use a different API base from the rest of the storefront.
+// Carry the same signed customer identity to either configured backend.
+export const customerAuthorizedFetch = (url: string, init: RequestInit = {}) => {
+  const token = typeof window !== "undefined" ? window.localStorage.getItem(customerSessionKey) || "" : "";
+  return fetch(url, { ...withBearer(init, token), credentials: "include" });
+};
+
 export const adminApiFetch = async (path: string, init: RequestInit = {}) => {
   const token = supabase ? (await supabase.auth.getSession()).data.session?.access_token || "" : "";
   return siteApiFetch(path, withBearer(init, token));

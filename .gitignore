@@ -32,6 +32,10 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+/.local-test/
+/.local-real-preview/
+local-*.log
+/supabase/supabase/
 
 # vercel
 .vercel

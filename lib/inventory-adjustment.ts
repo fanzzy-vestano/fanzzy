@@ -49,6 +49,7 @@ export type InventoryAdjustmentMode = "decrement" | "release";
 
 const stockAfterAdjustment = (current: number, quantity: number, mode: InventoryAdjustmentMode) =>
   mode === "release" ? Math.max(0, Math.floor(current + quantity)) : Math.max(0, Math.floor(current - quantity));
+const wholeNumber = (value: unknown) => Math.max(0, Math.floor(Number(value) || 0));
 
 export async function adjustOrderInventory(
   order: InventoryOrder,
@@ -66,6 +67,7 @@ export async function adjustOrderInventory(
   const baseQuantities = new Map<string, number>();
   let variantsChanged = false;
   let sizeStockChanged = false;
+  const aggregateStockSkus = new Set<string>();
   const unresolvedProductIds = new Set<string>();
   const headers = apiHeaders(config);
 
@@ -126,6 +128,7 @@ export async function adjustOrderInventory(
           [sizeKey]: stockAfterAdjustment(available, quantity, mode),
         };
         sizeStockChanged = true;
+        aggregateStockSkus.add(sku);
       }
       if (hasVariantStock && sizeVariant) {
         const available = Math.floor(Number(sizeVariant.stock));
@@ -137,6 +140,7 @@ export async function adjustOrderInventory(
           ? { ...variant, stock: stockAfterAdjustment(available, quantity, mode) }
           : variant);
         variantsChanged = true;
+        aggregateStockSkus.add(sku);
       }
       return;
     }
@@ -165,6 +169,7 @@ export async function adjustOrderInventory(
         ? { ...variant, stock: stockAfterAdjustment(available, quantity, mode) }
         : variant);
       variantsChanged = true;
+      aggregateStockSkus.add(sku);
       return;
     }
 
@@ -180,6 +185,30 @@ export async function adjustOrderInventory(
 
   if (sizeStockChanged) await writeJsonSetting(config, "product_size_stock", sizeStock);
   if (variantsChanged) await writeJsonSetting(config, "product_variants", variants);
+
+  // Keep the product-level stock total in sync with the bucket that the
+  // customer actually purchased. Without this, the selected size/variant
+  // decreases in settings while catalog cards continue showing the old total.
+  for (const sku of aggregateStockSkus) {
+    const sizeKey = resolveSettingKey(sizeStock, sku);
+    const variantKey = resolveSettingKey(variants, sku);
+    const configuredSizes = sizeStock[sizeKey];
+    const configuredVariants = variants[variantKey];
+    const aggregate = configuredSizes && Object.keys(configuredSizes).length
+      ? Object.values(configuredSizes).reduce((total, value) => total + wholeNumber(value), 0)
+      : Array.isArray(configuredVariants)
+        ? configuredVariants.reduce((total, variant) => total + wholeNumber(variant.stock), 0)
+        : undefined;
+    if (aggregate === undefined) continue;
+    const currentStock = Number(productRows.find((product) => normalizeSku(product.sku) === normalizeSku(sku))?.stock);
+    if (!Number.isFinite(currentStock) || currentStock === aggregate) continue;
+    const updateResponse = await fetch(`${config.supabaseUrl}/rest/v1/products?sku=eq.${encodeURIComponent(sku)}`, {
+      method: "PATCH",
+      headers: { ...headers, Prefer: "return=minimal" },
+      body: JSON.stringify({ stock: aggregate, updated_at: new Date().toISOString() }),
+    });
+    if (!updateResponse.ok) throw new Error("Could not update product inventory total");
+  }
 
   for (const [sku, quantity] of baseQuantities) {
     const currentStock = Number(productRows.find((product) => normalizeSku(product.sku) === normalizeSku(sku))?.stock);
