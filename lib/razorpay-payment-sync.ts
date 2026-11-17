@@ -5,6 +5,8 @@ import type {
   CustomerCancellationRecord,
 } from "./customer-cancellation";
 import { createDelhiveryPickupRequest, delhiveryPickupSchedule, getDelhiveryAdminOptions, loadDelhiveryAdminOptions, manifestDelhiveryShipment, trackDelhiveryShipment } from "./delhivery";
+import { selectedPickupSchedule } from "./delhivery-pickup-date";
+import { isDelhiveryPickupRetryBlocked } from "./delhivery-status";
 
 export type StoredOrder = {
   id: string;
@@ -272,6 +274,20 @@ const delhiveryAutomationStartDate = "2026-09-05";
 
 const requiresAdminShipmentWeight = () => /^(1|true|yes|on)$/i.test(String(process.env.DELHIVERY_REQUIRE_ADMIN_WEIGHT || ""));
 
+let inventoryMutationTail: Promise<void> = Promise.resolve();
+
+const withInventoryMutationLock = async <T>(operation: () => Promise<T>) => {
+  const previous = inventoryMutationTail;
+  let release: () => void = () => {};
+  inventoryMutationTail = new Promise<void>((resolve) => { release = resolve; });
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+  }
+};
+
 const isDeliveryOrderReadyForPickup = (order: StoredOrder) =>
   orderNeedsDelivery(order)
   && Boolean(order.delhiveryAwb)
@@ -496,6 +512,27 @@ export async function createAdminDelhiveryShipment(orderId: string, weightGrams:
   await checkoutRpc("prepare_shipment", orderId, "", { weight: normalizedWeight, pickupLocation, pickupTime: pickupTime + ":00" });
   await processCheckoutOutbox(orderId, "shipment");
   return (await readOrders()).find((row) => row.id === orderId)!;
+}
+
+export async function retryAdminDelhiveryPickup(orderId: string, pickupDate: string, pickupTime: string) {
+  selectedPickupSchedule(pickupDate, pickupTime);
+  return withInventoryMutationLock(async () => {
+    const orders = await readOrders();
+    const order = orders.find((candidate) => candidate.id === orderId);
+    if (!order) throw new Error("Order could not be found for pickup retry.");
+    if (!isDeliveryOrderReadyForPickup(order)) throw new Error("An active Delhivery shipment is required to retry pickup.");
+    if (order.status === "Shipped" || isDelhiveryPickupRetryBlocked(order.delhiveryLiveStatus)) throw new Error("Pickup cannot be retried after the parcel has shipped.");
+    if (["created", "covered"].includes(order.delhiveryPickupRequestStatus || "") || (order.delhiveryPickupRequestStatus === "pending" && !order.delhiveryPickupRequestError)) return order;
+    if (!order.delhiveryPickupLocation) throw new Error("The shipment's pickup warehouse is missing. Check the shipment in Delhivery before retrying.");
+    order.delhiveryPickupRequestDate = pickupDate;
+    order.delhiveryPickupRequestTime = `${pickupTime}:00`;
+    order.delhiveryPickupRequestStatus = "failed";
+    delete order.delhiveryPickupRequestId;
+    delete order.delhiveryPickupExpectedPackageCount;
+    delete order.delhiveryPickupRequestError;
+    await ensureDelhiveryPickupRequest(orders, order);
+    return order;
+  });
 }
 
 export async function refreshDelhiveryOrderTracking(orderId: string, waybill: string) {

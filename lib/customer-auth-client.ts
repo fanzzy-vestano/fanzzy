@@ -1,3 +1,4 @@
+import { browserLocalStorage, prepareBrowserStorage, flushBrowserStorage } from "./browser-storage";
 type CustomerAuthRequestInit = RequestInit & { tokenType?: "pending" | "session" };
 export type CustomerAuthUser = { id: string; phone: string };
 
@@ -8,7 +9,7 @@ const rememberedUserKey = "fanzzy-customer-remembered-user";
 
 const readToken = (type: "pending" | "session") => {
   if (typeof window === "undefined") return "";
-  return window.localStorage.getItem(type === "pending" ? pendingTokenKey : sessionTokenKey) || "";
+  return browserLocalStorage.getItem(type === "pending" ? pendingTokenKey : sessionTokenKey) || "";
 };
 
 const readSessionPayload = (): CustomerAuthUser | null => {
@@ -30,7 +31,7 @@ const readSessionPayload = (): CustomerAuthUser | null => {
 const readRememberedUser = (): CustomerAuthUser | null => {
   if (typeof window === "undefined") return null;
   try {
-    const stored = JSON.parse(window.localStorage.getItem(rememberedUserKey) || "null") as Partial<CustomerAuthUser> | null;
+    const stored = JSON.parse(browserLocalStorage.getItem(rememberedUserKey) || "null") as Partial<CustomerAuthUser> | null;
     if (!stored || typeof stored.id !== "string" || !stored.id || typeof stored.phone !== "string" || !stored.phone) return null;
     return { id: stored.id, phone: stored.phone };
   } catch {
@@ -42,7 +43,8 @@ export const readStoredCustomerAuthUser = () => readSessionPayload() || readReme
 
 export const isExternalCustomerAuth = Boolean(externalCustomerAuthUrl);
 
-export const customerAuthRequest = (path: string, init: CustomerAuthRequestInit = {}) => {
+export const customerAuthRequest = async (path: string, init: CustomerAuthRequestInit = {}) => {
+  await prepareBrowserStorage();
   const { tokenType, ...requestInit } = init;
   const headers = new Headers(requestInit.headers);
   const token = readToken(tokenType || (path === "verify-otp" ? "pending" : "session"));
@@ -57,25 +59,29 @@ export const customerAuthRequest = (path: string, init: CustomerAuthRequestInit 
   });
 };
 
-export const saveCustomerAuthTokens = (tokens: { pendingToken?: string; sessionToken?: string }) => {
+export const saveCustomerAuthTokens = async (tokens: { pendingToken?: string; sessionToken?: string }) => {
   if (typeof window === "undefined") return;
-  if (tokens.pendingToken) window.localStorage.setItem(pendingTokenKey, tokens.pendingToken);
-  if (tokens.sessionToken) window.localStorage.setItem(sessionTokenKey, tokens.sessionToken);
+  if (tokens.pendingToken) browserLocalStorage.setItem(pendingTokenKey, tokens.pendingToken);
+  if (tokens.sessionToken) browserLocalStorage.setItem(sessionTokenKey, tokens.sessionToken);
+  await flushBrowserStorage();
 };
 
-export const saveCustomerAuthUser = (user: CustomerAuthUser) => {
+export const saveCustomerAuthUser = async (user: CustomerAuthUser) => {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(rememberedUserKey, JSON.stringify({ id: user.id, phone: user.phone }));
+  browserLocalStorage.setItem(rememberedUserKey, JSON.stringify({ id: user.id, phone: user.phone }));
+  await flushBrowserStorage();
 };
 
-export const clearCustomerAuthTokens = () => {
+export const clearCustomerAuthTokens = async () => {
   if (typeof window === "undefined") return;
-  window.localStorage.removeItem(pendingTokenKey);
-  window.localStorage.removeItem(sessionTokenKey);
-  window.localStorage.removeItem(rememberedUserKey);
+  browserLocalStorage.removeItem(pendingTokenKey);
+  browserLocalStorage.removeItem(sessionTokenKey);
+  browserLocalStorage.removeItem(rememberedUserKey);
+  await flushBrowserStorage();
 };
 
-export const clearPendingCustomerAuthToken = () => {
+export const clearPendingCustomerAuthToken = async () => {
   if (typeof window === "undefined") return;
-  window.localStorage.removeItem(pendingTokenKey);
+  browserLocalStorage.removeItem(pendingTokenKey);
+  await flushBrowserStorage();
 };

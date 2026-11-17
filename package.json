@@ -13,7 +13,7 @@
     "seed:test": "node scripts/seed-local-test.mjs",
     "build": "vinext build && node scripts/ensure-build-assets.mjs",
     "build:pages": "node scripts/build-github-pages.mjs",
-    "start": "vinext start",
+    "start": "node scripts/run-vinext.mjs start",
     "typecheck": "tsc --noEmit --incremental false",
     "test:checkout-storage": "node --require ./tests/no-network.cjs --test tests/checkout-storage.test.mjs",
     "test:reports": "node --test tests/report-workbook.test.mjs",
@@ -50,7 +50,9 @@
     "typescript": "5.9.3",
     "vinext": "0.0.50",
     "vite": "8.0.13",
-    "wrangler": "4.92.0"
+    "wrangler": "4.92.0",
+    "@electric-sql/pglite": "0.5.10",
+    "fake-indexeddb": "6.2.6"
   },
   "type": "module"
 }

@@ -64,6 +64,8 @@ const loadPaymentSync = (responses) => {
       if (name === "./transactional-checkout") return transactions.exports;
       if (name === "./razorpay-provider") return { recoverCapturedOrderBinding: async () => { throw new Error("Unexpected missing binding"); } };
       if (name === "./mobile-checkout-authority") return { authorizeMobileQuote: async () => ({ prices: { "FZ-1": 149900 }, settings: {}, expiresAt: new Date(Date.now() + 60000).toISOString() }) };
+      if (name === "./delhivery-pickup-date") return { selectedPickupSchedule: () => ({}) };
+      if (name === "./delhivery-status") return { isDelhiveryPickupRetryBlocked: () => false };
       throw new Error(`Unexpected import: ${name}`);
     },
     module: { exports: {} },

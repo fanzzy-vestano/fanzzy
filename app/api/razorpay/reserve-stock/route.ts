@@ -22,6 +22,6 @@ export async function POST(request: Request) {
     return json({ reserved: order.inventoryReserved === true, reservedAt: order.inventoryReservedAt });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Could not reserve product stock";
-    return json({ error: message }, /not have enough stock|no longer available|inventory changed while/i.test(message) ? 409 : 502);
+    return json({ error: message }, /not have enough stock|no longer available|currently unavailable|inventory changed while/i.test(message) ? 409 : 502);
   }
 }
