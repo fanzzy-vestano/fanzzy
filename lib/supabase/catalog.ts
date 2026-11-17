@@ -2,7 +2,8 @@ import { filterCatalogProducts, type CatalogScope } from "../catalog/catalog-vis
 import { supabase } from "./client";
 import { countProductsByCategoryKey, mergeCatalogCategories } from "../catalog-categories";
 import { prepareStoreImage } from "../store-image-upload";
-import { adminApiFetch, customerApiFetch } from "../site-api-client";
+import { filterOrderHistory, type OrderHistoryDeletion } from "../order-history";
+import { adminApiFetch, customerApiFetch, usesExternalSiteApi } from "../site-api-client";
 
 export type CatalogStatus = "Published" | "Draft" | "Low stock";
 export type ProductVariantType = "normal" | "size";
@@ -376,6 +377,49 @@ async function loadAdminOrdersApi() {
   const session = supabase ? (await supabase.auth.getSession()).data.session : null;
   return session?.user.email?.toLowerCase() === "fanzzy@vestanoretail.com";
 }
+
+// Pages and the site API deploy separately. The older Worker has no orders
+// route, so a signed-in admin can still read the previous order store.
+async function readLegacyAdminOrders() {
+  const client = supabase;
+  if (!client) throw new Error("Orders are unavailable.");
+  const { data: { session }, error } = await client.auth.getSession();
+  if (error || !session?.access_token || session.user.email?.toLowerCase() !== "fanzzy@vestanoretail.com") {
+    throw new Error("Admin authentication required.");
+  }
+
+  const deletionPrefix = "deleted-order:";
+  const pageSize = 500;
+  const deletions: OrderHistoryDeletion[] = [];
+  let orders: Array<Record<string, unknown>> | undefined;
+  for (let offset = 0; ; offset += pageSize) {
+    const result = await client.from("store_settings")
+      .select("key,value")
+      .or(`key.eq.orders,key.like.${deletionPrefix}%`)
+      .order("key")
+      .range(offset, offset + pageSize - 1)
+      .setHeader("Authorization", `Bearer ${session.access_token}`);
+    if (result.error) throw new Error(result.error.message || "Could not read saved orders.");
+    for (const row of result.data) {
+      const value: unknown = JSON.parse(row.value);
+      if (row.key === "orders") {
+        if (!Array.isArray(value)) throw new Error("The saved order record is invalid.");
+        orders = value;
+      } else {
+        const deletion = value as Partial<OrderHistoryDeletion> | null;
+        if (typeof deletion?.order?.id !== "string" || !deletion.order.id.trim()
+          || typeof deletion.deletedAt !== "string" || !deletion.deletedAt) {
+          throw new Error("A saved order deletion record is invalid.");
+        }
+        deletions.push({ order: deletion.order, deletedAt: deletion.deletedAt });
+      }
+    }
+    if (result.data.length < pageSize) break;
+  }
+  if (!orders) throw new Error("The saved order record is unavailable.");
+  return filterOrderHistory(orders, deletions);
+}
+
 export async function fetchStoreOrders<T>() {
   try {
     const localTestDatabase = process.env.NEXT_PUBLIC_FANZZY_ENV === "local-test"
@@ -396,9 +440,13 @@ export async function fetchStoreOrders<T>() {
     const admin = await loadAdminOrdersApi();
     const response = await (admin ? adminApiFetch("/admin/orders", { credentials: "include", cache: "no-store" }) : customerApiFetch("/orders", { credentials: "include", cache: "no-store" }));
     const body = await response.json() as { orders?: Array<Record<string, unknown>>; error?: string };
-    if (!response.ok || !Array.isArray(body.orders)) throw new Error(body.error || "Orders are unavailable.");
-    for (const order of body.orders) orderSnapshots.set(String(order.id), structuredClone(order));
-    return { data: body.orders as T[], error: null };
+    const missingWorkerRoute = admin && usesExternalSiteApi && response.status === 404 && body.error === "Not found";
+    const orders = missingWorkerRoute ? await readLegacyAdminOrders() : body.orders;
+    if ((!response.ok && !missingWorkerRoute) || !Array.isArray(orders)) {
+      throw new Error(body.error || "Orders are unavailable.");
+    }
+    for (const order of orders) orderSnapshots.set(String(order.id), structuredClone(order));
+    return { data: orders as T[], error: null };
   } catch (error) { return { data: null as T[] | null, error: asError(error) }; }
 }
 export async function saveStoreOrders(orders: unknown[]) {
