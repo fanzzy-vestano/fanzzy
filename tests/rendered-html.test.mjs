@@ -30,6 +30,15 @@ test("exports every public GitHub Pages route", async () => {
   await access(new URL(".nojekyll", docs));
 });
 
+test("homepage links customers to Fanzzy support", async () => {
+  const html = await readFile(new URL("index.html", docs), "utf8");
+  const footer = html.match(/<footer\b[\s\S]*?<\/footer>/)?.[0] ?? "";
+  assert.match(footer, /href="#contact-details">Contact us/);
+  assert.match(footer, /id="contact-details"[^>]*>\s*<a href="tel:\+919249536162"/);
+  assert.match(footer, /href="mailto:fanzzy@vestanoretail\.com"/);
+  assert.match(footer, /href="https:\/\/wa\.me\/919249536162"[^>]*>WhatsApp/);
+});
+
 test("ships the external APIs required by the static application", async () => {
   const assetNames = (await readdir(new URL("assets/", docs))).filter((name) => name.endsWith(".js"));
   const bundles = await Promise.all(assetNames.map((name) => readFile(new URL(`assets/${name}`, docs), "utf8")));

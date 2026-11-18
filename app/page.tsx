@@ -7,6 +7,7 @@ import { filterCatalogProducts } from "../lib/catalog/catalog-visibility";
 import {
   memo,
   type FormEvent,
+  type MouseEvent,
   type PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
@@ -822,6 +823,37 @@ const overlayHistoryUrl = (layers: string[], productId?: string) => {
   else url.searchParams.delete("fanzzy-product");
   return url.href;
 };
+
+function handleStorefrontAnchor(event: MouseEvent<HTMLElement>) {
+  if (
+    event.defaultPrevented ||
+    event.button !== 0 ||
+    event.metaKey ||
+    event.ctrlKey ||
+    event.shiftKey ||
+    event.altKey ||
+    !(event.target instanceof Element)
+  ) return;
+
+  const link = event.target.closest<HTMLAnchorElement>("a[href^='#']");
+  if (!link || link.target || link.hasAttribute("download")) return;
+  const href = link.getAttribute("href");
+  if (!href || href.length < 2) return;
+  const target = document.getElementById(href.slice(1));
+  if (!target || !event.currentTarget.contains(target)) return;
+
+  // Keep fragment clicks in the mounted storefront so the router does not
+  // rerender it or reset the scroll position and focus.
+  event.preventDefault();
+  const header = event.currentTarget.querySelector(".site-header");
+  const offset = href === "#top" ? 0 : header?.getBoundingClientRect().height ?? 0;
+  window.scrollTo({
+    top: Math.max(0, target.getBoundingClientRect().top + window.scrollY - offset),
+    behavior: "instant",
+  });
+  if (href === "#contact-details") target.focus({ preventScroll: true });
+}
+
 const blockedHeroImage = "photo-1599643478518-a784e5dc4c8f";
 const initialHeroSlides: string[] = [];
 const defaultHeroSlideDuration = 5.2;
@@ -5359,6 +5391,7 @@ export default function Home() {
     <main
       className={`site-shell${activeCategorySection === "luxury" ? " luxury-filter-active" : ""}`}
       id="top"
+      onClick={handleStorefrontAnchor}
     >
       <div className="announcement">
         <div className="announcement-promo">
@@ -5566,7 +5599,7 @@ export default function Home() {
       )}
 
       {heroSlides.length > 0 && (
-        <section className="hero hero-background" id="top">
+        <section className="hero hero-background">
           <div className="hero-slide-layer" key={heroSlides[heroSlideIndex]}>
             <img
               {...storefrontImageProps(heroSlides[heroSlideIndex], "100vw")}
@@ -5717,7 +5750,7 @@ export default function Home() {
               Pieces worth <em>keeping.</em>
             </h2>
           </div>
-          <a className="text-link" href="#footer">
+          <a className="text-link" href="#shop">
             Shop all <span>↗</span>
           </a>
         </div>
@@ -6017,7 +6050,11 @@ export default function Home() {
         </div>
         <div>
           <p className="eyebrow light">Need a hand?</p>
-          <a href="#footer">Contact us</a>
+          <a href="#contact-details">Contact us</a>
+          <div id="contact-details" tabIndex={-1}>
+            <a href="tel:+919249536162">+91 92495 36162</a>
+            <a href="mailto:fanzzy@vestanoretail.com">fanzzy@vestanoretail.com</a>
+          </div>
           <a href="#footer">Shipping & returns</a>
           <a href="#footer">Care guide</a>
           <a href="#footer">FAQs</a>
@@ -6045,7 +6082,9 @@ export default function Home() {
           >
             Pinterest ↗
           </a>
-          <a href="#footer">WhatsApp ↗</a>
+          <a href="https://wa.me/919249536162" target="_blank" rel="noopener noreferrer">
+            WhatsApp ↗
+          </a>
           <p className="footer-small">
             Made with intention in India.
             <br />© Fanzzy 2024
