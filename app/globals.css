@@ -101,6 +101,14 @@ img { display: block; width: 100%; }
 .otp-auth-form label { color: var(--wine); display: grid; font-family: var(--mono); font-size: 8px; gap: 8px; letter-spacing: .07em; text-transform: uppercase; }
 .otp-auth-form input { background: #fffdf9; border: 1px solid var(--line); color: var(--ink); font-family: var(--sans); font-size: 13px; letter-spacing: 0; outline: 0; padding: 14px 15px; text-transform: none; }
 .otp-auth-form input:focus { border-color: var(--wine); }
+.otp-captcha-field { display: grid; gap: 8px; margin-top: 2px; }
+.otp-captcha-image { background: #fff; border: 1px solid var(--line); display: block; height: auto; max-width: 100%; width: 100%; }
+.otp-captcha-change { background: transparent; border: 0; color: var(--wine); cursor: pointer; font-family: var(--mono); font-size: 11px; justify-self: start; min-height: 44px; padding: 4px 0; text-decoration: underline; text-underline-offset: 3px; }
+.otp-captcha-change:disabled { cursor: wait; opacity: .6; }
+.otp-captcha-instruction { color: var(--wine); font-size: 12px; line-height: 1.5; margin: 0; }
+.otp-captcha-error { color: #a22838; font-size: 12px; font-weight: 600; line-height: 1.45; margin: 0; }
+.otp-captcha-verify { background: var(--wine); border: 1px solid var(--wine); color: white; cursor: pointer; font-family: var(--mono); font-size: 11px; justify-self: start; min-height: 44px; padding: 10px 14px; }
+.otp-captcha-verify:disabled { cursor: default; opacity: .6; }
 .email-otp-mark { color: var(--wine); font-size: 15px; }
 .auth-resend { background: transparent; color: var(--wine); font-family: var(--mono); font-size: 8px; justify-self: start; letter-spacing: .06em; padding: 2px 0; text-decoration: underline; text-underline-offset: 3px; text-transform: uppercase; }
 .otp-fallback-actions { display: flex; flex-wrap: wrap; gap: 12px; }
@@ -480,13 +488,15 @@ img { display: block; width: 100%; }
 /* Make the auth card's existing close action clear on mobile: it behaves as
    a Back button and returns the customer to the storefront. */
 .auth-modal .modal-close {
+  align-items: center;
+  display: flex;
   font-size: 0;
-  left: 20px;
+  justify-content: flex-start;
+  margin: -18px 0 8px;
   min-height: 44px;
   min-width: 44px;
   padding: 9px 0;
-  right: auto;
-  top: 18px;
+  position: static;
 }
 .auth-modal .modal-close::after {
   content: "← Back";

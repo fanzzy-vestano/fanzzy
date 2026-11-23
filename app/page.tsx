@@ -1555,6 +1555,9 @@ export default function Home() {
   const [authOtp, setAuthOtp] = useState("");
   const [otpSent, setOtpSent] = useState(false);
   const [otpCooldown, setOtpCooldown] = useState(0);
+  const [otpCaptcha, setOtpCaptcha] = useState<{ token: string; image: string; expiresAt: number; verified: boolean } | null>(null);
+  const [otpCaptchaAnswer, setOtpCaptchaAnswer] = useState("");
+  const [otpCaptchaError, setOtpCaptchaError] = useState("");
   const [authJustVerified, setAuthJustVerified] = useState(false);
   // Browser storage is restored after hydration so the server and the first
   // client render produce identical markup.
@@ -1780,6 +1783,20 @@ export default function Home() {
     );
     return () => window.clearInterval(timer);
   }, [otpCooldown]);
+
+  useEffect(() => {
+    if (!otpCaptcha) return;
+    const delay = Number.isFinite(otpCaptcha.expiresAt)
+      ? Math.max(0, otpCaptcha.expiresAt - Date.now())
+      : 0;
+    const timer = window.setTimeout(() => {
+      setOtpCaptcha(null);
+      setOtpCaptchaAnswer("");
+      setOtpCaptchaError("");
+      setAuthMessage((current) => current === "Please enter and verify the CAPTCHA to resend the OTP." ? "" : current);
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [otpCaptcha]);
 
   useEffect(() => {
     let active = true;
@@ -3733,6 +3750,9 @@ export default function Home() {
     setAuthOtp("");
     setOtpSent(false);
     setOtpCooldown(0);
+    setOtpCaptcha(null);
+    setOtpCaptchaAnswer("");
+    setOtpCaptchaError("");
     setAuthJustVerified(false);
   }, []);
   const activeOverlayLayers = useMemo(
@@ -4150,6 +4170,86 @@ export default function Home() {
     setProfileOpen(false);
     announce("Signed out successfully");
   };
+  const changeOtpCaptcha = async () => {
+    const phone = authPhone.trim();
+    if (!phone || !otpCaptcha) return;
+    setAuthLoading(true);
+    setAuthMessage("");
+    setOtpCaptchaError("");
+    try {
+      const response = await customerAuthRequest("send-otp", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ phone, captchaToken: otpCaptcha.token, refreshCaptcha: true }),
+      });
+      const result = await response.json() as {
+        error?: string;
+        captchaRequired?: boolean;
+        captcha?: { token?: string; image?: string; expiresAt?: number };
+      };
+      if (!response.ok) {
+        setAuthMessage(result.error || "Could not change the security check. Please try again.");
+        return;
+      }
+      if (!result.captchaRequired) {
+        setOtpCaptcha(null);
+      } else if (result.captcha?.token && result.captcha.image?.startsWith("data:image/svg+xml;base64,")
+        && typeof result.captcha.expiresAt === "number" && Number.isFinite(result.captcha.expiresAt)) {
+        setOtpCaptcha({ token: result.captcha.token, image: result.captcha.image, expiresAt: result.captcha.expiresAt, verified: false });
+        setAuthMessage("Please enter and verify the CAPTCHA to resend the OTP.");
+      } else {
+        setAuthMessage("Could not change the security check. Please try again.");
+        return;
+      }
+      setOtpCaptchaAnswer("");
+    } catch {
+      setAuthMessage("Could not change the security check. Check your connection and try again.");
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+  const verifyOtpCaptcha = async () => {
+    const phone = authPhone.trim();
+    if (!phone || !otpCaptcha || !otpCaptchaAnswer.trim()) return;
+    const captchaToken = otpCaptcha.token;
+    setAuthLoading(true);
+    setAuthMessage("");
+    setOtpCaptchaError("");
+    try {
+      const response = await customerAuthRequest("send-otp", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ phone, captchaToken, captchaAnswer: otpCaptchaAnswer, verifyCaptcha: true }),
+      });
+      const result = await response.json() as {
+        error?: string;
+        captchaRequired?: boolean;
+        captchaVerified?: boolean;
+        captcha?: { token?: string; image?: string; expiresAt?: number };
+      };
+      if (response.ok && result.captchaVerified) {
+        setOtpCaptcha((current) => current?.token === captchaToken ? { ...current, verified: true } : current);
+        setOtpCaptchaAnswer("");
+        setAuthMessage("CAPTCHA verified. You can now resend the OTP.");
+      } else if (response.ok && result.captchaRequired === false) {
+        setOtpCaptcha(null);
+        setOtpCaptchaAnswer("");
+        setAuthMessage("You can now resend the OTP.");
+      } else {
+        const next = result.captcha;
+        if (next?.token && next.image?.startsWith("data:image/svg+xml;base64,")
+          && typeof next.expiresAt === "number" && Number.isFinite(next.expiresAt)) {
+          setOtpCaptcha({ token: next.token, image: next.image, expiresAt: next.expiresAt, verified: false });
+          setOtpCaptchaAnswer("");
+        }
+        setOtpCaptchaError(result.error || "Could not verify CAPTCHA. Please try again.");
+      }
+    } catch {
+      setOtpCaptchaError("Could not verify CAPTCHA. Check your connection and try again.");
+    } finally {
+      setAuthLoading(false);
+    }
+  };
   const sendOtp = async () => {
     const phone = authPhone.trim();
     if (!phone) {
@@ -4162,22 +4262,49 @@ export default function Home() {
       );
       return;
     }
+    if (otpCaptcha && !otpCaptcha.verified) {
+      setAuthMessage("Please enter and verify the CAPTCHA to resend the OTP.");
+      return;
+    }
     setAuthLoading(true);
     setAuthMessage("");
     try {
       const response = await customerAuthRequest("send-otp", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ phone }),
+        body: JSON.stringify({
+          phone,
+          ...(otpCaptcha
+            ? { captchaToken: otpCaptcha.token }
+            : {}),
+        }),
       });
       const responseText = await response.text();
-      let result: { error?: string; pendingToken?: string } = {};
+      let result: {
+        error?: string;
+        pendingToken?: string;
+        channel?: string;
+        testCode?: string;
+        captchaRequired?: boolean;
+        captcha?: { token?: string; image?: string; expiresAt?: number };
+      } = {};
       if (responseText) {
         try {
-          result = JSON.parse(responseText) as { error?: string };
+          result = JSON.parse(responseText) as typeof result;
         } catch {
           // Static hosts can return an HTML/empty error page instead of JSON.
         }
+      }
+      if (response.ok || result.captchaRequired) {
+        const challenge = result.captcha;
+        setOtpCaptcha(
+          result.captchaRequired && challenge?.token && challenge.image?.startsWith("data:image/svg+xml;base64,")
+            && typeof challenge.expiresAt === "number" && Number.isFinite(challenge.expiresAt)
+            ? { token: challenge.token, image: challenge.image, expiresAt: challenge.expiresAt, verified: false }
+            : null,
+        );
+        setOtpCaptchaAnswer("");
+        setOtpCaptchaError("");
       }
       if (!response.ok) {
         setAuthMessage(
@@ -4192,8 +4319,12 @@ export default function Home() {
       }
       setOtpSent(true);
       saveCustomerAuthTokens(result);
-      setOtpCooldown(60);
-      setAuthMessage("OTP sent successfully by SMS");
+      setOtpCooldown(45);
+      setAuthMessage(
+        result.channel === "local-test" && result.testCode
+          ? `Local test code: ${result.testCode}. No SMS is sent in this preview.`
+          : "OTP sent successfully by SMS",
+      );
     } catch {
       setAuthMessage(
         "Could not connect to the SMS OTP service. Check your connection and try again.",
@@ -4239,6 +4370,9 @@ export default function Home() {
       setAuthOtp("");
       setOtpSent(false);
       setOtpCooldown(0);
+      setOtpCaptcha(null);
+      setOtpCaptchaAnswer("");
+      setOtpCaptchaError("");
       setAuthJustVerified(true);
       setAuthMessage("Verification successful");
     } catch {
@@ -7923,6 +8057,9 @@ export default function Home() {
                     setAuthOtp("");
                     setOtpSent(false);
                     setOtpCooldown(0);
+                    setOtpCaptcha(null);
+                    setOtpCaptchaAnswer("");
+                    setOtpCaptchaError("");
                   }}
                   placeholder="+91 98765 43210"
                   inputMode="tel"
@@ -7951,6 +8088,41 @@ export default function Home() {
                   />
                 </label>
               )}
+              {otpCaptcha && !otpCaptcha.verified && (
+                <div className="otp-captcha-field">
+                  <label htmlFor="otp-captcha-answer">Security check</label>
+                  <img className="otp-captcha-image" src={otpCaptcha.image} alt="CAPTCHA: type the characters shown in this image" width={255} height={80} />
+                  <button className="otp-captcha-change" type="button" onClick={() => void changeOtpCaptcha()} disabled={authLoading}>
+                    ↻ Change CAPTCHA
+                  </button>
+                  <label htmlFor="otp-captcha-answer">
+                    Type the characters above exactly as shown (case-sensitive)
+                    <input
+                      id="otp-captcha-answer"
+                      value={otpCaptchaAnswer}
+                      onChange={(event) => {
+                        setOtpCaptchaAnswer(
+                          event.target.value.replace(/[^A-Za-z0-9]/g, "").slice(0, 5),
+                        );
+                        setOtpCaptchaError("");
+                      }}
+                      autoComplete="off"
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      maxLength={5}
+                      placeholder="Enter code shown"
+                      disabled={authLoading || otpCaptcha.verified}
+                      aria-invalid={Boolean(otpCaptchaError)}
+                      aria-describedby={otpCaptchaError ? "otp-captcha-error" : undefined}
+                    />
+                  </label>
+                  {otpCaptchaError && <p id="otp-captcha-error" className="otp-captcha-error" role="alert">{otpCaptchaError}</p>}
+                  {!otpCaptcha.verified && <p className="otp-captcha-instruction">Please enter and verify the CAPTCHA to resend the OTP.</p>}
+                  <button className="otp-captcha-verify" type="button" onClick={() => void verifyOtpCaptcha()} disabled={authLoading || otpCaptcha.verified || !otpCaptchaAnswer.trim()}>
+                    {otpCaptcha.verified ? "CAPTCHA verified ✓" : "Verify CAPTCHA"}
+                  </button>
+                </div>
+              )}
               {otpSent ? (
                 <>
                   <button
@@ -7970,7 +8142,7 @@ export default function Home() {
                       className="auth-resend"
                       type="button"
                       onClick={() => void sendOtp()}
-                      disabled={authLoading || otpCooldown > 0}
+                      disabled={authLoading || otpCooldown > 0 || Boolean(otpCaptcha && !otpCaptcha.verified)}
                     >
                       {otpCooldown > 0
                         ? `Resend SMS in ${otpCooldown}s`
@@ -7984,7 +8156,7 @@ export default function Home() {
                     className="google-sign-in"
                     type="button"
                     onClick={() => void sendOtp()}
-                    disabled={authLoading}
+                    disabled={authLoading || Boolean(otpCaptcha && !otpCaptcha.verified)}
                   >
                     <span className="email-otp-mark" aria-hidden="true">
                       ✦

@@ -1,4 +1,6 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+// @ts-expect-error Shared Edge module uses an explicit TypeScript extension.
+import { applyCaptchaCase, CAPTCHA_ALPHABET, renderCaptchaImage } from "../supabase/functions/customer-auth/captcha-image.ts";
 
 export type CustomerSmsIdentity = { id: string; phone: string };
 
@@ -15,19 +17,26 @@ export const getCustomerAuthSecret = () => process.env.CUSTOMER_AUTH_SECRET?.tri
 
 const secret = getCustomerAuthSecret;
 
-export const OTP_RESEND_COOLDOWN_SECONDS = 60;
+// Four sends plus a fifth CAPTCHA-protected request fit in the five-minute window.
+export const OTP_RESEND_COOLDOWN_SECONDS = 45;
 export const OTP_EXPIRES_MS = 5 * 60 * 1000;
+export const OTP_CAPTCHA_WINDOW_MS = 5 * 60 * 1000;
+export const OTP_CAPTCHA_AFTER_SENDS = 4;
 // Keep customers signed in across browser restarts until they explicitly sign out.
 // This is intentionally long-lived rather than a browser-session cookie.
 export const CUSTOMER_SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 3650;
 const OTP_WINDOW_MS = 15 * 60 * 1000;
-const OTP_MAX_REQUESTS_PER_WINDOW = 5;
+const OTP_MAX_REQUESTS_PER_WINDOW = 10;
 const OTP_VERIFY_WINDOW_MS = 10 * 60 * 1000;
 const OTP_MAX_VERIFY_ATTEMPTS = 8;
 const OTP_RATE_LIMIT_MAX_ENTRIES = 10_000;
 type OtpRateLimitEntry = { windowStartedAt: number; requestCount: number; lastRequestedAt: number };
+type OtpCaptchaEntry = { phone: string; clientIp: string; answer: string; expiresAt: number; verified: boolean };
+export type OtpCaptchaChallenge = { token: string; image: string; expiresAt: number };
 const otpSendRateLimits = new Map<string, OtpRateLimitEntry>();
 const otpVerifyRateLimits = new Map<string, OtpRateLimitEntry>();
+const otpSendHistory = new Map<string, number[]>();
+const otpCaptchaChallenges = new Map<string, OtpCaptchaEntry>();
 const base64Url = (value: string) => Buffer.from(value, "utf8").toString("base64url");
 const fromBase64Url = (value: string) => Buffer.from(value, "base64url").toString("utf8");
 
@@ -82,6 +91,114 @@ const rateLimitKeys = (scope: "send" | "verify", request: Request, phone: string
   `${scope}:phone:${phone}`,
   `${scope}:ip:${getClientIp(request)}`,
 ];
+
+// CAPTCHA eligibility belongs to the recipient, not to everyone sharing an IP.
+const otpCaptchaRequiredUntil = (phone: string) => {
+  const timestamps = otpSendHistory.get(phone) || [];
+  return timestamps.length >= OTP_CAPTCHA_AFTER_SENDS
+    ? timestamps[timestamps.length - OTP_CAPTCHA_AFTER_SENDS] + OTP_CAPTCHA_WINDOW_MS
+    : 0;
+};
+
+const trimMap = <T>(entries: Map<string, T>) => {
+  while (entries.size > OTP_RATE_LIMIT_MAX_ENTRIES) {
+    const oldestKey = entries.keys().next().value;
+    if (oldestKey === undefined) return;
+    entries.delete(oldestKey);
+  }
+};
+
+const pruneOtpCaptchaState = (now: number) => {
+  for (const [key, timestamps] of otpSendHistory) {
+    const recent = timestamps.filter((timestamp) => now - timestamp < OTP_CAPTCHA_WINDOW_MS);
+    if (recent.length) otpSendHistory.set(key, recent);
+    else otpSendHistory.delete(key);
+  }
+  for (const [token, challenge] of otpCaptchaChallenges) {
+    if (challenge.expiresAt <= now) otpCaptchaChallenges.delete(token);
+  }
+  trimMap(otpSendHistory);
+  trimMap(otpCaptchaChallenges);
+};
+
+const createOtpCaptcha = (request: Request, phone: string, expiresAt: number): OtpCaptchaChallenge => {
+  const noise = randomBytes(10);
+  const answer = applyCaptchaCase(Array.from(randomBytes(5), (byte) => CAPTCHA_ALPHABET[byte % CAPTCHA_ALPHABET.length]).join(""), noise);
+  const token = randomBytes(24).toString("base64url");
+  otpCaptchaChallenges.set(token, {
+    phone,
+    clientIp: getClientIp(request),
+    answer,
+    expiresAt,
+    verified: false,
+  });
+  trimMap(otpCaptchaChallenges);
+  return { token, image: renderCaptchaImage(answer, noise), expiresAt };
+};
+
+export const getOtpSendCaptchaRequirement = (
+  request: Request,
+  phone: string,
+  captchaToken?: string,
+) => {
+  const now = Date.now();
+  pruneOtpCaptchaState(now);
+  const requiredUntil = otpCaptchaRequiredUntil(phone);
+  if (!requiredUntil) return { allowed: true as const, captchaToken: "" };
+
+  const challenge = captchaToken ? otpCaptchaChallenges.get(captchaToken) : null;
+  if (
+    challenge
+    && challenge.phone === phone
+    && challenge.clientIp === getClientIp(request)
+    && challenge.expiresAt > now
+    && challenge.verified
+  ) {
+    return { allowed: true as const, captchaToken };
+  }
+  return { allowed: false as const, captcha: createOtpCaptcha(request, phone, requiredUntil) };
+};
+
+export const recordOtpSend = (request: Request, phone: string, resetCaptchaCycle = false) => {
+  const now = Date.now();
+  pruneOtpCaptchaState(now);
+  otpSendHistory.set(phone, [...(resetCaptchaCycle ? [] : otpSendHistory.get(phone) || []), now]);
+  trimMap(otpSendHistory);
+};
+
+export const verifyOtpSendCaptcha = (request: Request, phone: string, token: string, answer: string) => {
+  const now = Date.now();
+  pruneOtpCaptchaState(now);
+  const requiredUntil = otpCaptchaRequiredUntil(phone);
+  if (!requiredUntil) return { status: "not-required" as const };
+  const challenge = otpCaptchaChallenges.get(token);
+  if (!challenge || challenge.phone !== phone || challenge.clientIp !== getClientIp(request) || challenge.expiresAt <= now) {
+    return { status: "invalid" as const, captcha: createOtpCaptcha(request, phone, requiredUntil) };
+  }
+  if (answer.trim() !== challenge.answer) {
+    otpCaptchaChallenges.delete(token);
+    return { status: "incorrect" as const, captcha: createOtpCaptcha(request, phone, requiredUntil) };
+  }
+  challenge.verified = true;
+  return { status: "verified" as const };
+};
+
+export const completeOtpSendCaptcha = (captchaToken?: string) => {
+  if (captchaToken) otpCaptchaChallenges.delete(captchaToken);
+};
+
+export const refreshOtpSendCaptcha = (request: Request, phone: string, token: string) => {
+  const now = Date.now();
+  pruneOtpCaptchaState(now);
+  const requiredUntil = otpCaptchaRequiredUntil(phone);
+  if (!requiredUntil) return { status: "not-required" as const };
+  const previous = otpCaptchaChallenges.get(token);
+  if (!previous || previous.phone !== phone || previous.clientIp !== getClientIp(request) || previous.expiresAt <= now) {
+    return { status: "invalid" as const };
+  }
+  otpCaptchaChallenges.delete(token);
+  return { status: "refreshed" as const, captcha: createOtpCaptcha(request, phone, requiredUntil) };
+};
 
 const pruneOtpRateLimits = (rateLimits: Map<string, OtpRateLimitEntry>, windowMs: number, now: number) => {
   for (const [key, entry] of rateLimits) {

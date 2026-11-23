@@ -17,6 +17,12 @@
   z-index: 1000;
 }
 
+/* Keep sign-in controls unobstructed while the authentication dialog is open. */
+body:has(.auth-backdrop) .pwa-install {
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .pwa-install > img {
   background: #551a2d;
   border-radius: 13px;

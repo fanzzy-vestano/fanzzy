@@ -1,5 +1,5 @@
 import { randomInt } from "node:crypto";
-import { consumeOtpSendRateLimit, createPendingOtpCookie, createPendingOtpToken, getCustomerAuthSecret, normalizeMobileNumber, OTP_EXPIRES_MS, OTP_RESEND_COOLDOWN_SECONDS } from "../../../../lib/customer-sms-auth";
+import { completeOtpSendCaptcha, consumeOtpSendRateLimit, createPendingOtpCookie, createPendingOtpToken, getCustomerAuthSecret, getOtpSendCaptchaRequirement, normalizeMobileNumber, OTP_EXPIRES_MS, OTP_RESEND_COOLDOWN_SECONDS, recordOtpSend, refreshOtpSendCaptcha, verifyOtpSendCaptcha } from "../../../../lib/customer-sms-auth";
 import { isSangamamSmsConfigured, SangamamSmsError, sendSangamamOtp } from "../../../../lib/sangamam-sms";
 
 const json = (body: Record<string, unknown>, status = 200, headers?: HeadersInit) =>
@@ -7,12 +7,47 @@ const json = (body: Record<string, unknown>, status = 200, headers?: HeadersInit
 
 export async function POST(request: Request) {
   let phone = "";
+  let captchaToken = "";
+  let captchaAnswer = "";
+  let refreshCaptcha = false;
+  let verifyCaptcha = false;
   try {
-    phone = normalizeMobileNumber((await request.json() as { phone?: unknown }).phone);
+    const body = await request.json() as { phone?: unknown; captchaToken?: unknown; captchaAnswer?: unknown; refreshCaptcha?: unknown; verifyCaptcha?: unknown };
+    phone = normalizeMobileNumber(body.phone);
+    captchaToken = typeof body.captchaToken === "string" ? body.captchaToken : "";
+    captchaAnswer = typeof body.captchaAnswer === "string" ? body.captchaAnswer : "";
+    refreshCaptcha = body.refreshCaptcha === true;
+    verifyCaptcha = body.verifyCaptcha === true;
   } catch {
     return json({ error: "Enter a valid mobile number" }, 400);
   }
   if (!phone) return json({ error: "Enter a valid 10-digit Indian mobile number" }, 400);
+
+  if (refreshCaptcha) {
+    const refreshed = refreshOtpSendCaptcha(request, phone, captchaToken);
+    if (refreshed.status === "invalid") return json({ error: "Security check expired. Please request a new OTP." }, 400);
+    if (refreshed.status === "not-required") return json({ captchaRequired: false });
+    return json({ captchaRequired: true, captcha: refreshed.captcha });
+  }
+
+  if (verifyCaptcha) {
+    const verified = verifyOtpSendCaptcha(request, phone, captchaToken, captchaAnswer);
+    if (verified.status === "not-required") return json({ captchaRequired: false });
+    if (verified.status === "verified") return json({ captchaRequired: true, captchaVerified: true });
+    return json({ error: "Incorrect CAPTCHA. Please try the new image.", captchaRequired: true, captcha: verified.captcha }, 400);
+  }
+
+  const captcha = getOtpSendCaptchaRequirement(request, phone, captchaToken);
+  if (!captcha.allowed) {
+    return json(
+      {
+        error: "Please enter and verify the CAPTCHA to resend the OTP.",
+        captchaRequired: true,
+        captcha: captcha.captcha,
+      },
+      429,
+    );
+  }
 
   const rateLimit = consumeOtpSendRateLimit(request, phone);
   if (!rateLimit.allowed) {
@@ -39,6 +74,8 @@ export async function POST(request: Request) {
       status: "success",
     });
     const pending = { phone, code, expiresAt: Date.now() + OTP_EXPIRES_MS };
+    recordOtpSend(request, phone, Boolean(captcha.captchaToken));
+    completeOtpSendCaptcha(captcha.captchaToken);
     return json(
       {
         sent: true,
