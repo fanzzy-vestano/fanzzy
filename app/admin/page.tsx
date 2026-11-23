@@ -3,7 +3,7 @@
 
 import { Component, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ErrorInfo } from "react";
 import { Eye, Pencil, Printer, Trash2 } from "lucide-react";
-import QRCode from "react-qr-code";
+import { createPosCheckoutOrder, preparePosCheckout, readPosCheckoutStatus, type PosCheckoutOrder } from "../../lib/pos-upi-client";
 import DelhiveryPickupSelect from "./DelhiveryPickupSelect";
 import OffersDashboard from "./OffersManager";
 import { evaluateSalesPromotions, type SalesPromotion } from "../../lib/sales-promotions";
@@ -228,10 +228,6 @@ const defaultHeroSlideDuration = 5.2;
 const defaultDeliveryCharge = { enabled: false, amount: 99, freeAboveEnabled: false, freeAbove: 999 };
 type PaymentSettings = { online: boolean; cod: boolean; provider: string; codCharge: number };
 const defaultPaymentSettings: PaymentSettings = { online: true, cod: true, provider: "Razorpay", codCharge: 0 };
-const adminRazorpayApiBaseUrl = (process.env.NEXT_PUBLIC_RAZORPAY_API_URL ?? "").replace(/\/$/, "");
-const adminRazorpayApiUrl = (path: "pos-qr") => adminRazorpayApiBaseUrl
-  ? `${adminRazorpayApiBaseUrl}/${path}`
-  : `/api/razorpay/${path}`;
 type RefundRequestStatus = "Requested" | "Approved" | "Rejected" | "Refunded";
 type RefundRequest = {
   id: string;
@@ -574,15 +570,14 @@ type PromotionCartLine = { groupId: string; offerId: string; role: "paid" | "fre
 type OrderItem = { name: string; productName?: string; quantity: number; price: string; productId?: string; image?: string; variantName?: string; variantImage?: string; size?: string; cancelled?: boolean; promotion?: PromotionCartLine };
 type DelhiveryScan = { status: string; date?: string; location?: string; instructions?: string };
 type PosPaymentMethod = "Cash" | "UPI" | "Card";
-type PosQrState = {
-  status: "idle" | "loading" | "ready" | "paid" | "error";
-  id?: string;
-  orderId?: string;
-  imageUrl?: string;
-  paymentUrl?: string;
-  mode?: "native_qr" | "payment_link";
-  amount?: number;
-  closeBy?: number;
+type PosUpiAttempt = {
+  order: PosCheckoutOrder;
+  cartFingerprint: string;
+  openedAt: number;
+};
+type PosUpiState = {
+  status: "idle" | "loading" | "open" | "checking" | "pending" | "ready" | "paid" | "error" | "review";
+  attempt?: PosUpiAttempt;
   paymentId?: string;
   message?: string;
 };
@@ -9207,10 +9202,14 @@ function PosWorkspace({
   const [paymentMethod, setPaymentMethod] = useState<PosPaymentMethod>("Cash");
   const [checkoutBusy, setCheckoutBusy] = useState(false);
   const [lastSale, setLastSale] = useState<OrderRecord | null>(null);
-  const [posQr, setPosQr] = useState<PosQrState>({ status: "idle" });
-  const [posQrRefresh, setPosQrRefresh] = useState(0);
-  const posQrRef = useRef<PosQrState>({ status: "idle" });
-  const posQrRequestRef = useRef(0);
+  const [posUpi, setPosUpi] = useState<PosUpiState>({ status: "idle" });
+  const posUpiRef = useRef<PosUpiState>({ status: "idle" });
+  const posCheckoutRef = useRef<Awaited<ReturnType<typeof preparePosCheckout>> | null>(null);
+  const reportedUpiOrderRef = useRef<string | null>(null);
+  const updatePosUpi = useCallback((state: PosUpiState) => {
+    posUpiRef.current = state;
+    setPosUpi(state);
+  }, []);
   const inputRef = useRef<HTMLInputElement>(null);
   const lookupProductRef = useRef<(value: string) => void>(() => undefined);
   const lastAutoLookupRef = useRef("");
@@ -9465,106 +9464,116 @@ function PosWorkspace({
   const appliedPosPromotion = posPromotion.discount >= manualPosDiscount && posPromotion.discount > 0 ? posPromotion : null;
   const discount = Math.min(subtotal, Math.max(manualPosDiscount, posPromotion.discount));
   const total = Math.max(0, subtotal - discount);
-  const qrPaymentFingerprint = cartLines.map(({ selection, quantity }) => `${selection.key}:${quantity}`).sort().join("|");
-  const upiPaymentActive = paymentMethod === "UPI" && (posQr.status === "loading" || posQr.status === "ready" || posQr.status === "paid");
-  const upiPaymentConfirmed = paymentMethod === "UPI" && posQr.status === "paid" && Boolean(posQr.paymentId);
+  const upiAmount = Math.round(total * 100);
+  const upiCartFingerprint = cartLines.map(({ selection, quantity }) => `${selection.key}:${quantity}`).sort().join("|");
+  const upiPaymentInFlight = paymentMethod === "UPI" && ["loading", "open", "checking", "pending", "review"].includes(posUpi.status);
+  const upiPaymentActive = paymentMethod === "UPI" && (upiPaymentInFlight || Boolean(posUpi.attempt));
+  const upiPaymentConfirmed = paymentMethod === "UPI" && posUpi.status === "paid"
+    && Boolean(posUpi.paymentId) && posUpi.attempt?.order.amount === upiAmount
+    && posUpi.attempt.cartFingerprint === upiCartFingerprint;
   const visibleProducts = useMemo(() => {
     const query = productSearch.trim().toLowerCase();
     return products.filter((product) => !query || `${product.name} ${product.sku} ${product.barcode || ""} ${product.category}`.toLowerCase().includes(query)).slice(0, 24);
   }, [productSearch, products]);
 
-  useEffect(() => {
-    const requestNumber = ++posQrRequestRef.current;
-    const previousQr = posQrRef.current;
-    if (previousQr.id && previousQr.status !== "paid") {
-      void fetch(`${adminRazorpayApiUrl("pos-qr")}?id=${encodeURIComponent(previousQr.id)}`, { method: "DELETE" }).catch(() => undefined);
-    }
-    posQrRef.current = { status: "idle" };
+  const checkPosUpi = useCallback(async (attempt: PosUpiAttempt, reportedPaid = false) => {
+    const current = posUpiRef.current;
+    if (current.attempt !== attempt || current.status === "paid") return;
+    if (reportedPaid) reportedUpiOrderRef.current = attempt.order.id;
+    if (current.status === "checking") return;
 
-    if (paymentMethod !== "UPI" || !qrPaymentFingerprint || total < 1) {
-      const idleTimer = window.setTimeout(() => setPosQr({ status: "idle" }), 0);
-      return () => window.clearTimeout(idleTimer);
-    }
-
-    const timer = window.setTimeout(async () => {
-      setLockedPosPromotion((current) => current || computedPosPromotion);
-      const loadingState: PosQrState = { status: "loading" };
-      posQrRef.current = loadingState;
-      setPosQr(loadingState);
-      try {
-        const orderToken = globalThis.crypto?.randomUUID?.().replace(/-/g, "").slice(-6).toUpperCase() || String(Date.now()).slice(-6);
-        const orderId = `#FZ-POS-${orderToken}`;
-        const response = await fetch(adminRazorpayApiUrl("pos-qr"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ amount: Math.round(total * 100), reference: orderId, orderId }),
+    updatePosUpi({ status: "checking", attempt });
+    try {
+      const result = await readPosCheckoutStatus(attempt.order);
+      if (posUpiRef.current.attempt !== attempt) return;
+      if (result.status === "paid") {
+        updatePosUpi({ status: "paid", attempt, paymentId: result.paymentId });
+        onNotify(`UPI payment received · ${result.paymentId}`);
+      } else if (result.status === "review" || current.status === "review") {
+        updatePosUpi({
+          status: "review",
+          attempt,
+          message: result.status === "review" ? result.error : current.message,
         });
-        const payload = await response.json() as { id?: string; imageUrl?: string; paymentUrl?: string; mode?: "native_qr" | "payment_link"; amount?: number; closeBy?: number; error?: string };
-        if (!response.ok || !payload.id || (!payload.imageUrl && !payload.paymentUrl)) throw new Error(payload.error || "Could not create the Razorpay payment QR.");
-        if (posQrRequestRef.current !== requestNumber) {
-          void fetch(`${adminRazorpayApiUrl("pos-qr")}?id=${encodeURIComponent(payload.id)}`, { method: "DELETE" }).catch(() => undefined);
-          return;
-        }
-        const readyState: PosQrState = { status: "ready", id: payload.id, orderId, imageUrl: payload.imageUrl, paymentUrl: payload.paymentUrl, mode: payload.mode, amount: payload.amount || Math.round(total * 100), closeBy: payload.closeBy };
-        posQrRef.current = readyState;
-        setPosQr(readyState);
-      } catch (qrError) {
-        if (posQrRequestRef.current !== requestNumber) return;
-        const rawMessage = qrError instanceof Error ? qrError.message : "Could not create the Razorpay payment QR.";
-        const message = /requested url|not found|not enabled|feature/i.test(rawMessage)
-          ? "Razorpay could not create a payment request. Check that Payment Links are enabled for this merchant account."
-          : rawMessage;
-        const errorState: PosQrState = { status: "error", message };
-        posQrRef.current = errorState;
-        setPosQr(errorState);
+      } else if (result.status === "pending" || reportedUpiOrderRef.current === attempt.order.id) {
+        updatePosUpi({ status: "pending", attempt, message: "Waiting for Razorpay to confirm this payment." });
+      } else {
+        updatePosUpi({ status: "ready", attempt, message: "Checkout closed. You can retry this UPI payment." });
       }
-    }, 250);
-    return () => window.clearTimeout(timer);
-  }, [paymentMethod, posQrRefresh, qrPaymentFingerprint, total]);
+    } catch (error) {
+      if (posUpiRef.current.attempt !== attempt) return;
+      updatePosUpi({
+        status: current.status === "review" ? "review" : "pending",
+        attempt,
+        message: error instanceof Error ? error.message : "Could not check the UPI payment status.",
+      });
+    }
+  }, [onNotify, updatePosUpi]);
 
   useEffect(() => {
-    if (posQr.status !== "ready" || !posQr.id) return;
-    let active = true;
-    let checking = false;
-    const checkPayment = async () => {
-      if (checking) return;
-      checking = true;
-      try {
-        const response = await fetch(`${adminRazorpayApiUrl("pos-qr")}?id=${encodeURIComponent(posQr.id!)}`, { cache: "no-store" });
-        const payload = await response.json() as { paid?: boolean; paymentId?: string; amount?: number; status?: string; error?: string };
-        if (!response.ok) throw new Error(payload.error || "Could not check the UPI payment.");
-        if (!active || !payload.paid || !payload.paymentId) return;
-        if (Number(payload.amount) !== Number(posQr.amount)) {
-          const mismatchState: PosQrState = { ...posQr, status: "error", message: "Razorpay reported a payment with a different amount. Do not complete this sale." };
-          posQrRef.current = mismatchState;
-          setPosQr(mismatchState);
-          return;
-        }
-        const paidState: PosQrState = { ...posQr, status: "paid", paymentId: payload.paymentId };
-        posQrRef.current = paidState;
-        setPosQr(paidState);
-        onNotify(`UPI payment received · ${payload.paymentId}`);
-      } catch {
-        // Keep the active QR visible and retry. A transient status check must
-        // never make the cashier generate a second QR for the same sale.
-      } finally {
-        checking = false;
-      }
-    };
-    void checkPayment();
-    const interval = window.setInterval(() => void checkPayment(), 2500);
-    return () => {
-      active = false;
-      window.clearInterval(interval);
-    };
-  }, [onNotify, posQr]);
+    if (posUpi.status !== "pending" || !posUpi.attempt) return;
+    const attempt = posUpi.attempt;
+    if (Date.now() - attempt.openedAt > 45_000) return;
+    const timer = window.setTimeout(() => void checkPosUpi(attempt), 3_000);
+    return () => window.clearTimeout(timer);
+  }, [checkPosUpi, posUpi]);
 
   useEffect(() => () => {
-    const currentQr = posQrRef.current;
-    if (currentQr.id && currentQr.status !== "paid") {
-      void fetch(`${adminRazorpayApiUrl("pos-qr")}?id=${encodeURIComponent(currentQr.id)}`, { method: "DELETE", keepalive: true }).catch(() => undefined);
-    }
+    posUpiRef.current = { status: "idle" };
+    posCheckoutRef.current?.close?.();
+    posCheckoutRef.current = null;
   }, []);
+
+  const startPosUpi = async () => {
+    const current = posUpiRef.current;
+    if (!cartLines.length || upiAmount < 100 || checkoutBusy
+      || !["idle", "ready", "error"].includes(current.status)) return;
+    if (current.attempt && (current.attempt.order.amount !== upiAmount
+      || current.attempt.cartFingerprint !== upiCartFingerprint)) {
+      updatePosUpi({ ...current, status: "review", message: "This bill changed. Check the existing UPI payment before continuing." });
+      return;
+    }
+
+    const unavailable = cartLines.find(({ product, selection, quantity }) => product.status === "Draft" || quantity > selection.stock);
+    if (unavailable) {
+      setError(`${unavailable.product.name} does not have enough stock.`);
+      return;
+    }
+
+    setError("");
+    setLockedPosPromotion((locked) => locked || computedPosPromotion);
+    const loading: PosUpiState = { status: "loading", attempt: current.attempt };
+    updatePosUpi(loading);
+    let attempt = current.attempt;
+    try {
+      const order = attempt?.order ?? await createPosCheckoutOrder(upiAmount);
+      if (posUpiRef.current !== loading) return;
+
+      const openingAttempt: PosUpiAttempt = { order, cartFingerprint: upiCartFingerprint, openedAt: Date.now() };
+      attempt = openingAttempt;
+      const checkout = await preparePosCheckout(
+        order,
+        { name: customerName, phone: customerPhone },
+        () => void checkPosUpi(openingAttempt, true),
+        () => {
+          if (posUpiRef.current.attempt !== openingAttempt) return;
+          posCheckoutRef.current = null;
+          void checkPosUpi(openingAttempt);
+        },
+      );
+      if (posUpiRef.current !== loading) return;
+      posCheckoutRef.current = checkout;
+      updatePosUpi({ status: "open", attempt });
+      checkout.open();
+    } catch (error) {
+      if (posUpiRef.current !== loading
+        && (posUpiRef.current.status !== "open" || posUpiRef.current.attempt !== attempt)) return;
+      const message = error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name)
+        ? "Razorpay Checkout timed out. Try again."
+        : error instanceof Error ? error.message : "Could not open Razorpay Checkout.";
+      updatePosUpi({ status: "error", attempt, message });
+    }
+  };
 
   const updateQuantity = (selection: PosCartSelection, delta: number) => {
     if (upiPaymentActive) {
@@ -9583,10 +9592,15 @@ function PosWorkspace({
   };
 
   const clearSale = () => {
-    if (upiPaymentConfirmed) {
+    if (paymentMethod === "UPI" && posUpi.status === "paid") {
       setError("This UPI payment is already received. Complete the sale before starting another bill.");
       return;
     }
+    if (upiPaymentInFlight) {
+      setError("Check the UPI payment before clearing this bill.");
+      return;
+    }
+    if (paymentMethod === "UPI") updatePosUpi({ status: "idle" });
     setCart({});
     setDiscountValue("");
     setPosCouponCode("");
@@ -9600,9 +9614,15 @@ function PosWorkspace({
   };
 
   const choosePaymentMethod = (method: PosPaymentMethod) => {
-    if (upiPaymentConfirmed && method !== "UPI") {
-      setError("This UPI payment is already received. Complete the sale before changing payment method.");
-      return;
+    if (paymentMethod === "UPI") {
+      if (method === "UPI") return;
+      if (upiPaymentInFlight || posUpi.status === "paid") {
+        setError(posUpi.status === "paid"
+          ? "This UPI payment is already received. Complete the sale before changing payment method."
+          : "Check the UPI payment before changing payment method.");
+        return;
+      }
+      updatePosUpi({ status: "idle" });
     }
     setLockedPosPromotion(method === "UPI" ? computedPosPromotion : null);
     setPaymentMethod(method);
@@ -9612,7 +9632,9 @@ function PosWorkspace({
   const completeSale = async () => {
     if (!cartLines.length || checkoutBusy) return;
     if (paymentMethod === "UPI" && !upiPaymentConfirmed) {
-      setError(posQr.status === "error" ? posQr.message || "Could not create the UPI QR code." : "Ask the customer to scan the Razorpay QR and wait for payment confirmation.");
+      setError(posUpi.status === "paid"
+        ? "The current bill does not match the confirmed UPI payment."
+        : "Confirm the UPI payment before completing this sale.");
       return;
     }
     const unavailable = cartLines.find(({ product, selection, quantity }) => product.status === "Draft" || quantity > selection.stock);
@@ -9655,11 +9677,12 @@ function PosWorkspace({
       await Promise.all([saveProductVariants(nextProducts), saveProductSizeStock(nextProducts)]);
 
       const now = new Date();
-      const token = paymentMethod === "UPI" && posQr.orderId
-        ? posQr.orderId.replace(/^#FZ-POS-/i, "")
+      const upiOrder = paymentMethod === "UPI" ? posUpi.attempt?.order : undefined;
+      const token = upiOrder
+        ? upiOrder.saleId.replace(/^#FZ-POS-/i, "")
         : globalThis.crypto?.randomUUID?.().replace(/-/g, "").slice(-6).toUpperCase() || String(Date.now()).slice(-6);
       const order: OrderRecord = {
-        id: posQr.orderId || `#FZ-POS-${token}`,
+        id: upiOrder?.saleId || `#FZ-POS-${token}`,
         invoiceNumber: `POS-${token}`,
         date: now.toISOString().slice(0, 10),
         createdAt: now.toISOString(),
@@ -9674,8 +9697,8 @@ function PosWorkspace({
         paymentStatus: paymentMethod === "Cash" ? "cod_collected" : "paid",
         posPaymentMethod: paymentMethod,
         posSale: true,
-        razorpayPaymentId: paymentMethod === "UPI" ? posQr.paymentId : undefined,
-        razorpayQrCodeId: paymentMethod === "UPI" ? posQr.id : undefined,
+        razorpayPaymentId: upiOrder ? posUpi.paymentId : undefined,
+        razorpayOrderId: upiOrder?.id,
         coupon: appliedPosPromotion?.promotion ? `${appliedPosPromotion.promotion.name}${appliedPosPromotion.promotion.type === "coupon" ? ` (${appliedPosPromotion.promotion.couponCode})` : ""}` : discount > 0 ? "POS discount" : undefined,
         couponDiscount: discount,
         inventoryAdjusted: true,
@@ -9714,8 +9737,7 @@ function PosWorkspace({
       setCustomerName("");
       setCustomerPhone("");
       setLastProduct(null);
-      posQrRef.current = { status: "idle" };
-      setPosQr({ status: "idle" });
+      updatePosUpi({ status: "idle" });
       setLastSale(order);
       onNotify(orderSaveError ? `${order.id} completed and saved on this device` : `${order.id} sale completed`);
     } catch (saleError) {
@@ -9726,6 +9748,20 @@ function PosWorkspace({
     }
   };
   const variantPickerOptions = variantPickerProduct ? variantOptions(variantPickerProduct) : [];
+  const checkingUpi = posUpi.status === "pending" || posUpi.status === "review";
+  const posPayLabel = checkoutBusy ? "Completing sale…"
+    : paymentMethod !== "UPI" ? `Pay ${formatAdminCurrency(total)} · ${paymentMethod}`
+    : posUpi.status === "paid" ? `Complete ${formatAdminCurrency(total)} · UPI paid`
+    : posUpi.status === "loading" ? "Opening Razorpay Checkout…"
+    : posUpi.status === "open" ? "Complete payment in Razorpay…"
+    : posUpi.status === "checking" ? "Checking UPI payment…"
+    : checkingUpi ? "Check UPI payment status"
+    : `${posUpi.status === "ready" || posUpi.status === "error" ? "Retry UPI payment" : "Pay with UPI"} · ${formatAdminCurrency(total)}`;
+  const payPosBill = () => {
+    if (paymentMethod !== "UPI" || posUpi.status === "paid") { void completeSale(); return; }
+    if (checkingUpi && posUpi.attempt) { void checkPosUpi(posUpi.attempt); return; }
+    void startPosUpi();
+  };
 
   return (
     <section className="panel module-workspace pos-workspace" aria-labelledby="pos-workspace-title">
@@ -9756,19 +9792,24 @@ function PosWorkspace({
           </div>
           <div className="pos-customer-fields"><label>Customer name <input value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="Walk-in customer" /></label><label>Mobile number <input value={customerPhone} onChange={(event) => setCustomerPhone(event.target.value.replace(/\D/g, "").slice(0, 10))} inputMode="numeric" placeholder="Optional" /></label></div>
           <div className="pos-payment-section"><span>Payment method</span><div>{(["Cash", "UPI", "Card"] as PosPaymentMethod[]).map((method) => <button type="button" key={method} className={paymentMethod === method ? "active" : ""} onClick={() => choosePaymentMethod(method)}>{method}</button>)}</div></div>
-          {paymentMethod === "UPI" && cartLines.length > 0 && <section className={`pos-upi-qr pos-upi-qr-${posQr.status}`} aria-live="polite">
-            {posQr.status === "loading" && <><span className="pos-upi-qr-loader" /><div><strong>Creating Razorpay QR…</strong><small>The QR will include the exact bill amount.</small></div></>}
-            {posQr.status === "error" && <><span className="pos-upi-qr-error">!</span><div><strong>QR unavailable</strong><small>{posQr.message}</small><button type="button" onClick={() => setPosQrRefresh((current) => current + 1)}>Retry</button></div></>}
-            {(posQr.status === "ready" || posQr.status === "paid") && (posQr.imageUrl || posQr.paymentUrl) && <>
-              {posQr.imageUrl
-                ? <img src={posQr.imageUrl} alt={`Razorpay UPI QR for ${formatAdminCurrency(total)}`} />
-                : <span className="pos-upi-qr-code" role="img" aria-label={`Razorpay payment QR for ${formatAdminCurrency(total)}`}><QRCode value={posQr.paymentUrl!} size={104} /></span>}
-              <div><small>{posQr.mode === "payment_link" ? "RAZORPAY PAYMENT QR" : "RAZORPAY UPI"}</small><strong>{posQr.status === "paid" ? "Payment received" : `Scan to pay ${formatAdminCurrency(total)}`}</strong><span>{posQr.status === "paid" ? `Confirmed · ${posQr.paymentId}` : posQr.mode === "payment_link" ? "Scan and complete payment on Razorpay…" : "Waiting for payment confirmation…"}</span></div>
-              <b className={posQr.status === "paid" ? "is-paid" : ""}>{posQr.status === "paid" ? "✓" : "•••"}</b>
-            </>}
+          {paymentMethod === "UPI" && cartLines.length > 0 && <section className={`pos-upi-qr pos-upi-qr-${posUpi.status}`} aria-live="polite">
+            {(posUpi.status === "error" || posUpi.status === "review") && <span className="pos-upi-qr-error-icon" aria-hidden="true">!</span>}
+            {(posUpi.status === "loading" || posUpi.status === "checking") && <span className="pos-upi-qr-loader" aria-hidden="true" />}
+            <div>
+              <small>RAZORPAY CHECKOUT</small>
+              <strong>{posUpi.status === "paid" ? "Payment received"
+                : posUpi.status === "error" ? "UPI checkout unavailable"
+                : posUpi.status === "review" ? "Check the UPI payment"
+                : checkingUpi ? "Payment confirmation pending"
+                : posUpi.status === "open" ? "Complete payment in Razorpay"
+                : "UPI and QR payment"}</strong>
+              <span>{posUpi.status === "paid" ? `Confirmed · ${posUpi.paymentId}`
+                : posUpi.message || (upiAmount < 100 ? "UPI requires a bill of at least ₹1." : "Use Pay with UPI to open Razorpay’s UPI and QR options.")}</span>
+            </div>
+            {posUpi.status === "paid" && <b className="is-paid" aria-hidden="true">✓</b>}
           </section>}
           <div className="pos-promotion-box"><label>Promotion coupon<input aria-label="POS promotion coupon" value={posCouponCode} disabled={upiPaymentActive} onChange={(event) => setPosCouponCode(event.target.value.toUpperCase())} placeholder="Enter a coupon code" /></label><p>{appliedPosPromotion?.promotion ? `${appliedPosPromotion.promotion.name} · −${formatAdminCurrency(appliedPosPromotion.discount)}` : posCouponCode ? "No eligible coupon for this bill." : "Best eligible promotion applies automatically."}</p></div><div className="pos-totals"><label><span>Subtotal</span><strong>{formatAdminCurrency(subtotal)}</strong></label><label><span>Manual discount</span><span className="pos-discount-input">₹<input value={discountValue} onChange={(event) => setDiscountValue(event.target.value.replace(/[^0-9.]/g, ""))} inputMode="decimal" placeholder="0" disabled={upiPaymentActive} /></span></label>{appliedPosPromotion && <label><span>Applied promotion</span><strong>−{formatAdminCurrency(appliedPosPromotion.discount)}</strong></label>}<label className="pos-grand-total"><span>Total</span><strong>{formatAdminCurrency(total)}</strong></label><small>Prices are inclusive of applicable GST.</small></div>
-          <button className="pos-pay-button" type="button" disabled={!cartLines.length || checkoutBusy || (paymentMethod === "UPI" && !upiPaymentConfirmed)} onClick={() => void completeSale()}>{checkoutBusy ? "Completing sale…" : paymentMethod === "UPI" ? upiPaymentConfirmed ? `Complete ${formatAdminCurrency(total)} · UPI paid` : posQr.status === "loading" ? "Creating Razorpay QR…" : `Waiting for UPI payment · ${formatAdminCurrency(total)}` : `Pay ${formatAdminCurrency(total)} · ${paymentMethod}`} <span>→</span></button>
+          <button className="pos-pay-button" type="button" disabled={!cartLines.length || checkoutBusy || (paymentMethod === "UPI" && (upiAmount < 100 || ["loading", "open", "checking"].includes(posUpi.status)))} onClick={payPosBill}>{posPayLabel} <span>→</span></button>
           {lastSale && <div className="pos-sale-complete"><span>✓</span><div><strong>Sale completed</strong><small>{lastSale.id} · {lastSale.total}</small></div><button type="button" onClick={() => void printOrderBill(lastSale)}>Print receipt</button></div>}
         </aside>
       </div>
