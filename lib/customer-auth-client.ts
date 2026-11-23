@@ -1,6 +1,18 @@
 import { browserLocalStorage, prepareBrowserStorage, flushBrowserStorage } from "./browser-storage";
+import { getCountries, getCountryCallingCode, parsePhoneNumberFromString, type CountryCode } from "libphonenumber-js";
 type CustomerAuthRequestInit = RequestInit & { tokenType?: "pending" | "session" };
 export type CustomerAuthUser = { id: string; phone: string };
+
+export const CUSTOMER_SMS_COUNTRIES = getCountries().map((country) => ({
+  country,
+  callingCode: `+${getCountryCallingCode(country)}`,
+}));
+
+export function formatCustomerSmsPhone(value: string, country: CountryCode = "IN") {
+  if (!/^[+\d\s().-]+$/.test(value.trim())) return "";
+  const number = parsePhoneNumberFromString(value, country);
+  return number?.isPossible() && !number.ext ? number.number : "";
+}
 
 const externalCustomerAuthUrl = (process.env.NEXT_PUBLIC_CUSTOMER_AUTH_API_URL ?? "").replace(/\/$/, "");
 const pendingTokenKey = "fanzzy-customer-pending-token";

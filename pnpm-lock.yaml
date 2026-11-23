@@ -23,6 +23,9 @@ importers:
       exceljs:
         specifier: 4.4.0
         version: 4.4.0
+      libphonenumber-js:
+        specifier: 1.13.17
+        version: 1.13.17
       lucide-react:
         specifier: ^1.29.0
         version: 1.29.0(react@19.2.6)
@@ -3174,6 +3177,9 @@ packages:
   loose-envify@1.4.0:
     resolution: {integrity: sha512-lyuxPGr/Wfhrlem2CL/UcnUc1zcqKAImBDzukY7Y5F/yQiNdko6+fRLevlw1HgMySw7f611UIY408EtxRSoK3Q==}
     hasBin: true
+
+  libphonenumber-js@1.13.17:
+    resolution: {integrity: sha512-V92dxRHhYTsHF5B6IjR8rtKW6qL7xKuERPFFqZt7XQl8A+NikbwEzjhxGpM+R6JnWjaL7/wokWSdTG/eyYAscQ==}
 
   lru-cache@5.1.1:
     resolution: {integrity: sha512-KpNARQA3Iwv+jTA0utUVVbrh+Jlrr1Fv0e56GGzAFOXN7dk/FviaDW8LHmK52DlcH4WP2n6gI8vN1aesBFgo9w==}
@@ -6821,6 +6827,8 @@ snapshots:
   loose-envify@1.4.0:
     dependencies:
       js-tokens: 4.0.0
+
+  libphonenumber-js@1.13.17: {}
 
   lru-cache@5.1.1:
     dependencies:

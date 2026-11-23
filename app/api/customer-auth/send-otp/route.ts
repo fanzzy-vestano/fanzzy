@@ -21,7 +21,10 @@ export async function POST(request: Request) {
   } catch {
     return json({ error: "Enter a valid mobile number" }, 400);
   }
-  if (!phone) return json({ error: "Enter a valid 10-digit Indian mobile number" }, 400);
+  if (!phone) return json({ error: "Enter a valid mobile number with its country code." }, 400);
+  if (!phone.startsWith("91") && process.env.FANZZY_ENV !== "local-test") {
+    return json({ error: "International SMS login is not configured yet." }, 503);
+  }
 
   if (refreshCaptcha) {
     const refreshed = refreshOtpSendCaptcha(request, phone, captchaToken);

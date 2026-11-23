@@ -46,9 +46,11 @@ import {
 import { isGenericLuxuryCategoryName } from "../lib/catalog-categories";
 import { storefrontImageProps } from "../lib/storefront-images";
 import {
+  CUSTOMER_SMS_COUNTRIES,
   clearCustomerAuthTokens,
   clearPendingCustomerAuthToken,
   customerAuthRequest,
+  formatCustomerSmsPhone,
   readStoredCustomerAuthUser,
   saveCustomerAuthTokens,
   saveCustomerAuthUser,
@@ -1552,6 +1554,7 @@ export default function Home() {
   const [authLoading, setAuthLoading] = useState(false);
   const [authMessage, setAuthMessage] = useState("");
   const [authPhone, setAuthPhone] = useState("");
+  const [authCountry, setAuthCountry] = useState<(typeof CUSTOMER_SMS_COUNTRIES)[number]["country"]>("IN");
   const [authOtp, setAuthOtp] = useState("");
   const [otpSent, setOtpSent] = useState(false);
   const [otpCooldown, setOtpCooldown] = useState(0);
@@ -4171,7 +4174,7 @@ export default function Home() {
     announce("Signed out successfully");
   };
   const changeOtpCaptcha = async () => {
-    const phone = authPhone.trim();
+    const phone = formatCustomerSmsPhone(authPhone, authCountry);
     if (!phone || !otpCaptcha) return;
     setAuthLoading(true);
     setAuthMessage("");
@@ -4209,7 +4212,7 @@ export default function Home() {
     }
   };
   const verifyOtpCaptcha = async () => {
-    const phone = authPhone.trim();
+    const phone = formatCustomerSmsPhone(authPhone, authCountry);
     if (!phone || !otpCaptcha || !otpCaptchaAnswer.trim()) return;
     const captchaToken = otpCaptcha.token;
     setAuthLoading(true);
@@ -4251,9 +4254,9 @@ export default function Home() {
     }
   };
   const sendOtp = async () => {
-    const phone = authPhone.trim();
+    const phone = formatCustomerSmsPhone(authPhone, authCountry);
     if (!phone) {
-      setAuthMessage("Enter your mobile number to receive a code.");
+      setAuthMessage("Enter a valid mobile number for the selected country.");
       return;
     }
     if (otpCooldown > 0) {
@@ -8047,26 +8050,54 @@ export default function Home() {
               password is required.
             </p>
             <div className="otp-auth-form">
-              <label>
-                Mobile number
-                <input
-                  type="tel"
-                  value={authPhone}
-                  onChange={(event) => {
-                    setAuthPhone(event.target.value);
-                    setAuthOtp("");
-                    setOtpSent(false);
-                    setOtpCooldown(0);
-                    setOtpCaptcha(null);
-                    setOtpCaptchaAnswer("");
-                    setOtpCaptchaError("");
-                  }}
-                  placeholder="+91 98765 43210"
-                  inputMode="tel"
-                  autoComplete="tel"
-                  disabled={authLoading}
-                />
-              </label>
+              <div className="otp-phone-row">
+                <label>
+                  Country code
+                  <select
+                    name="country-code"
+                    autoComplete="tel-country-code"
+                    value={authCountry}
+                    onChange={(event) => {
+                      setAuthCountry(event.target.value as typeof authCountry);
+                      setAuthOtp("");
+                      setOtpSent(false);
+                      setOtpCooldown(0);
+                      setOtpCaptcha(null);
+                      setOtpCaptchaAnswer("");
+                      setOtpCaptchaError("");
+                      setAuthMessage("");
+                    }}
+                    disabled={authLoading}
+                  >
+                    {CUSTOMER_SMS_COUNTRIES.map(({ country, callingCode }) => (
+                      <option key={country} value={country}>
+                        {new Intl.DisplayNames(["en"], { type: "region" }).of(country) || country} ({callingCode})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Mobile number
+                  <input
+                    type="tel"
+                    value={authPhone}
+                    onChange={(event) => {
+                      setAuthPhone(event.target.value);
+                      setAuthOtp("");
+                      setOtpSent(false);
+                      setOtpCooldown(0);
+                      setOtpCaptcha(null);
+                      setOtpCaptchaAnswer("");
+                      setOtpCaptchaError("");
+                      setAuthMessage("");
+                    }}
+                    placeholder="98765 43210"
+                    inputMode="tel"
+                    autoComplete="tel-national"
+                    disabled={authLoading}
+                  />
+                </label>
+              </div>
               {otpSent && (
                 <label>
                   6-digit verification code

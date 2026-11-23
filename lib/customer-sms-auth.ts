@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { parsePhoneNumberFromString } from "libphonenumber-js";
 // @ts-expect-error Shared Edge module uses an explicit TypeScript extension.
 import { applyCaptchaCase, CAPTCHA_ALPHABET, renderCaptchaImage } from "../supabase/functions/customer-auth/captcha-image.ts";
 
@@ -75,10 +76,10 @@ const cookie = (name: string, value: string, maxAge: number) =>
   `${name}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${isProduction ? "; Secure" : ""}`;
 
 export const normalizeMobileNumber = (value: unknown) => {
-  const digits = typeof value === "string" ? value.replace(/\D/g, "") : "";
-  if (digits.length === 10) return `91${digits}`;
-  if (digits.length === 12 && digits.startsWith("91")) return digits;
-  return "";
+  if (typeof value !== "string" || !/^[+\d\s().-]+$/.test(value.trim())) return "";
+  const digits = value.replace(/\D/g, "");
+  const number = parsePhoneNumberFromString(value.trim().startsWith("+") ? value : digits.length === 10 ? `+91${digits}` : `+${digits}`);
+  return number?.isPossible() && !number.ext ? number.number.slice(1) : "";
 };
 
 const getClientIp = (request: Request) =>

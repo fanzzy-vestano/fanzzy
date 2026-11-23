@@ -1,5 +1,7 @@
 // @ts-expect-error Deno Edge imports use explicit TypeScript file extensions.
 import { md5 } from "./md5.ts";
+// @ts-expect-error Supabase Edge resolves npm specifiers through Deno.
+import { parsePhoneNumberFromString } from "npm:libphonenumber-js@1.13.17";
 // @ts-expect-error Deno Edge imports use explicit TypeScript file extensions.
 import { applyCaptchaCase, CAPTCHA_ALPHABET, renderCaptchaImage } from "./captcha-image.ts";
 
@@ -116,10 +118,10 @@ const readToken = async <T extends TokenPayload>(request: Request, kind: T["kind
 };
 
 const normalizeMobileNumber = (value: unknown) => {
-  const digits = typeof value === "string" ? value.replace(/\D/g, "") : "";
-  if (digits.length === 10) return `91${digits}`;
-  if (digits.length === 12 && digits.startsWith("91")) return digits;
-  return "";
+  if (typeof value !== "string" || !/^[+\d\s().-]+$/.test(value.trim())) return "";
+  const digits = value.replace(/\D/g, "");
+  const number = parsePhoneNumberFromString(value.trim().startsWith("+") ? value : digits.length === 10 ? `+91${digits}` : `+${digits}`);
+  return number?.isPossible() && !number.ext ? number.number.slice(1) : "";
 };
 
 const clientKey = (request: Request, phone: string) => `${request.headers.get("x-forwarded-for") || "unknown"}:${phone}`;
@@ -295,6 +297,7 @@ const route = async (request: Request) => {
   if (action === "send-otp") {
     const phone = normalizeMobileNumber(body.phone);
     if (!phone) return response({ error: "Enter a valid mobile number with its country code." }, 400, origin);
+    if (!phone.startsWith("91")) return response({ error: "International SMS login is not configured yet." }, 503, origin);
     const key = clientKey(request, phone);
     if (body.refreshCaptcha === true) {
       const refreshed = refreshOtpSendCaptcha(key, phone, body.captchaToken);

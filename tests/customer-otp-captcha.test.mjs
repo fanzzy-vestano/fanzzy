@@ -16,6 +16,7 @@ const bundles = Object.fromEntries(Object.entries(sources).map(([runtime, source
   bundle: true,
   platform: "node",
   format: "cjs",
+  alias: { "npm:libphonenumber-js@1.13.17": require.resolve("libphonenumber-js") },
   write: false,
 }).outputFiles[0].text]));
 
@@ -75,6 +76,18 @@ const loadHandler = (runtime) => {
 };
 
 for (const runtime of Object.keys(sources)) {
+  test(`${runtime}: international numbers never reach an unconfigured production SMS route`, async () => {
+    const app = loadHandler(runtime);
+    const result = await app.send("+12025550123");
+    if (runtime === "local") {
+      assert.equal(result.status, 200);
+      assert.equal(result.body.channel, "local-test");
+    } else {
+      assert.equal(result.status, 503);
+      assert.match(result.body.error, /International SMS login is not configured/);
+      assert.equal(app.delivered(), 0);
+    }
+  });
   test(`${runtime}: fifth attempt requires separate CAPTCHA verification before resending`, async () => {
     const app = loadHandler(runtime);
     const phone = "919999900081";

@@ -9,6 +9,7 @@ import {
   getPendingOtp,
   getOtpSendCaptchaRequirement,
   matchesPendingOtp,
+  normalizeMobileNumber,
   recordOtpSend,
 } from "../lib/customer-sms-auth.ts";
 
@@ -21,6 +22,17 @@ const signedFixture = (data) => {
   const payload = Buffer.from(JSON.stringify(data)).toString("base64url");
   return `${payload}.${createHmac("sha256", process.env.CUSTOMER_AUTH_SECRET).update(payload).digest("base64url")}`;
 };
+
+test("international phone numbers retain their calling code and existing Indian sessions stay valid", () => {
+  assert.equal(normalizeMobileNumber("+1 202 555 0123"), "12025550123");
+  assert.equal(normalizeMobileNumber("+44 7700 900123"), "447700900123");
+  assert.equal(normalizeMobileNumber("+971 50 123 4567"), "971501234567");
+  assert.equal(normalizeMobileNumber("9999900098"), "919999900098");
+  assert.equal(normalizeMobileNumber("+1 2"), "");
+  for (const number of ["12025550123", "447700900123", "919999900098"]) {
+    assert.deepEqual(getCustomerSession(request(createCustomerSessionToken(number))), { id: `phone:${number}`, phone: `+${number}` });
+  }
+});
 
 test("pending OTP bearer token cannot authenticate before verification", () => {
   const token = createPendingOtpToken({ phone, code: "123456", expiresAt: Date.now() + 60000 });
