@@ -20,8 +20,6 @@ const OTP_EXPIRES_MS = 5 * 60 * 1000;
 const OTP_RESEND_COOLDOWN_MS = 45 * 1000;
 const OTP_WINDOW_MS = 15 * 60 * 1000;
 const OTP_MAX_REQUESTS = 10;
-const OTP_CAPTCHA_WINDOW_MS = 5 * 60 * 1000;
-const OTP_CAPTCHA_AFTER_SENDS = 4;
 const OTP_VERIFY_WINDOW_MS = 10 * 60 * 1000;
 const OTP_MAX_VERIFY_ATTEMPTS = 8;
 // Keep the external session valid across browser restarts until the customer signs out.
@@ -31,12 +29,9 @@ type PendingOtp = { kind: "pending"; phone: string; otpDigest: string; expiresAt
 type CustomerSession = { kind: "session"; id: string; phone: string; expiresAt: number };
 type TokenPayload = PendingOtp | CustomerSession;
 type RateEntry = { windowStartedAt: number; requestCount: number; lastRequestedAt: number };
-type CaptchaChallenge = { key: string; answer: string; expiresAt: number; verified: boolean };
 
 const sendLimits = new Map<string, RateEntry>();
 const verifyLimits = new Map<string, RateEntry>();
-const otpSendHistory = new Map<string, number[]>();
-const otpCaptchaChallenges = new Map<string, CaptchaChallenge>();
 const jsonHeaders = { "content-type": "application/json" };
 
 const corsHeaders = (origin: string | null) => ({
@@ -148,79 +143,40 @@ const randomCaptchaCode = () => {
   return [...bytes].map((byte) => CAPTCHA_ALPHABET[byte % CAPTCHA_ALPHABET.length]).join("");
 };
 
-const pruneCaptchaState = (now: number) => {
-  for (const [key, timestamps] of otpSendHistory) {
-    const recent = timestamps.filter((timestamp) => now - timestamp < OTP_CAPTCHA_WINDOW_MS);
-    if (recent.length) otpSendHistory.set(key, recent);
-    else otpSendHistory.delete(key);
-  }
-  for (const [token, challenge] of otpCaptchaChallenges) {
-    if (challenge.expiresAt <= now) otpCaptchaChallenges.delete(token);
-  }
-};
+type CaptchaStoreResult = { status: string; expiresAt?: number; captcha?: { token: string; image: string; expiresAt: number } };
+const opaqueHash = async (value: string) => base64UrlEncode(new Uint8Array(await crypto.subtle.sign(
+  "HMAC", await secretKey(), new TextEncoder().encode(value),
+)));
 
-const captchaRequiredUntil = (phone: string) => {
-  const timestamps = otpSendHistory.get(phone) || [];
-  return timestamps.length >= OTP_CAPTCHA_AFTER_SENDS
-    ? timestamps[timestamps.length - OTP_CAPTCHA_AFTER_SENDS] + OTP_CAPTCHA_WINDOW_MS
-    : 0;
-};
-
-const createCaptchaChallenge = (key: string, expiresAt: number) => {
-  const token = base64UrlEncode(crypto.getRandomValues(new Uint8Array(24)));
+// This RPC operates only on the dedicated CAPTCHA table; all identifiers and
+// answers are HMACs, and the service-role key never reaches the browser.
+const captchaStore = async (action: string, key: string, phone: string, token?: unknown, answer?: unknown, reservation = ""): Promise<CaptchaStoreResult> => {
+  const baseUrl = Deno.env.get("SUPABASE_URL")?.replace(/\/$/, "") || "";
+  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")?.trim() || "";
+  if (!baseUrl || !serviceKey || !customerAuthSecret()) throw new Error("Security check is temporarily unavailable. Please try again.");
+  const newToken = base64UrlEncode(crypto.getRandomValues(new Uint8Array(24)));
   const noise = crypto.getRandomValues(new Uint8Array(10));
-  const answer = applyCaptchaCase(randomCaptchaCode(), noise);
-  otpCaptchaChallenges.set(token, { key, answer, expiresAt, verified: false });
-  return { token, image: renderCaptchaImage(answer, noise), expiresAt };
-};
-
-const getOtpSendCaptchaRequirement = (key: string, phone: string, captchaToken?: unknown) => {
-  const now = Date.now();
-  pruneCaptchaState(now);
-  const requiredUntil = captchaRequiredUntil(phone);
-  if (!requiredUntil) {
-    return { allowed: true as const, captchaToken: "" };
-  }
-  const token = typeof captchaToken === "string" ? captchaToken : "";
-  const challenge = token ? otpCaptchaChallenges.get(token) : null;
-  if (challenge && challenge.key === key && challenge.expiresAt > now && challenge.verified) {
-    return { allowed: true as const, captchaToken: token };
-  }
-  return { allowed: false as const, captcha: createCaptchaChallenge(key, requiredUntil) };
-};
-
-const recordOtpSend = (key: string, phone: string, resetCaptchaCycle = false) => {
-  const now = Date.now();
-  pruneCaptchaState(now);
-  otpSendHistory.set(phone, [...(resetCaptchaCycle ? [] : otpSendHistory.get(phone) || []), now]);
-};
-
-const verifyOtpSendCaptcha = (key: string, phone: string, token: unknown, answer: unknown) => {
-  const now = Date.now();
-  pruneCaptchaState(now);
-  const requiredUntil = captchaRequiredUntil(phone);
-  if (!requiredUntil) return { status: "not-required" as const };
-  const challenge = typeof token === "string" ? otpCaptchaChallenges.get(token) : null;
-  if (!challenge || challenge.key !== key || challenge.expiresAt <= now) {
-    return { status: "invalid" as const, captcha: createCaptchaChallenge(key, requiredUntil) };
-  }
-  if (typeof answer !== "string" || answer.trim() !== challenge.answer) {
-    otpCaptchaChallenges.delete(token as string);
-    return { status: "incorrect" as const, captcha: createCaptchaChallenge(key, requiredUntil) };
-  }
-  challenge.verified = true;
-  return { status: "verified" as const };
-};
-
-const refreshOtpSendCaptcha = (key: string, phone: string, token: unknown) => {
-  const now = Date.now();
-  pruneCaptchaState(now);
-  const requiredUntil = captchaRequiredUntil(phone);
-  if (!requiredUntil) return { status: "not-required" as const };
-  const previous = typeof token === "string" ? otpCaptchaChallenges.get(token) : null;
-  if (!previous || previous.key !== key || previous.expiresAt <= now) return { status: "invalid" as const };
-  otpCaptchaChallenges.delete(token as string);
-  return { status: "refreshed" as const, captcha: createCaptchaChallenge(key, requiredUntil) };
+  const newAnswer = applyCaptchaCase(randomCaptchaCode(), noise);
+  const tokenText = typeof token === "string" ? token : "";
+  const answerText = typeof answer === "string" ? answer.trim() : "";
+  const [phoneHash, clientHash, tokenHash, answerHash, newTokenHash, newAnswerHash] = await Promise.all([
+    opaqueHash(`phone:${phone}`), opaqueHash(`client:${key}`), opaqueHash(`token:${tokenText}`),
+    opaqueHash(`answer:${phone}:${answerText}`), opaqueHash(`token:${newToken}`), opaqueHash(`answer:${phone}:${newAnswer}`),
+  ]);
+  const result = await fetch(`${baseUrl}/rest/v1/rpc/fanzzy_otp_captcha_op_v1`, {
+    method: "POST",
+    headers: { apikey: serviceKey, authorization: `Bearer ${serviceKey}`, "content-type": "application/json" },
+    body: JSON.stringify({ p_action: action, p_phone: phoneHash, p_client: clientHash,
+      p_token: tokenText ? tokenHash : "", p_answer: answerHash, p_new_token: newTokenHash,
+      p_new_answer: newAnswerHash, p_reservation: reservation }),
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!result.ok) throw new Error("Security check is temporarily unavailable. Please try again.");
+  const data = await result.json() as { status?: unknown; expiresAt?: unknown };
+  if (typeof data.status !== "string") throw new Error("Security check is temporarily unavailable. Please try again.");
+  const expiresAt = typeof data.expiresAt === "number" ? data.expiresAt : 0;
+  return { status: data.status, ...(new Set(["challenge", "incorrect", "refreshed"]).has(data.status)
+    ? { captcha: { token: newToken, image: renderCaptchaImage(newAnswer, noise), expiresAt } } : {}) };
 };
 
 const createProviderSignature = (accessToken: string, accessTokenKey: string, expire: number) => {
@@ -299,40 +255,57 @@ const route = async (request: Request) => {
     if (!phone) return response({ error: "Enter a valid mobile number with its country code." }, 400, origin);
     if (!phone.startsWith("91")) return response({ error: "International SMS login is not configured yet." }, 503, origin);
     const key = clientKey(request, phone);
-    if (body.refreshCaptcha === true) {
-      const refreshed = refreshOtpSendCaptcha(key, phone, body.captchaToken);
-      if (refreshed.status === "invalid") return response({ error: "Security check expired. Please request a new OTP." }, 400, origin);
-      if (refreshed.status === "not-required") return response({ captchaRequired: false }, 200, origin);
-      return response({ captchaRequired: true, captcha: refreshed.captcha }, 200, origin);
-    }
-    if (body.verifyCaptcha === true) {
-      const verified = verifyOtpSendCaptcha(key, phone, body.captchaToken, body.captchaAnswer);
-      if (verified.status === "not-required") return response({ captchaRequired: false }, 200, origin);
-      if (verified.status === "verified") return response({ captchaRequired: true, captchaVerified: true }, 200, origin);
-      return response({ error: "Incorrect CAPTCHA. Please try the new image.", captchaRequired: true, captcha: verified.captcha }, 400, origin);
-    }
-    const captcha = getOtpSendCaptchaRequirement(key, phone, body.captchaToken);
-    if (!captcha.allowed) {
-      return response({
-        error: "Please enter and verify the CAPTCHA to resend the OTP.",
-        captchaRequired: true,
-        captcha: captcha.captcha,
-      }, 429, origin);
-    }
-    const retryAfter = checkRateLimit(sendLimits, key, OTP_WINDOW_MS, OTP_MAX_REQUESTS, OTP_RESEND_COOLDOWN_MS);
-    if (retryAfter) return response({ error: `Please wait ${retryAfter} seconds before requesting another OTP.` }, 429, origin);
+    let reservation = "";
     try {
+      if (body.refreshCaptcha === true) {
+        const refreshed = await captchaStore("refresh", key, phone, body.captchaToken);
+        if (refreshed.status === "invalid") return response({ error: "Security check expired. Please request a new OTP." }, 400, origin);
+        if (refreshed.status === "not-required") return response({ captchaRequired: false }, 200, origin);
+        if (refreshed.status !== "refreshed") throw new Error("Security check is temporarily unavailable. Please try again.");
+        return response({ captchaRequired: true, captcha: refreshed.captcha }, 200, origin);
+      }
+      if (body.verifyCaptcha === true) {
+        const verified = await captchaStore("verify", key, phone, body.captchaToken, body.captchaAnswer);
+        if (verified.status === "not-required") return response({ captchaRequired: false }, 200, origin);
+        if (verified.status === "verified") return response({ captchaRequired: true, captchaVerified: true }, 200, origin);
+        if (verified.status !== "incorrect") throw new Error("Security check is temporarily unavailable. Please try again.");
+        return response({ error: "Incorrect CAPTCHA. Please try the new image.", captchaRequired: true, captcha: verified.captcha }, 400, origin);
+      }
+      reservation = base64UrlEncode(crypto.getRandomValues(new Uint8Array(24)));
+      const captcha = await captchaStore("reserve", key, phone, body.captchaToken, undefined, reservation);
+      if (captcha.status === "challenge") {
+        reservation = "";
+        return response({ error: "Please enter and verify the CAPTCHA to resend the OTP.", captchaRequired: true, captcha: captcha.captcha }, 429, origin);
+      }
+      if (captcha.status === "busy") {
+        reservation = "";
+        return response({ error: "An OTP request is already in progress. Please try again shortly." }, 429, origin);
+      }
+      if (captcha.status !== "ready") throw new Error("Security check is temporarily unavailable. Please try again.");
+      const retryAfter = checkRateLimit(sendLimits, key, OTP_WINDOW_MS, OTP_MAX_REQUESTS, OTP_RESEND_COOLDOWN_MS);
+      if (retryAfter) {
+        await captchaStore("abort", key, phone, undefined, undefined, reservation);
+        reservation = "";
+        return response({ error: `Please wait ${retryAfter} seconds before requesting another OTP.` }, 429, origin);
+      }
       const code = await sendOtp(phone);
       const expiresAt = Date.now() + OTP_EXPIRES_MS;
       const otpDigest = await createOtpDigest(phone, code, expiresAt);
-      recordOtpSend(key, phone, Boolean(captcha.captchaToken));
-      if (captcha.captchaToken) otpCaptchaChallenges.delete(captcha.captchaToken);
+      // Commit is idempotent so a lost response can safely be retried.
+      let committed: CaptchaStoreResult;
+      try { committed = await captchaStore("commit", key, phone, undefined, undefined, reservation); }
+      catch { committed = await captchaStore("commit", key, phone, undefined, undefined, reservation); }
+      if (committed.status !== "committed") throw new Error("Security check is temporarily unavailable. Please try again.");
+      reservation = "";
       return response({
         sent: true,
         channel: "sms",
         pendingToken: await createToken({ kind: "pending", phone, otpDigest, expiresAt }),
       }, 200, origin);
     } catch (error) {
+      if (reservation) {
+        try { await captchaStore("abort", key, phone, undefined, undefined, reservation); } catch { /* expires automatically */ }
+      }
       return response({ error: error instanceof Error ? error.message : "The SMS service is unavailable." }, 502, origin);
     }
   }

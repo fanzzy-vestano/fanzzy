@@ -22,32 +22,64 @@ const bundles = Object.fromEntries(Object.entries(sources).map(([runtime, source
 
 // Exercise both real request handlers with a virtual clock and an SMS stub.
 // No production credentials, real SMS calls, or running preview counters are used.
-const loadHandler = (runtime) => {
-  let now = 1_800_000_000_000;
+const loadHandler = (runtime, shared = { now: 1_800_000_000_000, rows: new Map() }) => {
   let handler;
   let delivered = 0;
-  let tokenCounter = 0;
-  const testRandomBytes = (length) => length === 5 ? Buffer.alloc(length) : Buffer.alloc(length, length === 10 ? (++tokenCounter * 2) % 256 : ++tokenCounter);
+  shared.tokenCounter ??= 0;
+  const testRandomBytes = (length) => length === 5 ? Buffer.alloc(length) : Buffer.alloc(length, length === 10 ? (++shared.tokenCounter * 2) % 256 : ++shared.tokenCounter);
   const env = {
     CUSTOMER_AUTH_SECRET: "isolated-captcha-route-secret",
     FANZZY_ENV: "local-test",
     LOCAL_TEST_OTP_CODE: "123456",
     SANGAMAM_SMS_ACCESS_TOKEN: "isolated-provider-token",
     SANGAMAM_SMS_ACCESS_TOKEN_KEY: "isolated-provider-secret",
+    SUPABASE_URL: "http://captcha.test",
+    SUPABASE_SERVICE_ROLE_KEY: "isolated-service-key",
   };
   const bundledModule = { exports: {} };
   const sandbox = vm.createContext({
     module: bundledModule, exports: bundledModule.exports,
     require: (name) => name === "node:crypto" ? { ...nodeCrypto, randomBytes: testRandomBytes } : require(name),
-    Buffer, Request, Response, Headers, URL, TextEncoder, TextDecoder,
+    Buffer, Request, Response, Headers, URL, TextEncoder, TextDecoder, AbortSignal,
     crypto: { subtle: globalThis.crypto.subtle, getRandomValues: (array) => {
-      array.fill(array.length === 5 ? 0 : array.length === 10 ? (++tokenCounter * 2) % 256 : ++tokenCounter);
+      array.fill(array.length === 5 ? 0 : array.length === 10 ? (++shared.tokenCounter * 2) % 256 : ++shared.tokenCounter);
       return array;
     } }, btoa, atob,
-    Date: class extends Date { static now() { return now; } },
+    Date: class extends Date { static now() { return shared.now; } },
     process: { env },
     console: { info() {}, log() {}, error() {} },
-    fetch: async (url) => {
+    fetch: async (url, init) => {
+      if (url === "http://captcha.test/rest/v1/rpc/fanzzy_otp_captcha_op_v1") {
+        if (shared.failStore) return Response.json({ error: "unavailable" }, { status: 503 });
+        const op = JSON.parse(init.body);
+        const row = shared.rows.get(op.p_phone) || { sends: [], challenges: new Map() };
+        shared.rows.set(op.p_phone, row);
+        row.sends = row.sends.filter((t) => t > shared.now - 300_000);
+        const until = row.sends.length >= 4 ? row.sends.at(-4) + 300_000 : 0;
+        const challenge = row.challenges.get(op.p_token);
+        const newChallenge = () => { row.challenges.set(op.p_new_token, { answer: op.p_new_answer, client: op.p_client, expires: until, verified: false }); };
+        let result;
+        if (op.p_action === "commit") {
+          if (row.committed === op.p_reservation) result = { status: "committed" };
+          else if (row.reservation !== op.p_reservation) return Response.json({ error: "invalid reservation" }, { status: 400 });
+          else { row.sends = row.reset ? [shared.now] : [...row.sends, shared.now]; row.committed = op.p_reservation; row.reservation = null; if (row.reset) row.challenges.clear(); result = { status: "committed" }; }
+        } else if (op.p_action === "abort") {
+          if (row.reservation === op.p_reservation) row.reservation = null;
+          result = { status: "aborted" };
+        } else if (op.p_action === "reserve") {
+          if (row.reservation && row.reservationExpires > shared.now) result = { status: "busy" };
+          else if (until > shared.now && !(op.p_token && challenge && challenge.client === op.p_client && challenge.verified && challenge.expires > shared.now)) { newChallenge(); result = { status: "challenge", expiresAt: until }; }
+          else { row.reservation = op.p_reservation; row.reservationExpires = shared.now + 120_000; row.reset = until > shared.now; result = { status: "ready" }; }
+        } else if (until <= shared.now) result = { status: "not-required" };
+        else if (op.p_action === "refresh") {
+          if (!op.p_token || !challenge || challenge.client !== op.p_client || challenge.expires <= shared.now) result = { status: "invalid" };
+          else { row.challenges.delete(op.p_token); newChallenge(); result = { status: "refreshed", expiresAt: until }; }
+        } else if (op.p_action === "verify") {
+          if (!op.p_token || !challenge || challenge.client !== op.p_client || challenge.expires <= shared.now || challenge.answer !== op.p_answer) { row.challenges.delete(op.p_token); newChallenge(); result = { status: "incorrect", expiresAt: until }; }
+          else { challenge.verified = true; result = { status: "verified" }; }
+        } else throw new Error("Unexpected CAPTCHA operation");
+        return Response.json(result);
+      }
       assert.equal(url, "https://fastsms.sangamamonline.in/api/sms/v1.0/send-sms");
       delivered += 1;
       return Response.json({ status: "success", httpStatusCode: 200 });
@@ -60,7 +92,7 @@ const loadHandler = (runtime) => {
   vm.runInContext(bundles[runtime], sandbox);
   if (runtime === "local") handler = bundledModule.exports.POST;
   return {
-    advance: (ms) => { now += ms; },
+    advance: (ms) => { shared.now += ms; },
     failService: () => { env.LOCAL_TEST_OTP_CODE = ""; env.CUSTOMER_AUTH_SECRET = ""; },
     restoreService: () => { env.LOCAL_TEST_OTP_CODE = "123456"; env.CUSTOMER_AUTH_SECRET = "isolated-captcha-route-secret"; },
     delivered: () => delivered,
@@ -74,6 +106,33 @@ const loadHandler = (runtime) => {
     },
   };
 };
+
+test("edge: fifth attempt and CAPTCHA verification work across independent instances", async () => {
+  const shared = { now: 1_800_000_000_000, rows: new Map() };
+  const first = loadHandler("edge", shared);
+  const second = loadHandler("edge", shared);
+  const phone = "919999900089";
+  for (let count = 0; count < 4; count += 1) {
+    assert.equal((await (count % 2 ? second : first).send(phone)).status, 200);
+    first.advance(45_000);
+  }
+  const fifth = await first.send(phone);
+  assert.equal(fifth.status, 429);
+  assert.equal(fifth.body.captchaRequired, true);
+  const verified = await second.send(phone, { captchaToken: fifth.body.captcha.token, captchaAnswer: "AaAaA", verifyCaptcha: true });
+  assert.equal(verified.body.captchaVerified, true);
+  const resent = await first.send(phone, { captchaToken: fifth.body.captcha.token });
+  assert.equal(resent.status, 200);
+  assert.equal(resent.body.sent, true);
+});
+
+test("edge: unavailable shared storage never sends an OTP", async () => {
+  const shared = { now: 1_800_000_000_000, rows: new Map(), failStore: true };
+  const app = loadHandler("edge", shared);
+  const result = await app.send("919999900089");
+  assert.ok(result.status >= 500);
+  assert.equal(app.delivered(), 0);
+});
 
 for (const runtime of Object.keys(sources)) {
   test(`${runtime}: international numbers never reach an unconfigured production SMS route`, async () => {
