@@ -195,7 +195,7 @@ test("the GitHub Pages POS uses the Supabase function with the signed admin sess
       },
     },
   }, {
-    process: { env: { NEXT_PUBLIC_STATIC_BUILD: "true" } },
+    process: { env: { NEXT_PUBLIC_STATIC_BUILD: true } },
     crypto: { randomUUID: () => "01234567-89ab-cdef-0123-456789abcdef" },
   });
 

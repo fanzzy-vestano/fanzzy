@@ -73,25 +73,27 @@ async function requestPosCheckout<Payload extends { error?: string }>(
   query: string,
   options: PosCheckoutRequest,
 ): Promise<{ ok: boolean; payload: Partial<Payload> }> {
-  if (process.env.NEXT_PUBLIC_STATIC_BUILD === "true") {
+  // Vite injects a boolean, while a Next.js environment variable is a string.
+  const staticBuild: unknown = process.env.NEXT_PUBLIC_STATIC_BUILD;
+  if (staticBuild === true || staticBuild === "true") {
     if (!supabase) throw new Error("POS payment service is unavailable.");
     const { data, error, response } = await supabase.functions.invoke<Payload>(`pos-checkout${query}`, options);
     const payload = data ?? (response ? await response.json().catch(() => ({})) as Partial<Payload> : {});
     return { ok: !error, payload };
+  } else {
+    const response = await adminApiFetch(`/admin/pos-checkout${query}`, {
+      method: options.method,
+      signal: options.signal,
+      credentials: "include",
+      cache: "no-store",
+      ...(options.body && {
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(options.body),
+      }),
+    });
+    const payload = await response.json().catch(() => ({})) as Partial<Payload>;
+    return { ok: response.ok, payload };
   }
-
-  const response = await adminApiFetch(`/admin/pos-checkout${query}`, {
-    method: options.method,
-    signal: options.signal,
-    credentials: "include",
-    cache: "no-store",
-    ...(options.body && {
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(options.body),
-    }),
-  });
-  const payload = await response.json().catch(() => ({})) as Partial<Payload>;
-  return { ok: response.ok, payload };
 }
 
 export async function createPosCheckoutOrder(amount: number): Promise<PosCheckoutOrder> {

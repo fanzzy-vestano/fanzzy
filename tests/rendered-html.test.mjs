@@ -45,6 +45,8 @@ test("ships the external APIs required by the static application", async () => {
   const javascript = bundles.join("\n");
   assert.match(javascript, /fanzzy-razorpay-api\.fanzzy\.workers\.dev/);
   assert.match(javascript, /functions\/v1\/customer-auth/);
+  assert.ok(/\.functions\.invoke\([`'"]pos-checkout/.test(javascript), "Pages must invoke the Supabase POS checkout function");
+  assert.ok(!/\/admin\/pos-checkout\b/.test(javascript), "Pages must omit the server-only POS checkout path");
   assert.match(javascript, /fanzzy-vendor-session-token/);
   assert.match(javascript, /vendors\/store\/\?slug=/);
 });
