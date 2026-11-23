@@ -3,7 +3,6 @@ import * as customerOrdersRoute from "../app/api/orders/route";
 import * as websitePendingRoute from "../app/api/orders/pending/route";
 import * as customerOffersRoute from "../app/api/offers/route";
 import * as adminOrdersRoute from "../app/api/admin/orders/route";
-import * as posCheckoutRoute from "../app/api/admin/pos-checkout/route";
 import * as paymentOrderRoute from "../app/api/razorpay/order/route";
 import * as paymentVerifyRoute from "../app/api/razorpay/verify/route";
 import * as paymentWebhookRoute from "../app/api/razorpay/webhook/route";
@@ -201,7 +200,6 @@ const routeRequest = async (request: Request, env: WorkerEnv): Promise<Response>
   if (path === "/orders/pending") return methodHandler(request, websitePendingRoute);
   if (path === "/offers") return methodHandler(request, customerOffersRoute);
   if (path === "/admin/orders") return adminRoute(request, env, adminOrdersRoute);
-  if (path === "/admin/pos-checkout") return adminRoute(request, env, posCheckoutRoute);
   if (path === "/orders/confirm-cod") return methodHandler(request, confirmCodRoute);
   if (path === "/orders/mobile/pending") return methodHandler(request, mobilePendingOrderRoute);
   if (path === "/orders/track") return methodHandler(request, orderTrackingRoute);

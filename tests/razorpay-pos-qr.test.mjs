@@ -6,6 +6,8 @@ import ts from "typescript";
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 const routePath = "app/api/admin/pos-checkout/route.ts";
+const edgePath = "supabase/functions/pos-checkout/index.ts";
+const posLogicPath = "supabase/functions/_shared/pos-checkout.ts";
 const saleId = "#FZ-POS-0123456789AB";
 const amount = 5500;
 const providerOrder = {
@@ -23,7 +25,7 @@ function load(path, imports = {}, globals = {}) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText;
   vm.runInNewContext(source, {
-    exports, Buffer, Request, Response, URL, URLSearchParams, AbortSignal,
+    exports, btoa, Headers, Request, Response, URL, URLSearchParams, AbortSignal,
     process: { env: { FANZZY_ENV: "local-test", RAZORPAY_KEY_ID: "rzp_test_counter", RAZORPAY_KEY_SECRET: "fixture-secret" } },
     require(name) {
       assert.ok(Object.hasOwn(imports, name), `Unmocked import: ${name}`);
@@ -34,29 +36,49 @@ function load(path, imports = {}, globals = {}) {
   return exports;
 }
 
-function fixture({ order = providerOrder, payments = [captured], allowed = true, providerError } = {}) {
+function fixture({ order = providerOrder, payments = [captured], allowed = true, providerError, edge = false } = {}) {
   const reads = [];
   const creates = [];
-  const route = load(routePath, {
-    "../../../../lib/admin-auth": { isAdminSessionValid: () => allowed },
-    "../../../../lib/payment-policy": load("lib/payment-policy.ts"),
-    "../../../../lib/razorpay-provider": {
-      async razorpayRead(path) {
-        reads.push(path);
-        if (path === `orders/${providerOrder.id}`) return order;
-        assert.equal(path, `orders/${providerOrder.id}/payments`);
-        return { items: payments };
-      },
-    },
-  }, {
-    fetch: async (url, init) => {
-      assert.equal(url, "https://api.razorpay.com/v1/orders");
-      assert.equal(init.method, "POST");
+  const checkout = load(posLogicPath, {}, {
+    async fetch(url, init) {
       assert.match(init.headers.authorization, /^Basic /);
+      if (init.method !== "POST") {
+        const path = url.replace("https://api.razorpay.com/v1/", "");
+        reads.push(path);
+        if (path === `orders/${providerOrder.id}`) return Response.json(order);
+        assert.equal(path, `orders/${providerOrder.id}/payments`);
+        return Response.json({ items: payments });
+      }
+      assert.equal(url, "https://api.razorpay.com/v1/orders");
       creates.push(JSON.parse(init.body));
       return providerError ? Response.json({ error: { description: providerError } }, { status: 400 })
         : Response.json(order);
     },
+  });
+  if (edge) {
+    let handler;
+    const env = { SUPABASE_URL: origin, RAZORPAY_KEY_ID: "rzp_live_counter", RAZORPAY_KEY_SECRET: "fixture-secret" };
+    load(edgePath, { "../_shared/pos-checkout.ts": checkout }, {
+      Deno: {
+        env: { get: (name) => env[name] },
+        serve: (callback) => { handler = callback; },
+      },
+      async fetch(url, init) {
+        assert.equal(url, `${origin}/auth/v1/user`);
+        assert.equal(init.headers.apikey, "publishable-fixture");
+        assert.equal(init.headers.authorization, "Bearer signed-session");
+        return Response.json({
+          email: allowed ? "fanzzy@vestanoretail.com" : "customer@example.invalid",
+          email_confirmed_at: "2026-01-01T00:00:00Z",
+        });
+      },
+    });
+    return { handler, reads, creates, env };
+  }
+  const route = load(routePath, {
+    "../../../../lib/admin-auth": { isAdminSessionValid: () => allowed },
+    "../../../../lib/payment-policy": load("lib/payment-policy.ts"),
+    "../../../../supabase/functions/_shared/pos-checkout": checkout,
   });
   return { route, reads, creates };
 }
@@ -84,6 +106,7 @@ test("opens UPI-only Checkout with the exact bill and checks the same order afte
   let options;
   let closed = false;
   const client = load("lib/pos-upi-client.ts", {
+    "./supabase/client": { supabase: null },
     "./site-api-client": {
       adminApiFetch(path, init) {
         const request = new Request(`${origin}/api${path}`, init);
@@ -149,15 +172,60 @@ test("surfaces provider errors and rejects a mismatched Checkout order", async (
   assert.equal((await mismatch.route.POST(createRequest())).status, 502);
 });
 
-test("the POS screen and deployed worker use Checkout and the error icon has its own class", () => {
+test("the GitHub Pages POS uses the Supabase function with the signed admin session", async () => {
+  const { handler, creates, reads } = fixture({ edge: true });
+  const authHeaders = { origin: "https://fanzzy.in", apikey: "publishable-fixture", authorization: "Bearer signed-session" };
+  const edgeUrl = `${origin}/functions/v1/pos-checkout`;
+  const client = load("lib/pos-upi-client.ts", {
+    "./site-api-client": { adminApiFetch: () => assert.fail("Pages must use the POS Edge Function.") },
+    "./supabase/client": {
+      supabase: {
+        functions: {
+          async invoke(path, options) {
+            assert.match(path, /^pos-checkout(?:\?|$)/);
+            const response = await handler(new Request(`${origin}/functions/v1/${path}`, {
+              method: options.method,
+              headers: authHeaders,
+              body: options.body ? JSON.stringify(options.body) : undefined,
+            }));
+            if (response.ok) return { data: await response.json(), error: null };
+            return { data: null, error: new Error("Edge response failed."), response };
+          },
+        },
+      },
+    },
+  }, {
+    process: { env: { NEXT_PUBLIC_STATIC_BUILD: "true" } },
+    crypto: { randomUUID: () => "01234567-89ab-cdef-0123-456789abcdef" },
+  });
+
+  const preflight = await handler(new Request(edgeUrl, { method: "OPTIONS", headers: { origin: "https://fanzzy.in" } }));
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "https://fanzzy.in");
+  assert.equal((await handler(new Request(edgeUrl))).status, 401);
+  assert.equal((await handler(new Request(edgeUrl, { headers: { ...authHeaders, origin: "https://example.invalid" } }))).status, 403);
+  const customer = fixture({ edge: true, allowed: false });
+  assert.equal((await customer.handler(new Request(edgeUrl, { headers: authHeaders }))).status, 401);
+  assert.deepEqual([...customer.creates, ...customer.reads], []);
+  assert.deepEqual([...creates, ...reads], []);
+
+  const order = await client.createPosCheckoutOrder(amount);
+  assert.equal(order.keyId, "rzp_live_counter");
+  assert.equal(order.amount, amount);
+  const confirmed = await client.readPosCheckoutStatus(order);
+  assert.equal(confirmed.status, "paid");
+  assert.equal(confirmed.paymentId, captured.id);
+  assert.equal(creates.length, 1);
+  assert.equal(reads.length, 2);
+});
+
+test("the POS screen uses Checkout and the error icon has its own class", () => {
   const adminPage = read("app/admin/page.tsx");
-  const worker = read("worker/site-api.ts");
   const styles = read("app/admin/admin-polish.css");
   assert.match(adminPage, /preparePosCheckout\(/);
   assert.match(adminPage, /posUpi\.status === "paid"/);
   assert.match(adminPage, /const order = attempt\?\.order \?\? await createPosCheckoutOrder\(/);
   assert.doesNotMatch(adminPage, /adminRazorpayApiUrl\("pos-qr"\)/);
-  assert.match(worker, /path === "\/admin\/pos-checkout"\) return adminRoute\(request, env, posCheckoutRoute\)/);
   assert.match(styles, /\.pos-upi-qr-error-icon\s*\{/);
   assert.doesNotMatch(styles, /\.pos-upi-qr-error\s*\{/);
 });

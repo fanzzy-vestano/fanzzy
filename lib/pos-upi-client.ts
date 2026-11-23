@@ -1,4 +1,5 @@
 import { adminApiFetch } from "./site-api-client";
+import { supabase } from "./supabase/client";
 
 export type PosCheckoutOrder = {
   id: string;
@@ -62,19 +63,45 @@ function loadCheckout(): Promise<CheckoutConstructor> {
   return checkoutScript;
 }
 
-const endpoint = "/admin/pos-checkout";
+type PosCheckoutRequest = {
+  method: "GET" | "POST";
+  signal: AbortSignal;
+  body?: { amount: number; saleId: string };
+};
+
+async function requestPosCheckout<Payload extends { error?: string }>(
+  query: string,
+  options: PosCheckoutRequest,
+): Promise<{ ok: boolean; payload: Partial<Payload> }> {
+  if (process.env.NEXT_PUBLIC_STATIC_BUILD === "true") {
+    if (!supabase) throw new Error("POS payment service is unavailable.");
+    const { data, error, response } = await supabase.functions.invoke<Payload>(`pos-checkout${query}`, options);
+    const payload = data ?? (response ? await response.json().catch(() => ({})) as Partial<Payload> : {});
+    return { ok: !error, payload };
+  }
+
+  const response = await adminApiFetch(`/admin/pos-checkout${query}`, {
+    method: options.method,
+    signal: options.signal,
+    credentials: "include",
+    cache: "no-store",
+    ...(options.body && {
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(options.body),
+    }),
+  });
+  const payload = await response.json().catch(() => ({})) as Partial<Payload>;
+  return { ok: response.ok, payload };
+}
 
 export async function createPosCheckoutOrder(amount: number): Promise<PosCheckoutOrder> {
   const saleId = `#FZ-POS-${crypto.randomUUID().replace(/-/g, "").slice(0, 12).toUpperCase()}`;
-  const response = await adminApiFetch(endpoint, {
+  const { ok, payload: order } = await requestPosCheckout<PosCheckoutOrder & { error?: string }>("", {
     method: "POST",
-    credentials: "include",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ amount, saleId }),
+    body: { amount, saleId },
     signal: AbortSignal.timeout(20_000),
   });
-  const order = await response.json().catch(() => ({})) as Partial<PosCheckoutOrder> & { error?: string };
-  if (!response.ok || !order.id || !order.keyId || order.saleId !== saleId
+  if (!ok || !order.id || !order.keyId || order.saleId !== saleId
     || order.amount !== amount || order.currency !== "INR") {
     throw new Error(order.error || "Razorpay could not prepare this POS bill. Try again.");
   }
@@ -83,13 +110,11 @@ export async function createPosCheckoutOrder(amount: number): Promise<PosCheckou
 
 export async function readPosCheckoutStatus(order: PosCheckoutOrder): Promise<PosCheckoutStatus> {
   const params = new URLSearchParams({ id: order.id, saleId: order.saleId });
-  const response = await adminApiFetch(`${endpoint}?${params}`, {
-    credentials: "include",
-    cache: "no-store",
+  const { ok, payload: result } = await requestPosCheckout<{ status?: string; paymentId?: string; amount?: number; error?: string }>(`?${params}`, {
+    method: "GET",
     signal: AbortSignal.timeout(35_000),
   });
-  const result = await response.json().catch(() => ({})) as { status?: string; paymentId?: string; amount?: number; error?: string };
-  if (!response.ok) throw new Error(result.error || "Razorpay could not confirm the payment status.");
+  if (!ok) throw new Error(result.error || "Razorpay could not confirm the payment status.");
   if (result.status === "paid" && result.paymentId && result.amount === order.amount) {
     return { status: "paid", paymentId: result.paymentId, amount: result.amount };
   }
