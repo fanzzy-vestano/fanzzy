@@ -254,7 +254,11 @@ const route = async (request: Request) => {
     const phone = normalizeMobileNumber(body.phone);
     if (!phone) return response({ error: "Enter a valid mobile number with its country code." }, 400, origin);
     if (!phone.startsWith("91")) return response({ error: "International SMS login is not configured yet." }, 503, origin);
-    const key = clientKey(request, phone);
+    // Proxy hops can change between displaying, refreshing and verifying an image.
+    const clientIp = request.headers.get("cf-connecting-ip")?.trim()
+      || request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+      || request.headers.get("x-real-ip")?.trim() || "unknown";
+    const key = `${clientIp}:${phone}`;
     let reservation = "";
     try {
       if (body.refreshCaptcha === true) {
@@ -282,7 +286,7 @@ const route = async (request: Request) => {
         return response({ error: "An OTP request is already in progress. Please try again shortly." }, 429, origin);
       }
       if (captcha.status !== "ready") throw new Error("Security check is temporarily unavailable. Please try again.");
-      const retryAfter = checkRateLimit(sendLimits, key, OTP_WINDOW_MS, OTP_MAX_REQUESTS, OTP_RESEND_COOLDOWN_MS);
+      const retryAfter = checkRateLimit(sendLimits, clientKey(request, phone), OTP_WINDOW_MS, OTP_MAX_REQUESTS, OTP_RESEND_COOLDOWN_MS);
       if (retryAfter) {
         await captchaStore("abort", key, phone, undefined, undefined, reservation);
         reservation = "";

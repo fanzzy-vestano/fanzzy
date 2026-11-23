@@ -134,6 +134,34 @@ test("edge: unavailable shared storage never sends an OTP", async () => {
   assert.equal(app.delivered(), 0);
 });
 
+test("edge: Change CAPTCHA works across proxy hops and Edge instances", async () => {
+  const shared = { now: 1_800_000_000_000, rows: new Map() };
+  const first = loadHandler("edge", shared);
+  const second = loadHandler("edge", shared);
+  const phone = "919999900089";
+  const viaFirst = "192.0.2.1, 198.51.100.1";
+  const viaSecond = "192.0.2.1, 198.51.100.2";
+  for (let count = 0; count < 4; count++) {
+    assert.equal((await first.send(phone, {}, viaFirst)).body.sent, true);
+    first.advance(45_000);
+  }
+  const fifth = await first.send(phone, {}, viaFirst);
+  assert.equal(fifth.status, 429);
+  const initial = fifth.body.captcha;
+  const changed = await second.send(phone, { refreshCaptcha: true, captchaToken: initial.token }, viaSecond);
+  assert.equal(changed.status, 200);
+  assert.notEqual(changed.body.captcha.image, initial.image);
+  assert.notEqual(changed.body.captcha.token, initial.token);
+  const changedAgain = await first.send(phone, { refreshCaptcha: true, captchaToken: changed.body.captcha.token }, viaFirst);
+  assert.equal(changedAgain.status, 200);
+  assert.notEqual(changedAgain.body.captcha.image, changed.body.captcha.image);
+  const verified = await second.send(phone, {
+    verifyCaptcha: true, captchaToken: changedAgain.body.captcha.token, captchaAnswer: "AaAaA",
+  }, viaSecond);
+  assert.equal(verified.body.captchaVerified, true);
+  assert.equal(first.delivered() + second.delivered(), 4);
+});
+
 for (const runtime of Object.keys(sources)) {
   test(`${runtime}: international numbers never reach an unconfigured production SMS route`, async () => {
     const app = loadHandler(runtime);
