@@ -1380,8 +1380,30 @@ function AdminLoginGate() {
         setChecked(true);
         return;
       }
-      void supabase.auth.getSession()
-        .then(({ data }) => setAuthenticated(Boolean(data.session)))
+      void (async () => {
+        const expectedEmail = adminRecoveryEmail.toLowerCase();
+        const hasVerifiedAdmin = async () => {
+          const { data, error } = await supabase.auth.getUser();
+          return !error && data.user?.email?.trim().toLowerCase() === expectedEmail;
+        };
+
+        // getSession only reads the browser copy of the token. An expired
+        // token used to let the dashboard open and silently display the old
+        // locally saved order list. Validate with Supabase first, then make
+        // one refresh attempt before deciding whether the user must sign in.
+        if (await hasVerifiedAdmin()) {
+          setAuthenticated(true);
+          return;
+        }
+
+        const { data, error } = await supabase.auth.refreshSession();
+        if (!error && data.session && await hasVerifiedAdmin()) {
+          setAuthenticated(true);
+          return;
+        }
+
+        setAuthenticated(false);
+      })()
         .catch(() => setError("Could not verify the secure admin login."))
         .finally(() => setChecked(true));
       return;
