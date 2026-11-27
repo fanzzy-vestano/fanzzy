@@ -122,9 +122,10 @@ test("static Pages build never injects an admin password", async () => {
 test("static admin validates cached sessions before showing live operations", async () => {
   const adminPage = await readFile(new URL("../app/admin/page.tsx", import.meta.url), "utf8");
 
+  assert.match(adminPage, /const adminClient = supabase;/);
   assert.match(adminPage, /const hasVerifiedAdmin = async \(\) =>/);
-  assert.match(adminPage, /supabase\.auth\.getUser\(\)/);
-  assert.match(adminPage, /supabase\.auth\.refreshSession\(\)/);
+  assert.match(adminPage, /adminClient\.auth\.getUser\(\)/);
+  assert.match(adminPage, /adminClient\.auth\.refreshSession\(\)/);
   assert.match(adminPage, /data\.user\?\.email\?\.trim\(\)\.toLowerCase\(\) === expectedEmail/);
 });
 

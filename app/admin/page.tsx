@@ -1375,7 +1375,8 @@ function AdminLoginGate() {
   }, [resetCooldown]);
   useEffect(() => {
     if (staticPagesMode) {
-      if (!supabase) {
+      const adminClient = supabase;
+      if (!adminClient) {
         setError("Secure admin login is not configured.");
         setChecked(true);
         return;
@@ -1383,7 +1384,7 @@ function AdminLoginGate() {
       void (async () => {
         const expectedEmail = adminRecoveryEmail.toLowerCase();
         const hasVerifiedAdmin = async () => {
-          const { data, error } = await supabase.auth.getUser();
+          const { data, error } = await adminClient.auth.getUser();
           return !error && data.user?.email?.trim().toLowerCase() === expectedEmail;
         };
 
@@ -1396,7 +1397,7 @@ function AdminLoginGate() {
           return;
         }
 
-        const { data, error } = await supabase.auth.refreshSession();
+        const { data, error } = await adminClient.auth.refreshSession();
         if (!error && data.session && await hasVerifiedAdmin()) {
           setAuthenticated(true);
           return;
