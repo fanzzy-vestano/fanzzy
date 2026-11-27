@@ -129,6 +129,12 @@ test("static admin validates cached sessions before showing live operations", as
   assert.match(adminPage, /data\.user\?\.email\?\.trim\(\)\.toLowerCase\(\) === expectedEmail/);
 });
 
+test("admin retains the external UPI label for POS orders", async () => {
+  const adminPage = await readFile(new URL("../app/admin/page.tsx", import.meta.url), "utf8");
+
+  assert.match(adminPage, /source\.posPaymentMethod === "External UPI"/);
+});
+
 test("production worker exposes authenticated Delhivery admin routes", async () => {
   const worker = await readFile(new URL("../worker/site-api.ts", import.meta.url), "utf8");
   assert.match(worker, /adminDelhiveryConfigRoute/);

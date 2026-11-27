@@ -820,7 +820,7 @@ const normalizeOrderRecordForDisplay = (value: unknown): OrderRecord | null => {
     couponDiscount: safeOrderNumber(source.couponDiscount) || undefined,
     paymentStatus,
     paymentMethod,
-    posPaymentMethod: source.posPaymentMethod === "Cash" || source.posPaymentMethod === "UPI" || source.posPaymentMethod === "Card" ? source.posPaymentMethod : undefined,
+    posPaymentMethod: source.posPaymentMethod === "Cash" || source.posPaymentMethod === "UPI" || source.posPaymentMethod === "External UPI" || source.posPaymentMethod === "Card" ? source.posPaymentMethod : undefined,
     posSale: source.posSale === true,
     codCharge: safeOrderNumber(source.codCharge) || undefined,
     razorpayOrderId: safeOrderString(source.razorpayOrderId) || undefined,
