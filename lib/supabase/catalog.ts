@@ -438,7 +438,11 @@ export async function fetchStoreOrders<T>() {
       return { data: orders as T[], error: null };
     }
     const admin = await loadAdminOrdersApi();
-    const response = await (admin ? adminApiFetch("/admin/orders", { credentials: "include", cache: "no-store" }) : customerApiFetch("/orders", { credentials: "include", cache: "no-store" }));
+    // The admin overview is a live operational view. A unique read URL keeps
+    // an intermediary or an older browser cache from replaying an earlier
+    // order snapshot even when it ignores Fetch's no-store directive.
+    const adminOrdersPath = `/admin/orders?sync=${Date.now()}`;
+    const response = await (admin ? adminApiFetch(adminOrdersPath, { credentials: "include", cache: "no-store" }) : customerApiFetch("/orders", { credentials: "include", cache: "no-store" }));
     const body = await response.json() as { orders?: Array<Record<string, unknown>>; error?: string };
     const missingWorkerRoute = admin && usesExternalSiteApi && response.status === 404 && body.error === "Not found";
     const orders = missingWorkerRoute ? await readLegacyAdminOrders() : body.orders;

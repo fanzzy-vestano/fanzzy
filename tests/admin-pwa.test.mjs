@@ -99,6 +99,14 @@ test("admin reads recover once from an expired access token without retrying wri
   assert.match(source, /return siteApiFetch\(path, withBearer\(init, refreshedToken\)\);/);
 });
 
+test("admin order sync uses a fresh URL while customer reads retain their stable endpoint", async () => {
+  const source = await readFile(new URL("../lib/supabase/catalog.ts", import.meta.url), "utf8");
+
+  assert.match(source, /const adminOrdersPath = `\/admin\/orders\?sync=\$\{Date\.now\(\)\}`;/);
+  assert.match(source, /adminApiFetch\(adminOrdersPath, \{ credentials: "include", cache: "no-store" \}\)/);
+  assert.match(source, /customerApiFetch\("\/orders", \{ credentials: "include", cache: "no-store" \}\)/);
+});
+
 test("static Pages build never injects an admin password", async () => {
   const [viteConfig, adminPage] = await Promise.all([
     readFile(new URL("../vite.config.ts", import.meta.url), "utf8"),
