@@ -1730,7 +1730,10 @@ function AdminDashboard() {
       const remote = await fetchStoreOrders<OrderRecord>();
       const merged = new Map<string, OrderRecord>();
       remote.data?.forEach((order) => { if (order?.id && !isDemoOrder(order)) merged.set(order.id, order); });
-      if (!isLocalTestPreview) {
+      // Browser order snapshots are only an offline fallback. Appending them
+      // after a healthy live read lets abandoned local POS records appear as
+      // extra orders in just one browser profile.
+      if (remote.error && !isLocalTestPreview) {
         try {
           const stored = window.localStorage.getItem("fanzzy-orders");
           const parsed = stored ? JSON.parse(stored) as OrderRecord[] : [];
@@ -2635,7 +2638,7 @@ function PurchaseEntryWorkspace({ onNotify }: { onNotify: (message: string) => v
     const storedInitialQuantities = initialQuantitiesRemote.value || (typeof window !== "undefined" ? window.localStorage.getItem(localProductInitialQuantitiesKey) : null);
     const initialQuantities = parseProductInitialQuantities(storedInitialQuantities);
     const localOrders = typeof window !== "undefined" ? (() => { try { return JSON.parse(window.localStorage.getItem("fanzzy-orders") || "[]") as OrderRecord[]; } catch { return []; } })() : [];
-    const storedOrders = Array.from(new Map([...localOrders, ...(ordersRemote.data || [])].map((order) => [order.id, order])).values());
+    const storedOrders = ordersRemote.error ? localOrders : (ordersRemote.data || []);
     const soldOrderItems: Array<{ keys: string[]; quantity: number }> = [];
     const orderItemKeys = (item: OrderItem) => Array.from(new Set([item.productId, item.productName, item.name, item.name?.split(" · ")[0]].filter((key): key is string => Boolean(key)).map(reportNameKey)));
     storedOrders.filter((order) => order.status !== "Cancelled" && (hasConfirmedPayment(order) || !order.paymentStatus)).forEach((order) => {
@@ -3593,14 +3596,16 @@ function ReportsWorkspace({
       remote.data?.forEach((order) => {
         if (order?.id && !isDemoOrder(order)) merged.set(order.id, order);
       });
-      try {
-        const stored = window.localStorage.getItem("fanzzy-orders");
-        const parsed = stored ? JSON.parse(stored) as OrderRecord[] : [];
-        if (Array.isArray(parsed)) parsed.forEach((order) => {
-          if (order?.id && !isDemoOrder(order) && !merged.has(order.id)) merged.set(order.id, order);
-        });
-      } catch {
-        window.localStorage.removeItem("fanzzy-orders");
+      if (remote.error) {
+        try {
+          const stored = window.localStorage.getItem("fanzzy-orders");
+          const parsed = stored ? JSON.parse(stored) as OrderRecord[] : [];
+          if (Array.isArray(parsed)) parsed.forEach((order) => {
+            if (order?.id && !isDemoOrder(order) && !merged.has(order.id)) merged.set(order.id, order);
+          });
+        } catch {
+          window.localStorage.removeItem("fanzzy-orders");
+        }
       }
       if (active) setOrders(Array.from(merged.values()).filter((order) => order?.date && order?.total && hasConfirmedPayment(order)));
     };
@@ -5140,7 +5145,7 @@ function CustomersWorkspace({
       })();
       const remoteOrders = ordersRemote.data || [];
       const orders = new Map<string, OrderRecord>();
-      [...remoteOrders, ...localOrders].forEach((order) => {
+      (ordersRemote.error ? localOrders : remoteOrders).forEach((order) => {
         const normalized = normalizeOrderRecordForDisplay(order);
         if (normalized?.id && !orders.has(normalized.id)) orders.set(normalized.id, normalized);
       });
@@ -5535,11 +5540,13 @@ function AgentsWorkspace({
 
     const orderMap = new Map<string, OrderRecord>();
     ordersRemote.data?.forEach((order) => { if (order?.id) orderMap.set(order.id, order); });
-    try {
-      const storedOrders = JSON.parse(window.localStorage.getItem("fanzzy-orders") || "[]") as OrderRecord[];
-      if (Array.isArray(storedOrders)) storedOrders.forEach((order) => { if (order?.id && !orderMap.has(order.id)) orderMap.set(order.id, order); });
-    } catch {
-      // Ignore malformed local order cache.
+    if (ordersRemote.error) {
+      try {
+        const storedOrders = JSON.parse(window.localStorage.getItem("fanzzy-orders") || "[]") as OrderRecord[];
+        if (Array.isArray(storedOrders)) storedOrders.forEach((order) => { if (order?.id && !orderMap.has(order.id)) orderMap.set(order.id, order); });
+      } catch {
+        // Ignore malformed local order cache.
+      }
     }
     setOrders(Array.from(orderMap.values()).filter((order) => !isDemoOrder(order) && hasConfirmedPayment(order)));
   };
@@ -7294,23 +7301,21 @@ function OrdersWorkspace({
           window.localStorage.removeItem("fanzzy-orders");
         }
       }
-      // Show locally cached orders only while the first live request is loading.
-      // Do not replace an already rendered list on every polling cycle.
-      if (localOrders.length) setOrders((current) => current.length ? current : localOrders);
       const remote = await fetchStoreOrders<OrderRecord>();
       if (remote.error) {
         setOrdersSyncError("Live order storage is unavailable. Records may be incomplete.");
       } else {
         setOrdersSyncError("");
       }
-      // The shared record is written newest-first. Keep that order as the
-      // primary ordering and append only local records not yet synced.
+      // The live record is authoritative whenever it is available. Browser
+      // storage is only shown as an offline fallback, never appended to a
+      // successful response with unrelated stale records.
       const merged = new Map<string, OrderRecord>();
       remote.data?.forEach((order) => {
         const normalized = normalizeOrderRecordForDisplay(order);
         if (normalized && !isDemoOrder(normalized) && hasConfirmedPayment(normalized)) merged.set(normalized.id, normalized);
       });
-      localOrders.forEach((order) => { if (!merged.has(order.id)) merged.set(order.id, order); });
+      if (remote.error) localOrders.forEach((order) => { if (!merged.has(order.id)) merged.set(order.id, order); });
       const nextOrders = Array.from(merged.values());
       setOrders((current) => orderListsEqual(current, nextOrders) ? current : nextOrders);
       const [catalog, variantsRemote] = await Promise.all([fetchCatalogProducts(), fetchStoreSetting("productVariants")]);

@@ -135,6 +135,14 @@ test("admin retains the external UPI label for POS orders", async () => {
   assert.match(adminPage, /source\.posPaymentMethod === "External UPI"/);
 });
 
+test("admin treats live orders as authoritative over a stale browser cache", async () => {
+  const adminPage = await readFile(new URL("../app/admin/page.tsx", import.meta.url), "utf8");
+
+  assert.match(adminPage, /if \(remote\.error && !isLocalTestPreview\)/);
+  assert.match(adminPage, /if \(remote\.error\) localOrders\.forEach/);
+  assert.match(adminPage, /const storedOrders = ordersRemote\.error \? localOrders : \(ordersRemote\.data \|\| \[\]\);/);
+});
+
 test("production worker exposes authenticated Delhivery admin routes", async () => {
   const worker = await readFile(new URL("../worker/site-api.ts", import.meta.url), "utf8");
   assert.match(worker, /adminDelhiveryConfigRoute/);
