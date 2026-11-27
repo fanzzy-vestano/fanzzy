@@ -50,5 +50,21 @@ export const customerAuthorizedFetch = (url: string, init: RequestInit = {}) => 
 
 export const adminApiFetch = async (path: string, init: RequestInit = {}) => {
   const token = supabase ? (await supabase.auth.getSession()).data.session?.access_token || "" : "";
-  return siteApiFetch(path, withBearer(init, token));
+  const firstResponse = await siteApiFetch(path, withBearer(init, token));
+  const method = (init.method || "GET").toUpperCase();
+
+  // An open admin tab can retain an expired Supabase access token while the
+  // browser still has a refresh token. Recover one failed read in place so the
+  // dashboard cannot silently fall back to an older locally saved order list.
+  // Writes intentionally keep their existing one-request behavior.
+  if (firstResponse.status !== 401 || method !== "GET" || !supabase) return firstResponse;
+
+  try {
+    const { data, error } = await supabase.auth.refreshSession();
+    const refreshedToken = error ? "" : data.session?.access_token || "";
+    if (!refreshedToken || refreshedToken === token) return firstResponse;
+    return siteApiFetch(path, withBearer(init, refreshedToken));
+  } catch {
+    return firstResponse;
+  }
 };

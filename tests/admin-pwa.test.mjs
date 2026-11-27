@@ -45,6 +45,20 @@ test("shared service worker forces a fresh admin document while leaving APIs alo
   }
   assert.deepEqual(fetchOptions.map((options) => options?.cache), ["no-store", "no-store"]);
 
+  let adminAssetIntercepted = false;
+  listeners.get("fetch")({
+    request: {
+      method: "GET",
+      url: "https://fanzzy.in/_next/static/chunks/admin.js",
+      destination: "script",
+      referrer: "https://fanzzy.in/admin/",
+    },
+    respondWith: () => { adminAssetIntercepted = true; },
+    waitUntil: () => {},
+  });
+  assert.equal(adminAssetIntercepted, true, "admin scripts must bypass the asset cache");
+  assert.equal(fetchOptions.at(-1)?.cache, "no-store");
+
   let intercepted = false;
   listeners.get("fetch")({
     request: { method: "GET", url: "https://fanzzy.in/api/admin/products", mode: "navigate" },
@@ -59,6 +73,16 @@ test("a worker replacement reloads an already-controlled page", async () => {
   assert.match(install, /window\.location\.reload\(\)/);
   assert.match(install, /hadController/);
   assert.match(install, /updateViaCache:\s*"none"/);
+});
+
+test("admin reads recover once from an expired access token without retrying writes", async () => {
+  const source = await readFile(new URL("../lib/site-api-client.ts", import.meta.url), "utf8");
+
+  assert.match(source, /const method = \(init\.method \|\| "GET"\)\.toUpperCase\(\);/);
+  assert.match(source, /firstResponse\.status !== 401 \|\| method !== "GET" \|\| !supabase/);
+  assert.match(source, /supabase\.auth\.refreshSession\(\)/);
+  assert.match(source, /if \(!refreshedToken \|\| refreshedToken === token\) return firstResponse;/);
+  assert.match(source, /return siteApiFetch\(path, withBearer\(init, refreshedToken\)\);/);
 });
 
 test("static Pages build never injects an admin password", async () => {
