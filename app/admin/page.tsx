@@ -569,7 +569,7 @@ type OrderStatusFilter = "all" | OrderStatus | OrderReturnStatus;
 type PromotionCartLine = { groupId: string; offerId: string; role: "paid" | "free" | "bundle"; label: string; regularPrice: number; linePrice: number };
 type OrderItem = { name: string; productName?: string; quantity: number; price: string; productId?: string; image?: string; variantName?: string; variantImage?: string; size?: string; cancelled?: boolean; promotion?: PromotionCartLine };
 type DelhiveryScan = { status: string; date?: string; location?: string; instructions?: string };
-type PosPaymentMethod = "Cash" | "UPI" | "Card";
+type PosPaymentMethod = "Cash" | "UPI" | "External UPI" | "Card";
 type PosUpiAttempt = {
   order: PosCheckoutOrder;
   cartFingerprint: string;
@@ -9192,6 +9192,7 @@ function PosWorkspace({
   const [error, setError] = useState("");
   const [customerName, setCustomerName] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
+  const [saleDate, setSaleDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [discountValue, setDiscountValue] = useState("");
   const [posPromotions, setPosPromotions] = useState<SalesPromotion[]>([]);
   const [posCouponCode, setPosCouponCode] = useState("");
@@ -9607,6 +9608,7 @@ function PosWorkspace({
     setLockedPosPromotion(null);
     setCustomerName("");
     setCustomerPhone("");
+    setSaleDate(new Date().toISOString().slice(0, 10));
     setLastProduct(null);
     setError("");
     setLastSale(null);
@@ -9635,6 +9637,11 @@ function PosWorkspace({
       setError(posUpi.status === "paid"
         ? "The current bill does not match the confirmed UPI payment."
         : "Confirm the UPI payment before completing this sale.");
+      return;
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(saleDate) || saleDate > today) {
+      setError("Enter a valid sale date that is not in the future.");
       return;
     }
     const unavailable = cartLines.find(({ product, selection, quantity }) => product.status === "Draft" || quantity > selection.stock);
@@ -9684,7 +9691,7 @@ function PosWorkspace({
       const order: OrderRecord = {
         id: upiOrder?.saleId || `#FZ-POS-${token}`,
         invoiceNumber: `POS-${token}`,
-        date: now.toISOString().slice(0, 10),
+        date: saleDate,
         createdAt: now.toISOString(),
         status: "Delivered",
         total: formatAdminCurrency(total),
@@ -9736,6 +9743,7 @@ function PosWorkspace({
       setLockedPosPromotion(null);
       setCustomerName("");
       setCustomerPhone("");
+      setSaleDate(new Date().toISOString().slice(0, 10));
       setLastProduct(null);
       updatePosUpi({ status: "idle" });
       setLastSale(order);
@@ -9790,8 +9798,9 @@ function PosWorkspace({
           <div className="pos-cart-lines">
             {cartLines.length ? cartLines.map(({ product, selection, quantity }) => <article className="pos-cart-line" key={selection.key}><div className="pos-cart-line-image">{selection.image ? <img src={selection.image} alt="" /> : <span>✦</span>}</div><div><strong>{product.name}</strong><small>{selection.sku}{selection.variantName ? ` · ${selection.variantName}` : selection.size ? ` · Size ${selection.size}` : ""}</small><div className="pos-quantity"><button type="button" onClick={() => updateQuantity(selection, -1)} aria-label={`Decrease ${product.name}`} disabled={upiPaymentActive}>−</button><span>{quantity}</span><button type="button" onClick={() => updateQuantity(selection, 1)} aria-label={`Increase ${product.name}`} disabled={upiPaymentActive}>+</button></div></div><span><b>{formatAdminCurrency(parseMoney(selection.price) * quantity)}</b><button type="button" onClick={() => updateQuantity(selection, -quantity)} disabled={upiPaymentActive}>Remove</button></span></article>) : <div className="pos-empty-cart"><span>▣</span><strong>Ready to scan</strong><small>Scan a barcode or tap a product to begin the sale.</small></div>}
           </div>
-          <div className="pos-customer-fields"><label>Customer name <input value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="Walk-in customer" /></label><label>Mobile number <input value={customerPhone} onChange={(event) => setCustomerPhone(event.target.value.replace(/\D/g, "").slice(0, 10))} inputMode="numeric" placeholder="Optional" /></label></div>
-          <div className="pos-payment-section"><span>Payment method</span><div>{(["Cash", "UPI", "Card"] as PosPaymentMethod[]).map((method) => <button type="button" key={method} className={paymentMethod === method ? "active" : ""} onClick={() => choosePaymentMethod(method)}>{method}</button>)}</div></div>
+          <div className="pos-customer-fields"><label>Customer name <input value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="Walk-in customer" /></label><label>Mobile number <input value={customerPhone} onChange={(event) => setCustomerPhone(event.target.value.replace(/\D/g, "").slice(0, 10))} inputMode="numeric" placeholder="Optional" /></label><label>Original sale date <input type="date" value={saleDate} max={new Date().toISOString().slice(0, 10)} onChange={(event) => setSaleDate(event.target.value)} disabled={upiPaymentActive} /></label></div>
+          <div className="pos-payment-section"><span>Payment method</span><div>{(["Cash", "UPI", "External UPI", "Card"] as PosPaymentMethod[]).map((method) => <button type="button" key={method} className={paymentMethod === method ? "active" : ""} onClick={() => choosePaymentMethod(method)}>{method}</button>)}</div></div>
+          {paymentMethod === "External UPI" && <p className="pos-external-upi-notice">Record only after confirming payment on the non-Razorpay UPI scanner. This sale will not contain a Razorpay transaction ID.</p>}
           {paymentMethod === "UPI" && cartLines.length > 0 && <section className={`pos-upi-qr pos-upi-qr-${posUpi.status}`} aria-live="polite">
             {(posUpi.status === "error" || posUpi.status === "review") && <span className="pos-upi-qr-error-icon" aria-hidden="true">!</span>}
             {(posUpi.status === "loading" || posUpi.status === "checking") && <span className="pos-upi-qr-loader" aria-hidden="true" />}
