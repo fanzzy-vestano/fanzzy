@@ -1,4 +1,4 @@
-const CACHE_NAME = "fanzzy-shell-v5";
+const CACHE_NAME = "fanzzy-shell-v6";
 const APP_SHELL = [
   "/",
   "/manifest.webmanifest",
@@ -35,15 +35,6 @@ const cacheResponse = async (request, response) => {
     await trimCache(cache);
   } catch {
     // Offline caching must never discard a successful network response.
-  }
-};
-
-const isAdminAssetRequest = (request) => {
-  try {
-    const referrer = new URL(request.referrer || "");
-    return referrer.origin === self.location.origin && referrer.pathname.startsWith("/admin");
-  } catch {
-    return false;
   }
 };
 
@@ -95,11 +86,12 @@ self.addEventListener("fetch", (event) => {
   }
 
   if (["style", "script", "image", "font"].includes(request.destination)) {
-    const refreshAdminAsset = isAdminAssetRequest(request) && ["style", "script"].includes(request.destination);
+    const refreshApplicationAsset = ["style", "script"].includes(request.destination);
     event.respondWith(
-      // Admin scripts are deliberately revalidated. This prevents an open
-      // dashboard from pairing a fresh HTML document with an older JS bundle.
-      fetch(request, refreshAdminAsset ? { cache: "no-store" } : undefined)
+      // Browsers may expose subresource referrers as `about:client`, so do
+      // not infer the current page from that value. Revalidate application
+      // code for every page while keeping display assets available offline.
+      fetch(request, refreshApplicationAsset ? { cache: "no-store" } : undefined)
         .then((response) => {
           if (response.ok) {
             const copy = response.clone();

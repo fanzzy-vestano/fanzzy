@@ -23,7 +23,7 @@ test("admin has its own install identity and launches the authenticated admin ro
   }
 });
 
-test("shared service worker forces a fresh admin document while leaving APIs alone", async () => {
+test("shared service worker forces fresh application code while leaving APIs alone", async () => {
   const listeners = new Map();
   const fetchOptions = [];
   vm.runInNewContext((await readPublic("sw.js")).toString(), {
@@ -57,6 +57,20 @@ test("shared service worker forces a fresh admin document while leaving APIs alo
     waitUntil: () => {},
   });
   assert.equal(adminAssetIntercepted, true, "admin scripts must bypass the asset cache");
+  assert.equal(fetchOptions.at(-1)?.cache, "no-store");
+
+  let storefrontAssetIntercepted = false;
+  listeners.get("fetch")({
+    request: {
+      method: "GET",
+      url: "https://fanzzy.in/_next/static/chunks/storefront.js",
+      destination: "script",
+      referrer: "about:client",
+    },
+    respondWith: () => { storefrontAssetIntercepted = true; },
+    waitUntil: () => {},
+  });
+  assert.equal(storefrontAssetIntercepted, true, "scripts must not depend on an unreliable referrer");
   assert.equal(fetchOptions.at(-1)?.cache, "no-store");
 
   let intercepted = false;
