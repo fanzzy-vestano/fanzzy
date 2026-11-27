@@ -6,6 +6,7 @@ import test from "node:test";
 const require = createRequire(import.meta.url);
 const { PGlite } = require("@electric-sql/pglite");
 const migration = readFileSync(new URL("../supabase/migrations/20261021_atomic_pos_sales.sql", import.meta.url), "utf8");
+const externalUpiMigration = readFileSync(new URL("../supabase/migrations/20261127_external_upi_pos_sales.sql", import.meta.url), "utf8");
 const schema = readFileSync(new URL("../supabase/schema.sql", import.meta.url), "utf8").split("insert into public.products")[0];
 
 test("atomic POS migration against local PostgreSQL", async t => {
@@ -13,6 +14,7 @@ test("atomic POS migration against local PostgreSQL", async t => {
   await db.exec("create role anon; create role authenticated; create role service_role bypassrls;");
   await db.exec(schema);
   await db.exec(migration);
+  await db.exec(externalUpiMigration);
   const reset = async (variants = {}, sizes = {}) => {
     await db.exec("truncate public.products, public.store_settings, public.pos_sale_commits;");
     await db.query("insert into public.products(sku,name,stock,price,status) values ('RING','Local ring',10,55,'Published'),('SIZE','Local size',5,20,'Published')");
@@ -53,6 +55,24 @@ test("atomic POS migration against local PostgreSQL", async t => {
       assert.equal(result.order.posPaymentMethod, "Card");
       assert.equal(result.order.total, "₹100");
       assert.equal(result.order.razorpayPaymentId, undefined);
+    });
+    await t.test("staff-confirmed external UPI sale is labelled accurately and deducts stock once", async () => {
+      await reset();
+      const result = await commit(bill("#FZ-POS-EXTUPI001", {
+        date: "2026-11-23",
+        posPaymentMethod: "External UPI",
+      }));
+      assert.equal(await stock("RING"), 8);
+      assert.equal(result.order.date, "2026-11-23");
+      assert.equal(result.order.posPaymentMethod, "External UPI");
+      assert.equal(result.order.paymentStatus, "paid");
+      assert.equal(result.order.razorpayPaymentId, undefined);
+      const replay = await commit(bill("#FZ-POS-EXTUPI001", {
+        date: "2026-11-23",
+        posPaymentMethod: "External UPI",
+      }));
+      assert.equal(replay.replayed, true);
+      assert.equal(await stock("RING"), 8);
     });
     await t.test("different payload cannot reuse a committed reference", async () => {
       await reset(); await commit(bill());

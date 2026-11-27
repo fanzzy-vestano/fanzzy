@@ -1,6 +1,7 @@
 "use client";
 import { browserLocalStorage, browserSessionStorage, prepareBrowserStorage, flushBrowserStorage, batchBrowserStorage } from "../lib/browser-storage";
 import { receiveTransferredGuestCart } from "../lib/cart-navigation";
+import { applyLocalPreviewInventory } from "../lib/pos-sale-client";
 
 /* eslint-disable react-hooks/set-state-in-effect, react/no-unescaped-entities */
 
@@ -770,6 +771,18 @@ const isProductOutOfStock = (product: Product) => getProductVariantType(product)
     ? getProductSizes(product).every((size) => getSizeStock(product, size) <= 0)
     : product.stock <= 0;
 
+// In local-only POS mode, replay browser-only sales for the storefront too.
+// This keeps customer availability in step with the local admin preview while
+// leaving the shared/live catalogue untouched.
+const applyStorefrontLocalPreviewInventory = (products: Product[]) =>
+  applyLocalPreviewInventory(products.map((product) => ({
+    ...product,
+    sku: product.sku || product.id,
+    status: "Published" as const,
+    variants: product.variants || [],
+    sizeStock: product.sizeStock || {},
+  })));
+
 const ProductCard = memo(function ProductCard({ product, wished, promotions, cartQuantity, isLuxury, onWishlist, onAdd, onDecrease, onIncrease, onQuickView, onImageZoom }: { product: Product; wished: boolean; promotions: PromotionOffer[]; cartQuantity: number; isLuxury?: boolean; onWishlist: () => void; onAdd: () => void; onDecrease: () => void; onIncrease: () => void; onQuickView: () => void; onImageZoom: () => void }) {
   const isPriceUnavailable = !hasValidSellingPrice(product.price);
   const isOutOfStock = isProductOutOfStock(product);
@@ -1284,14 +1297,15 @@ export default function Home() {
         }));
         // Supabase is the shared catalog. Local storage is only a fallback for
         // devices that are offline or when Supabase has not been configured.
-        setProducts(remoteWithLocalVariants);
-        persistStorefrontProductCache(remoteWithLocalVariants);
+        const previewInventory = applyStorefrontLocalPreviewInventory(remoteWithLocalVariants);
+        setProducts(previewInventory);
+        persistStorefrontProductCache(previewInventory);
         setCatalogError(null);
         setCatalogLoading(false);
         return;
       }
       if (localProducts.length) {
-        setProducts(filterCatalogProducts(localProducts, "general"));
+        setProducts(applyStorefrontLocalPreviewInventory(filterCatalogProducts(localProducts, "general")));
         setCatalogError(null);
       } else {
         setProducts(defaultProducts);
@@ -1321,12 +1335,12 @@ export default function Home() {
     };
     const cachedProducts = readCachedStorefrontProducts();
     if (cachedProducts.length) {
-      setProducts(cachedProducts);
+      setProducts(applyStorefrontLocalPreviewInventory(cachedProducts));
       setCatalogLoading(false);
     }
     void runSyncProducts();
     const onProductsStorage = (event: StorageEvent) => {
-      if (!event.key || ["fanzzy-products", localProductVariantsKey, "fanzzy-product-variant-type", "fanzzy-product-sizes", "fanzzy-product-size-stock", "fanzzy-product-image-adjustments", "fanzzy-product-bill-names", "fanzzy-product-supplier-names"].includes(event.key)) runSyncProducts();
+      if (!event.key || ["fanzzy-products", "fanzzy-orders", localProductVariantsKey, "fanzzy-product-variant-type", "fanzzy-product-sizes", "fanzzy-product-size-stock", "fanzzy-product-image-adjustments", "fanzzy-product-bill-names", "fanzzy-product-supplier-names"].includes(event.key)) runSyncProducts();
     };
     const onProductsUpdated = () => { void runSyncProducts(); };
     const unsubscribeFromCatalogProducts = subscribeToCatalogProducts(runSyncProducts);

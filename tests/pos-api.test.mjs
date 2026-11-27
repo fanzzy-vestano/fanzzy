@@ -42,6 +42,80 @@ test("POS endpoint makes one privileged RPC and preserves errors without a legac
   }
 });
 
+test("local-only POS preview uses selected option stock even when catalogue quantities are stored as text", () => {
+  const client = load("lib/pos-sale-client.ts", {
+    imports: {
+      "./browser-storage": { browserLocalStorage: {}, prepareBrowserStorage: async () => {}, flushBrowserStorage: async () => true },
+      "./site-api-client": { adminApiFetch: async () => { throw Error("Local preview must not call the admin API"); } },
+    },
+    env: { NEXT_PUBLIC_LOCAL_POS_ONLY: "true" },
+  });
+  const order = {
+    id: "#FZ-POS-LOCAL-PREVIEW", date: "2026-11-23", total: "₹418", customerName: "Walk-in customer", posPaymentMethod: "External UPI",
+    items: [
+      { productId: "FZ-GOLD-474", variantName: "Option 1", quantity: 1, price: "₹349" },
+      { productId: "FZ-CRYS-237", variantName: "Option 1", quantity: 1, price: "₹69" },
+    ],
+  };
+  const result = client.commitLocalPosSale(order, [
+    { sku: "FZ-GOLD-474", stock: 0, status: "Published", variants: [{ name: "", image: "", stock: "1" }], sizeStock: {} },
+    { sku: "FZ-CRYS-237", stock: 0, status: "Published", variants: [{ name: "Option 1", image: "", stock: "3" }], sizeStock: {} },
+  ], []);
+  assert.equal(result.order.id, order.id);
+  assert.equal(result.orders.length, 1);
+  assert.equal(result.products.find(product => product.sku === "FZ-GOLD-474").variants[0].stock, 0);
+  assert.equal(result.products.find(product => product.sku === "FZ-CRYS-237").variants[0].stock, 2);
+});
+
+test("local-only catalogue reload reapplies saved preview order stock once", () => {
+  const orders = [{
+    id: "#FZ-POS-2C99AF", createdAt: "2026-11-27T05:41:00.000Z", localPreview: true, inventoryAdjusted: true,
+    items: [
+      { productId: "FZ-GOLD-474", variantName: "Option 1", quantity: 1 },
+      { productId: "FZ-CRYS-237", variantName: "Option 1", quantity: 1 },
+    ],
+  }];
+  const client = load("lib/pos-sale-client.ts", {
+    imports: {
+      "./browser-storage": {
+        browserLocalStorage: { getItem: key => key === "fanzzy-orders" ? JSON.stringify(orders) : null },
+        prepareBrowserStorage: async () => {}, flushBrowserStorage: async () => true,
+      },
+      "./site-api-client": { adminApiFetch: async () => { throw Error("Local preview must not call the admin API"); } },
+    },
+    env: { NEXT_PUBLIC_LOCAL_POS_ONLY: "true" },
+  });
+  const baseCatalog = [
+    { sku: "FZ-GOLD-474", stock: 1, status: "Low stock", variants: [{ name: "", image: "", stock: 1 }], sizeStock: {} },
+    { sku: "FZ-CRYS-237", stock: 3, status: "Low stock", variants: [{ name: "Option 1", image: "", stock: 3 }], sizeStock: {} },
+  ];
+  const adjusted = client.applyLocalPreviewInventory(baseCatalog);
+  assert.equal(adjusted.find(product => product.sku === "FZ-GOLD-474").stock, 0);
+  assert.equal(adjusted.find(product => product.sku === "FZ-GOLD-474").variants[0].stock, 0);
+  assert.equal(adjusted.find(product => product.sku === "FZ-CRYS-237").stock, 2);
+  assert.equal(adjusted.find(product => product.sku === "FZ-CRYS-237").variants[0].stock, 2);
+  assert.deepEqual(client.applyLocalPreviewInventory(baseCatalog), adjusted, "a refresh must not double-deduct a saved local sale");
+});
+
+test("local preview repairs the old full-UUID POS identifier without touching other orders", () => {
+  const client = load("lib/pos-sale-client.ts", {
+    imports: {
+      "./browser-storage": { browserLocalStorage: {}, prepareBrowserStorage: async () => {}, flushBrowserStorage: async () => true },
+      "./site-api-client": { adminApiFetch: async () => { throw Error("Unexpected admin API call"); } },
+    },
+  });
+  const longToken = "EA5414ADF1484965B7620B4C432C99AF";
+  const orders = [
+    { id: `#FZ-POS-${longToken}`, invoiceNumber: `POS-${longToken}`, posPaymentMethod: "External UPI" },
+    { id: "#FZ-KEEP", posPaymentMethod: "Card" },
+  ];
+  const migrated = client.migrateLocalPreviewOrderIds(orders);
+  assert.equal(migrated[0].id, "#FZ-POS-2C99AF");
+  assert.equal(migrated[0].invoiceNumber, "POS-2C99AF");
+  assert.equal(migrated[0].localPreview, true);
+  assert.equal(migrated[1], orders[1]);
+});
+
 test("POS UPI finalizer rejects uncaptured, wrong-method and unconfigured requests before writing", async () => {
   const server = load("lib/pos-sale-server.ts");
   const payment = { id: "pay_LOCAL", order_id: "order_LOCAL", amount: 11000, status: "captured", method: "upi" };

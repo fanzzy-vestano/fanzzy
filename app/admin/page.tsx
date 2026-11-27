@@ -1,6 +1,6 @@
 "use client";
 import { browserLocalStorage, prepareBrowserStorage, flushBrowserStorage, batchBrowserStorage } from "../../lib/browser-storage";
-import { commitAtomicPosSale, readPendingPosSale } from "../../lib/pos-sale-client";
+import { applyLocalPreviewInventory, commitAtomicPosSale, commitLocalPosSale, createPosSaleToken, isLocalPosOnly, migrateLocalPreviewOrderIds, readPendingPosSale } from "../../lib/pos-sale-client";
 /* eslint-disable react-hooks/set-state-in-effect, react-hooks/refs */
 
 import { Component, memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ErrorInfo } from "react";
@@ -565,7 +565,7 @@ type OrderStatusFilter = "all" | OrderStatus;
 type PromotionCartLine = { groupId: string; offerId: string; role: "paid" | "free" | "bundle"; label: string; regularPrice: number; linePrice: number };
 type OrderItem = { name: string; productName?: string; quantity: number; price: string; productId?: string; image?: string; variantName?: string; variantImage?: string; size?: string; promotion?: PromotionCartLine };
 type DelhiveryScan = { status: string; date?: string; location?: string; instructions?: string };
-type PosPaymentMethod = "Cash" | "UPI" | "Card";
+type PosPaymentMethod = "Cash" | "UPI" | "External UPI" | "Card";
 type PosQrState = {
   status: "idle" | "loading" | "ready" | "opening" | "pending" | "paid" | "error" | "cancelled";
   orderId?: string;
@@ -752,7 +752,7 @@ const normalizeOrderRecordForDisplay = (value: unknown): OrderRecord | null => {
     couponDiscount: safeOrderNumber(source.couponDiscount) || undefined,
     paymentStatus,
     paymentMethod,
-    posPaymentMethod: source.posPaymentMethod === "Cash" || source.posPaymentMethod === "UPI" || source.posPaymentMethod === "Card" ? source.posPaymentMethod : undefined,
+    posPaymentMethod: source.posPaymentMethod === "Cash" || source.posPaymentMethod === "UPI" || source.posPaymentMethod === "External UPI" || source.posPaymentMethod === "Card" ? source.posPaymentMethod : undefined,
     posSale: source.posSale === true,
     codCharge: safeOrderNumber(source.codCharge) || undefined,
     razorpayOrderId: safeOrderString(source.razorpayOrderId) || undefined,
@@ -1652,7 +1652,9 @@ function AdminDashboard() {
       try {
         const stored = browserLocalStorage.getItem("fanzzy-orders");
         const parsed = stored ? JSON.parse(stored) as OrderRecord[] : [];
-        if (Array.isArray(parsed)) parsed.forEach((order) => {
+        const repaired = isLocalPosOnly() && Array.isArray(parsed) ? migrateLocalPreviewOrderIds(parsed) : parsed;
+        if (repaired !== parsed) browserLocalStorage.setItem("fanzzy-orders", JSON.stringify(repaired));
+        if (Array.isArray(repaired)) repaired.forEach((order) => {
           if (order?.id && !isDemoOrder(order) && !merged.has(order.id)) merged.set(order.id, order);
         });
       } catch {
@@ -8690,6 +8692,7 @@ function PosWorkspace({
   const [error, setError] = useState("");
   const [customerName, setCustomerName] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
+  const [saleDate, setSaleDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [discountValue, setDiscountValue] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<PosPaymentMethod>("Cash");
   const [checkoutBusy, setCheckoutBusy] = useState(false);
@@ -8777,7 +8780,8 @@ function PosWorkspace({
           variantType: product.variantType || variantTypeMap[sku],
         };
       }).filter((product) => product.sku);
-      const barcodeResult = ensureProductBarcodes(mappedProducts);
+      const previewInventory = applyLocalPreviewInventory(mappedProducts);
+      const barcodeResult = ensureProductBarcodes(previewInventory);
       if (barcodeResult.changed) void saveProductBarcodes(barcodeResult.products);
       setProducts(barcodeResult.products);
       setLoading(false);
@@ -9122,6 +9126,11 @@ function PosWorkspace({
       setError(posQr.status === "error" ? posQr.message || "Could not create the UPI QR code." : "Ask the customer to scan the Razorpay QR and wait for payment confirmation.");
       return;
     }
+    const today = new Date().toISOString().slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(saleDate) || saleDate > today) {
+      setError("Enter a valid sale date that is not in the future.");
+      return;
+    }
     const unavailable = cartLines.find(({ product, selection, quantity }) => product.status === "Draft" || quantity > selection.stock);
     if (unavailable) {
       setError(`${unavailable.product.name} does not have enough stock.`);
@@ -9134,11 +9143,13 @@ function PosWorkspace({
       const now = new Date();
       const token = paymentMethod === "UPI" && posOrderIdRef.current
         ? posOrderIdRef.current.replace(/^#FZ-POS-/i, "")
-        : globalThis.crypto?.randomUUID?.().replace(/-/g, "").toUpperCase() || String(Date.now()).slice(-6);
+        : createPosSaleToken();
       const order: OrderRecord = {
         id: paymentMethod === "UPI" && posOrderIdRef.current ? posOrderIdRef.current : `#FZ-POS-${token}`,
         invoiceNumber: `POS-${token}`,
-        date: now.toISOString().slice(0, 10),
+        // Preserve the original trading date for a recovered counter sale while
+        // retaining the current timestamp as the record's audit creation time.
+        date: saleDate,
         createdAt: now.toISOString(),
         status: "Delivered",
         total: formatPosCurrency(total),
@@ -9168,7 +9179,21 @@ function PosWorkspace({
           size: selection.size,
         })),
       };
-      const committed = await commitAtomicPosSale(order);
+      const localOrders = (() => {
+        try {
+          const stored = JSON.parse(browserLocalStorage.getItem("fanzzy-orders") || "[]") as OrderRecord[];
+          return Array.isArray(stored) ? stored : [];
+        } catch { return []; }
+      })();
+      const committed = isLocalPosOnly()
+        ? commitLocalPosSale(order, products.map((product) => ({
+          sku: product.sku,
+          stock: product.stock,
+          status: product.status,
+          variants: product.variants || [],
+          sizeStock: product.sizeStock || {},
+        })), localOrders)
+        : await commitAtomicPosSale(order);
       const nextProducts = products.map((product) => {
         const snapshot = committed.products.find((row) => row.sku === product.sku);
         return snapshot ? { ...product, ...snapshot } : product;
@@ -9183,6 +9208,7 @@ function PosWorkspace({
       setDiscountValue("");
       setCustomerName("");
       setCustomerPhone("");
+      setSaleDate(new Date().toISOString().slice(0, 10));
       setLastProduct(null);
       posQrRef.current = { status: "idle" };
       setPosQr({ status: "idle" });
@@ -9190,7 +9216,7 @@ function PosWorkspace({
       setLastCashChange(cashPayment?.changePaise != null ? cashPayment.changePaise / 100 : null);
       setCashDialogOpen(false);
       if (paymentMethod === "Cash") window.requestAnimationFrame(() => inputRef.current?.focus());
-      onNotify(`${committed.order.id} sale completed`);
+      onNotify(`${committed.order.id} ${isLocalPosOnly() ? "saved locally" : "sale completed"}`);
     } catch (saleError) {
       setPendingSaleId(readPendingPosSale<OrderRecord>()?.id || null);
       setError(saleError instanceof Error ? saleError.message : "Could not complete this POS sale.");
@@ -9232,6 +9258,7 @@ function PosWorkspace({
         <div><p className="eyebrow">LIVE POINT OF SALE</p><h2 id="pos-workspace-title">Counter POS</h2><p>Scan a barcode to add products instantly, take payment, and complete an in-store sale.</p></div>
         <span className="pos-live-badge"><i /> Scanner ready</span>
       </div>
+      {isLocalPosOnly() && <p className="pos-external-upi-notice"><strong>Local-only POS mode.</strong> Sales and stock changes in this preview stay in this browser and are never sent to the live database.</p>}
       {pendingSaleId && <div className="pos-error" role="status">Sale {pendingSaleId} needs confirmation. Retry this saved sale before accepting another payment. <button type="button" className="module-secondary" disabled={checkoutBusy} onClick={() => void retrySavedSale()}>Retry saved sale</button></div>}
       <div className="pos-layout" inert={cashDialogOpen || checkoutBusy}>
         <div className="pos-catalog-panel">
@@ -9254,8 +9281,9 @@ function PosWorkspace({
           <div className="pos-cart-lines">
             {cartLines.length ? cartLines.map(({ product, selection, quantity }) => <article className="pos-cart-line" key={selection.key}><div className="pos-cart-line-image">{selection.image ? <img src={selection.image} alt="" /> : <span>✦</span>}</div><div><strong>{product.name}</strong><small>{selection.sku}{selection.variantName ? ` · ${selection.variantName}` : selection.size ? ` · Size ${selection.size}` : ""}</small><div className="pos-quantity"><button type="button" onClick={() => updateQuantity(selection, -1)} aria-label={`Decrease ${product.name}`} disabled={upiPaymentActive}>−</button><span>{quantity}</span><button type="button" onClick={() => updateQuantity(selection, 1)} aria-label={`Increase ${product.name}`} disabled={upiPaymentActive}>+</button></div></div><span><b>{formatPosCurrency(parseMoney(selection.price) * quantity)}</b><button type="button" onClick={() => updateQuantity(selection, -quantity)} disabled={upiPaymentActive}>Remove</button></span></article>) : <div className="pos-empty-cart"><span>▣</span><strong>Ready to scan</strong><small>Scan a barcode or tap a product to begin the sale.</small></div>}
           </div>
-          <div className="pos-customer-fields"><label>Customer name <input value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="Walk-in customer" /></label><label>Mobile number <input value={customerPhone} onChange={(event) => setCustomerPhone(event.target.value.replace(/\D/g, "").slice(0, 10))} inputMode="numeric" placeholder="Optional" /></label></div>
-          <div className="pos-payment-section"><span>Payment method</span><div>{(["Cash", "UPI", "Card"] as PosPaymentMethod[]).map((method) => <button type="button" key={method} className={paymentMethod === method ? "active" : ""} onClick={() => choosePaymentMethod(method)}>{method}</button>)}</div></div>
+          <div className="pos-customer-fields"><label>Customer name <input value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="Walk-in customer" /></label><label>Mobile number <input value={customerPhone} onChange={(event) => setCustomerPhone(event.target.value.replace(/\D/g, "").slice(0, 10))} inputMode="numeric" placeholder="Optional" /></label><label>Original sale date <input type="date" value={saleDate} max={new Date().toISOString().slice(0, 10)} onChange={(event) => setSaleDate(event.target.value)} disabled={upiPaymentActive} /></label></div>
+          <div className="pos-payment-section"><span>Payment method</span><div>{(["Cash", "UPI", "External UPI", "Card"] as PosPaymentMethod[]).map((method) => <button type="button" key={method} className={paymentMethod === method ? "active" : ""} onClick={() => choosePaymentMethod(method)}>{method}</button>)}</div></div>
+          {paymentMethod === "External UPI" && <p className="pos-external-upi-notice">Record only after confirming the payment was received through a non-Razorpay UPI scanner. This entry will be marked External UPI and will not contain a Razorpay transaction ID.</p>}
           {paymentMethod === "UPI" && cartLines.length > 0 && <section className={`pos-upi-qr pos-upi-qr-${posQr.status}`} aria-live="polite">
             {posQr.status === "loading" && <><span className="pos-upi-qr-loader" /><div><strong>Preparing Razorpay Checkout…</strong><small>UPI payment will open securely in Razorpay Checkout.</small></div></>}
             {posQr.status === "error" && <><span className="pos-upi-qr-error">!</span><div><strong>UPI unavailable</strong><small>{posQr.message}</small><button type="button" onClick={() => setPosQrRefresh((current) => current + 1)}>Retry</button></div></>}
@@ -9811,7 +9839,12 @@ function ProductLibraryWorkspace({
           hoverImageAdjustments: normalizeImageAdjustments(savedAdjustments?.hoverImage),
         };
         });
-        const barcodeResult = ensureProductBarcodes(mappedCatalog);
+        const previewInventory = applyLocalPreviewInventory(mappedCatalog.map((product) => ({
+          ...product,
+          variants: product.variants || [],
+          sizeStock: product.sizeStock || {},
+        })));
+        const barcodeResult = ensureProductBarcodes(previewInventory);
         const mapped = barcodeResult.products;
         if (barcodeResult.changed) void saveProductBarcodes(mapped);
         // Supabase is the shared catalog. Never merge stale local records back
@@ -9885,7 +9918,8 @@ function ProductLibraryWorkspace({
            variants: localVariants,
                 };
               });
-          const barcodeResult = ensureProductBarcodes(mappedCatalog);
+          const previewInventory = applyLocalPreviewInventory(mappedCatalog);
+          const barcodeResult = ensureProductBarcodes(previewInventory);
           const mapped = barcodeResult.products;
           if (barcodeResult.changed) void saveProductBarcodes(mapped);
           setProducts(mapped);
