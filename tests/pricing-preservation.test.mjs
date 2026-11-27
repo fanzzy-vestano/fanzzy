@@ -52,6 +52,7 @@ async function load({ offline = false, cached = fixtures, pricing = settings } =
     saveProductPricing: async () => { writes.push("pricing"); },
     saveCatalogProduct: async () => { writes.push("product"); },
     saveStoreSetting: async (key) => { writes.push(key); },
+    applyLocalPreviewInventory: (products) => products,
   };
   dependencies.browserLocalStorage = loadBrowserStorage(dependencies.window).browserLocalStorage;
   await new Function(...Object.keys(dependencies), compiled)(...Object.values(dependencies));

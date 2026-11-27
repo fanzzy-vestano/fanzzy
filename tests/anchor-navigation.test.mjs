@@ -64,7 +64,7 @@ test("catalog loading has a bounded request timeout and retry fallback", () => {
 test("storefront hydrates cached products before the remote refresh", () => {
   assert.match(pageSource, /const readCachedStorefrontProducts = \(\): Product\[\] =>/);
   assert.match(pageSource, /const cachedProducts = readCachedStorefrontProducts\(\);/);
-  assert.match(pageSource, /if \(cachedProducts\.length\) \{[\s\S]*?setProducts\(cachedProducts\);[\s\S]*?setCatalogLoading\(false\);/);
+  assert.match(pageSource, /if \(cachedProducts\.length\) \{[\s\S]*?setProducts\([^;]*cachedProducts[^;]*\);[\s\S]*?setCatalogLoading\(false\);/);
   assert.match(pageSource, /const \[catalogProducts, setProducts\] = useState<Product\[\]>\(defaultProducts\);/);
 });
 
