@@ -38,24 +38,42 @@ export default function PwaInstall({ basePath = "" }: { basePath?: string }) {
   const [isIos] = useState(() => typeof navigator !== "undefined" && /iphone|ipad|ipod/i.test(navigator.userAgent));
 
   useEffect(() => {
+    let stopWorkerUpdates = () => undefined;
     if ("serviceWorker" in navigator) {
+      // A Pages deployment changes the app shell, while GitHub Pages may keep
+      // the HTML document in an ordinary browser cache for a few minutes. A
+      // new worker takes control immediately; refresh once at that point so
+      // the active tab starts the matching, current asset set automatically.
+      const hadController = Boolean(navigator.serviceWorker.controller);
+      let reloadingForWorkerUpdate = false;
+      const reloadForWorkerUpdate = () => {
+        if (!hadController || reloadingForWorkerUpdate) return;
+        reloadingForWorkerUpdate = true;
+        window.location.reload();
+      };
       const registerWorker = () => {
         void navigator.serviceWorker.register(`${basePath}/sw.js`, {
           scope: `${basePath || ""}/`,
           updateViaCache: "none",
         }).then((registration) => registration.update()).catch(() => undefined);
       };
+      navigator.serviceWorker.addEventListener("controllerchange", reloadForWorkerUpdate);
       window.addEventListener("load", registerWorker, { once: true });
       if (document.readyState === "complete") registerWorker();
+
+      stopWorkerUpdates = () => {
+        navigator.serviceWorker.removeEventListener("controllerchange", reloadForWorkerUpdate);
+        window.removeEventListener("load", registerWorker);
+      };
     }
 
     const currentPath = window.location.pathname;
-    if (currentPath.startsWith(`${basePath}/admin`) || currentPath === `${basePath}/vendor` || currentPath.startsWith(`${basePath}/vendor/`)) return;
+    if (currentPath.startsWith(`${basePath}/admin`) || currentPath === `${basePath}/vendor` || currentPath.startsWith(`${basePath}/vendor/`)) return stopWorkerUpdates;
     if (isStandaloneApp()) {
       rememberCompletedInstall();
-      return;
+      return stopWorkerUpdates;
     }
-    if (hasCompletedInstall()) return;
+    if (hasCompletedInstall()) return stopWorkerUpdates;
 
     const handleInstallPrompt = (event: Event) => {
       event.preventDefault();
@@ -77,6 +95,7 @@ export default function PwaInstall({ basePath = "" }: { basePath?: string }) {
     }, 1800);
 
     return () => {
+      stopWorkerUpdates();
       window.clearTimeout(fallbackTimer);
       window.removeEventListener("beforeinstallprompt", handleInstallPrompt);
       window.removeEventListener("appinstalled", handleInstalled);

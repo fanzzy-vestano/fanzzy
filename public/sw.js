@@ -1,4 +1,4 @@
-const CACHE_NAME = "fanzzy-shell-v3";
+const CACHE_NAME = "fanzzy-shell-v4";
 const APP_SHELL = [
   "/",
   "/manifest.webmanifest",
@@ -54,7 +54,6 @@ self.addEventListener("fetch", (event) => {
   const request = event.request;
   const url = new URL(request.url);
   if (request.method !== "GET" || url.origin !== self.location.origin || url.pathname.startsWith("/api/")) return;
-  if (url.pathname.startsWith("/admin")) return;
 
   // Only content-addressed display copies are immutable. Catalog, stock and
   // HTML remain network-first so returning customers see current data.
@@ -71,7 +70,9 @@ self.addEventListener("fetch", (event) => {
 
   if (request.mode === "navigate") {
     event.respondWith(
-      fetch(request)
+      // GitHub Pages caches HTML for up to ten minutes. Always revalidate page
+      // navigations so a deployment cannot leave the admin on a prior build.
+      fetch(request, { cache: "no-store" })
         .then((response) => {
           if (response.ok) {
             const copy = response.clone();

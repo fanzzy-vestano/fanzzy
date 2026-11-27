@@ -23,20 +23,42 @@ test("admin has its own install identity and launches the authenticated admin ro
   }
 });
 
-test("shared service worker leaves admin pages and APIs network-only", async () => {
+test("shared service worker forces a fresh admin document while leaving APIs alone", async () => {
   const listeners = new Map();
+  const fetchOptions = [];
   vm.runInNewContext((await readPublic("sw.js")).toString(), {
     URL,
+    Response,
+    fetch: async (_request, options) => {
+      fetchOptions.push(options);
+      return new Response("network");
+    },
     self: { location: { origin: "https://fanzzy.in" }, addEventListener: (type, handler) => listeners.set(type, handler) },
   });
-  for (const path of ["/admin", "/admin/", "/api/admin/products"]) {
+  for (const path of ["/admin", "/admin/"]) {
     let intercepted = false;
     listeners.get("fetch")({
       request: { method: "GET", url: `https://fanzzy.in${path}`, mode: "navigate" },
       respondWith: () => { intercepted = true; },
     });
-    assert.equal(intercepted, false, `${path} must not be cached`);
+    assert.equal(intercepted, true, `${path} must bypass the document cache`);
   }
+  assert.deepEqual(fetchOptions.map((options) => options?.cache), ["no-store", "no-store"]);
+
+  let intercepted = false;
+  listeners.get("fetch")({
+    request: { method: "GET", url: "https://fanzzy.in/api/admin/products", mode: "navigate" },
+    respondWith: () => { intercepted = true; },
+  });
+  assert.equal(intercepted, false, "APIs must stay outside the service-worker cache");
+});
+
+test("a worker replacement reloads an already-controlled page", async () => {
+  const install = await readFile(new URL("../app/pwa-install.tsx", import.meta.url), "utf8");
+  assert.match(install, /controllerchange/);
+  assert.match(install, /window\.location\.reload\(\)/);
+  assert.match(install, /hadController/);
+  assert.match(install, /updateViaCache:\s*"none"/);
 });
 
 test("static Pages build never injects an admin password", async () => {
